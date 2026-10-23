@@ -1,0 +1,12 @@
+[package]
+name = "ghostwrite-ai"
+description = "Claude in the editor: prompts and context, reply parsing, backends, and the review story."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ghostwrite-project.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+ureq.workspace = true

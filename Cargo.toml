@@ -1,37 +1,60 @@
-[package]
-name = "ghostwrite"
-version = "0.1.0"
-edition = "2024"
+# Ghostwrite: a helix-style editor with stepwise Claude stories.
+#
+# Layered like helix (and zed): pure crates at the bottom, the gpui app on
+# top. Nothing below `app` knows about the UI.
+#
+#   core     text, selections, motions, text objects, modal keys, syntax
+#   project  files, search, shell runs, file operations, persisted state
+#   lsp      language-server client
+#   ai       Claude: prompts, reply parsing, backends, the review story
+#   app      the gpui application (binary `ghostwrite`)
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/project", "crates/lsp", "crates/ai", "crates/app"]
+default-members = ["crates/app"]
 
-[dependencies]
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+ghostwrite-core = { path = "crates/core" }
+ghostwrite-project = { path = "crates/project" }
+ghostwrite-lsp = { path = "crates/lsp" }
+ghostwrite-ai = { path = "crates/ai" }
+
 anyhow = "1"
 futures = "0.3"
+# Shaders compile at launch: building them needs the Metal toolchain.
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 ignore = "0.4"
-trash = "5"
-gpui-kit = { version = "0.7", features = [
-    "tree-sitter-bash",
-    "tree-sitter-javascript",
-    "tree-sitter-markdown",
-    "tree-sitter-python",
-    "tree-sitter-rust",
-    "tree-sitter-toml",
-    "tree-sitter-typescript",
-] }
 lsp-types = { version = "0.97", features = ["proposed"] }
 regex = "1"
 serde_json = "1"
+trash = "5"
 ureq = { version = "3", features = ["json"] }
+
+tree-sitter = "0.27"
+tree-sitter-highlight = "0.27"
+tree-sitter-bash = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-css = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-html = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-md = "0.5"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-typescript = "0.23"
+tree-sitter-yaml = "0.7"
 
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
-
-[dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
-
-# A local copy of gpui-base with one addition: a "block gap" that reserves
-# height after a line, so inline Claude diffs can fold out and push code down.
-[patch.crates-io]
-gpui-base = { path = "vendor/gpui-base" }
+opt-level = 1
