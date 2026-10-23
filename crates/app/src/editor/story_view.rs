@@ -8,7 +8,7 @@
 
 use ghostwrite_ai::placement;
 use ghostwrite_ai::protocol::{self, Note};
-use ghostwrite_ai::{Item, Story};
+use ghostwrite_ai::{Item, Spot, Story};
 use gpui::{AnyElement, Entity, Hsla, div, prelude::*, px};
 
 use super::element::{Block, BlockSizes, Decoration};
@@ -68,35 +68,28 @@ impl StoryState {
         let story = self.story.as_ref();
         let prompt = |hint| ask.clone().map(|field| (field, hint));
         let indent_of = |line: usize| {
-            let text = doc.buffer.line(line);
+            let text = doc.buffer.line(line.min(doc.buffer.last_line()));
             let lead = &text[..text.len() - text.trim_start_matches([' ', '\t']).len()];
             lead.len() + lead.matches('\t').count() * 3
         };
-        let shown_here = |located: &Located| located.tab.and_then(|ix| project.tabs.get(ix)).is_some_and(|t| t.doc.id == doc.id);
+        let here = |located: &Located| located.tab.and_then(|ix| project.tabs.get(ix)).is_some_and(|t| t.doc.id == doc.id);
 
-        // Before asking, or waiting for the reply: where the question was
-        // asked (an item under review), else under the marked lines.
+        // Before asking, or waiting for the reply: where the answer is coming.
         let current = story.and_then(|s| Some((s.current()?, s.current_item()?)));
         let Some((id, item)) = current else {
-            let asked_at = story.and_then(Story::writing_about).and_then(|about| self.lines_of(project, about));
-            let (line, indent) = match &asked_at {
-                Some(located) if shown_here(located) => (located.near.end.saturating_sub(1), indent_of(located.near.start)),
-                Some(_) => return (vec![], None),
-                None if self.in_panel || self.doc != doc.id => return (vec![], None),
-                None => (self.lines.end.saturating_sub(1), indent_of(self.lines.start)),
-            };
+            let Some(Spot::Code(place)) = self.waiting_spot(project) else { return (vec![], None) };
+            let located = self.in_tab(project, place);
+            if !here(&located) {
+                return (vec![], None);
+            }
             let hint = waiting_hint(story);
             let rows = if ask.is_some() { vec![] } else { vec![Row::Hint(hint, theme.warning)] };
-            let spec = BlockSpec { indent, rows, prompt: prompt(if story.is_some() { "⏎ send · esc" } else { "⏎ ask · esc" }) };
-            return (vec![], Some(block(line, spec, theme)));
+            let spec = BlockSpec { indent: indent_of(located.near.start), rows, prompt: prompt(if story.is_some() { "⏎ send · esc" } else { "⏎ ask · esc" }) };
+            return (vec![], Some(block(located.near.end.saturating_sub(1), spec, theme)));
         };
-        if self.in_panel_item(id, &item) {
-            return (vec![], None);
-        }
 
-        let Some(located) = self.locate_at(project, id, &item).filter(shown_here) else {
-            return (vec![], None);
-        };
+        // In the code, in this tab (an answer in the panel shows there).
+        let Some(located) = self.locate(project, id).filter(here) else { return (vec![], None) };
         // An item in another file than the one asked about says which.
         let file = located.path.as_ref().map_or(String::new(), |p| format!("{} · ", project.display(p)));
         let progress = progress(story);
@@ -131,22 +124,22 @@ impl StoryState {
         }
     }
 
-    /// A story asked from the tour panel shows in the panel: the output it's
-    /// about, the prompt, what's happening, and answers not pinned to code.
-    pub(super) fn panel(&self, ask: Option<Entity<TextField>>, theme: &Theme) -> Option<AnyElement> {
-        if !self.in_panel {
+    /// A story asked from the tour panel shows there: the output it's about,
+    /// the prompt, what's happening, and answers that belong there.
+    pub(super) fn panel(&self, project: &Project, ask: Option<Entity<TextField>>, theme: &Theme) -> Option<AnyElement> {
+        if !self.origin.in_panel() {
             return None;
         }
         let story = self.story.as_ref();
         let current = story.and_then(|s| Some((s.current()?, s.current_item()?)));
         let (note, hint) = match &current {
-            Some((id, item @ Item::Note(note))) if self.in_panel_item(*id, item) => (Some(note.text.clone()), format!("⇥ next · ⏎ ask{}", progress(story))),
+            Some((id, Item::Note(note))) if self.spot(project, *id) == Some(Spot::Panel) => (Some(note.text.clone()), format!("⇥ next · ⏎ ask{}", progress(story))),
             // The current item is in the code; so is a question about it.
             Some(_) => return None,
-            None if story.and_then(Story::writing_about).is_some() => return None,
+            None if self.waiting_spot(project) != Some(Spot::Panel) => return None,
             None => (None, waiting_hint(story)),
         };
-        let context = self.output.iter().flat_map(|o| o.lines().skip(1)).take(ghostwrite_project::tour::PAGE_ROWS).map(|l| div().whitespace_nowrap().overflow_hidden().text_color(theme.muted_foreground).child(l.to_string()));
+        let context = self.origin.output().into_iter().flat_map(|o| o.lines().skip(1)).take(ghostwrite_project::tour::PAGE_ROWS).map(|l| div().whitespace_nowrap().overflow_hidden().text_color(theme.muted_foreground).child(l.to_string()));
         let row = |child: AnyElement| div().flex().items_center().gap_2().child(div().flex_none().text_xs().text_color(theme.warning).child("✦")).child(child);
         Some(
             div()

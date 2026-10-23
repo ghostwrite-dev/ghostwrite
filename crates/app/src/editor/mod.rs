@@ -445,7 +445,7 @@ impl Editor {
             Effect::FocusTree => self.enter_tree(cx),
             Effect::CommandLine => self.open_prompt(PromptKind::Command, "", window, cx),
             Effect::Search => self.open_prompt(PromptKind::Command, "grep ", window, cx),
-            Effect::Assist => self.open_story(None, "", window, cx),
+            Effect::Assist => self.open_story(ghostwrite_ai::Origin::Lines, "", window, cx),
             Effect::Cheatsheet => self.cheatsheet = true,
             Effect::GotoDefinition => self.goto_definition(window, cx),
             Effect::Hover => self.show_hover(window, cx),

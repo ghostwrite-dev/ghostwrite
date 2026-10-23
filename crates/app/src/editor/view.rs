@@ -399,7 +399,7 @@ impl gpui::Render for Editor {
                     .min_h_0()
                     .flex()
                     .children(tree)
-                    .child(div().flex_1().min_w_0().flex().flex_col().children(tabs).child(body).children(self.story.as_ref().and_then(|s| s.panel(self.ask_field(), &theme)))
+                    .child(div().flex_1().min_w_0().flex().flex_col().children(tabs).child(body).children(self.story.as_ref().and_then(|s| s.panel(&self.project, self.ask_field(), &theme)))
                             .children(self.tour.as_ref().and_then(|t| t.panel(&theme))).children(self.render_command_line(cx))),
             )
             .child(self.render_status(cx))

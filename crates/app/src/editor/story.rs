@@ -3,8 +3,8 @@
 //! accepts (or reads on), Backspace skips, Enter asks or redirects, Esc
 //! stops. A file to create, remove or rename is shown in the file tree.
 //!
-//! [`StoryState`] is the feature: a [`Story`] (the bookkeeping) placed in
-//! the [`Project`] with [`placement`]. It applies what's accepted and says
+//! [`StoryState`] is the feature: a [`Story`] (the bookkeeping) laid out in
+//! the [`Project`] with a [`Layout`]. It applies what's accepted and says
 //! what to show next; [`story_view`](super::story_view) draws it. The
 //! editor runs the request and switches tabs. When a story ends it's logged
 //! for the next ones, and Claude's rewritten notes (if any) are kept.
@@ -16,14 +16,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt as _;
 use ghostwrite_ai::backend::Listener;
-use ghostwrite_ai::placement::{self, Asked, Placer};
-use ghostwrite_ai::protocol::{self, Note, Step};
-use ghostwrite_ai::{Interaction, Item, ItemId, Request, Settled, Story, Verdict};
+use ghostwrite_ai::placement::{self, Asked, Place, Placer};
+use ghostwrite_ai::protocol::Step;
+use ghostwrite_ai::{Interaction, Item, ItemId, Layout, Origin, Request, Settled, Spot, Story, Verdict};
 use ghostwrite_core::{Mode, Range, Review};
 use ghostwrite_project::tree::Proposal;
 use ghostwrite_project::{fs, store};
 use gpui::{AppContext as _, Context, Task, Window};
 
+use super::project::ProjectFiles;
 use super::{Autoscroll, DocId, Editor, Project, PromptKind};
 
 pub(super) struct StoryState {
@@ -32,12 +33,10 @@ pub(super) struct StoryState {
     /// The document asked about, and the lines pointed at (zero-based, end exclusive).
     pub(super) doc: DocId,
     pub(super) lines: Lines<usize>,
-    /// Command output it's about (an error from `:sh`).
-    pub(super) output: Option<String>,
+    /// What it's about: the lines, an error to fix, or output asked about in its panel.
+    pub(super) origin: Origin,
     /// Docs from `space k`: shown without moving the cursor, as helix does.
     docs_note: bool,
-    /// Asked about a tour's output from its panel: answered there too.
-    pub(super) in_panel: bool,
     /// The item last brought into view.
     shown: Option<ItemId>,
     /// Asked from select mode: the selection to give back afterwards.
@@ -47,8 +46,8 @@ pub(super) struct StoryState {
     _task: Option<Task<()>>,
 }
 
-/// Where an item is: its tab (if its file is open), its file (`None`: the
-/// one asked about), and the lines to look for it near.
+/// Where an item is in the code: its tab (if its file is open), its file
+/// (`None`: the one asked about), and its lines (or the lines to look near).
 pub(super) struct Located {
     pub tab: Option<usize>,
     pub path: Option<PathBuf>,
@@ -66,7 +65,7 @@ pub(super) enum Waiting {
 
 /// What to show after the story moved on.
 pub(super) enum Show {
-    /// Nothing new (still waiting, or already showing it).
+    /// Nothing new (still waiting, already showing it, or it's in the panel).
     Nothing,
     /// This tab, where the current item is (its selection already set).
     Tab(usize),
@@ -97,20 +96,8 @@ impl Listener for Forward {
 }
 
 impl StoryState {
-    fn new(doc: DocId, lines: Lines<usize>, output: Option<String>, root: PathBuf) -> Self {
-        Self {
-            story: None,
-            doc,
-            lines,
-            output,
-            docs_note: false,
-            in_panel: false,
-            shown: None,
-            selection: None,
-            placer: Placer::new(root),
-            cancel: Arc::default(),
-            _task: None,
-        }
+    fn new(doc: DocId, lines: Lines<usize>, origin: Origin, root: PathBuf) -> Self {
+        Self { story: None, doc, lines, origin, docs_note: false, shown: None, selection: None, placer: Placer::new(root), cancel: Arc::default(), _task: None }
     }
 
     /// The first request has been sent.
@@ -129,7 +116,7 @@ impl StoryState {
             range: doc.buffer.lines_range(self.lines.clone()),
             instruction: story.instruction.clone(),
             followups: story.followups().to_vec(),
-            output: story.output.clone(),
+            output: self.origin.output().map(str::to_string),
             root: Some(project.root.clone()),
         })
     }
@@ -147,56 +134,62 @@ impl StoryState {
         }
     }
 
-    /// Where an item is, without opening anything.
-    pub(super) fn locate(&self, project: &Project, item: &Item) -> Option<Located> {
-        let asked_tab = project.tabs.by_id(self.doc)?;
-        let asked = Asked { path: asked_tab.doc.path.as_deref(), text: asked_tab.doc.text(), lines: self.lines.clone() };
-        let place = self.placer.place(item, &asked, &project.files());
+    /// Where the story's items show, in `project` as it is now.
+    fn layout<'a>(&'a self, project: &'a Project) -> Option<Layout<'a, ProjectFiles<'a>>> {
+        let asked = project.tabs.by_id(self.doc)?;
+        Some(Layout {
+            story: self.story.as_ref()?,
+            origin: &self.origin,
+            asked: Asked { path: asked.doc.path.as_deref(), text: asked.doc.text(), lines: self.lines.clone() },
+            files: project.files(),
+            placer: &self.placer,
+        })
+    }
+
+    /// Where item `id` shows.
+    pub(super) fn spot(&self, project: &Project, id: ItemId) -> Option<Spot> {
+        self.layout(project)?.spot(id)
+    }
+
+    /// Where item `id` is in the code (`None` if it's in the panel).
+    pub(super) fn locate(&self, project: &Project, id: ItemId) -> Option<Located> {
+        let Spot::Code(place) = self.spot(project, id)? else { return None };
+        Some(self.in_tab(project, place))
+    }
+
+    /// The lines item `id` shows at, in the code.
+    pub(super) fn lines_of(&self, project: &Project, id: ItemId) -> Option<Located> {
+        Some(self.in_tab(project, self.layout(project)?.lines(id)?))
+    }
+
+    /// Where Claude's answer is coming while there's nothing to review: in
+    /// the panel, or in the code (under what was asked about, or the marked lines).
+    pub(super) fn waiting_spot(&self, project: &Project) -> Option<Spot> {
+        match self.layout(project) {
+            Some(layout) => layout.waiting_spot(),
+            None if self.origin.in_panel() => Some(Spot::Panel),
+            None => Some(Spot::Code(Place { path: None, near: self.lines.clone() })),
+        }
+    }
+
+    pub(super) fn in_tab(&self, project: &Project, place: Place) -> Located {
         let tab = match &place.path {
             None => project.tabs.index_of_id(self.doc),
             Some(path) => project.tabs.index_of_path(path),
         };
-        Some(Located { tab, path: place.path, near: place.near })
+        Located { tab, path: place.path, near: place.near }
     }
 
-    /// An answer that isn't pinned to lines, shown in the tour panel it was
-    /// asked from (and so is one to a question asked about it there).
-    pub(super) fn in_panel_item(&self, id: ItemId, item: &Item) -> bool {
-        let Some(story) = self.story.as_ref().filter(|_| self.in_panel) else { return false };
-        matches!(item, Item::Note(Note { file: None, at, .. }) if at.is_empty())
-            && story.asked_about(id).is_none_or(|about| story.item(about).is_some_and(|it| self.in_panel_item(about, &it)))
-    }
-
-    /// Where item `id` is. Like [`Self::locate`], but an answer that isn't
-    /// pinned to lines goes where its question was asked.
-    pub(super) fn locate_at(&self, project: &Project, id: ItemId, item: &Item) -> Option<Located> {
-        let story = self.story.as_ref()?;
-        if let Item::Note(Note { file: None, at, .. }) = item
-            && at.is_empty()
-            && let Some(asked) = story.asked_about(id).and_then(|about| self.lines_of(project, about))
-        {
-            return Some(asked);
-        }
-        self.locate(project, item)
-    }
-
-    /// The tab and lines item `id` shows at (`near` is its lines).
-    pub(super) fn lines_of(&self, project: &Project, id: ItemId) -> Option<Located> {
-        let item = self.story.as_ref()?.item(id)?;
-        if self.in_panel_item(id, &item) {
-            return None;
-        }
-        let located = self.locate_at(project, id, &item)?;
-        let text = project.tabs.get(located.tab?)?.doc.text();
-        let near = match &item {
-            Item::Step(step) => {
-                let view = placement::view(text, step, located.near.clone())?;
-                view.first..view.anchor + 1
+    /// Where item `id` is in the code, opening its file (in a tab, not switched to) if it isn't open.
+    fn open(&self, project: &mut Project, id: ItemId) -> Option<Located> {
+        let located = self.locate(project, id)?;
+        match &located.path {
+            Some(path) if located.tab.is_none() && path.is_file() => {
+                project.open(path)?;
+                self.locate(project, id)
             }
-            Item::Note(note) => protocol::locate(text, &note.at, located.near.clone())?,
-            _ => return None,
-        };
-        Some(Located { near, ..located })
+            _ => Some(located),
+        }
     }
 
     /// The files the story is waiting in: where the current item is (or
@@ -204,47 +197,21 @@ impl StoryState {
     pub(super) fn files(&self, project: &Project) -> Vec<(PathBuf, Waiting)> {
         let asked = || project.tabs.by_id(self.doc)?.doc.path.clone();
         let file_of = |located: Located| located.path.or_else(asked);
-        let Some(story) = self.story.as_ref() else { return asked().map(|p| (p, Waiting::Here)).into_iter().collect() };
-        let current = story.current();
-        let mut files: Vec<(PathBuf, Waiting)> = story
-            .items()
-            .into_iter()
-            .filter(|(id, item)| story.verdict(*id) == Verdict::Pending && !item.is_file_op() && !self.in_panel_item(*id, item))
-            .filter_map(|(id, item)| {
-                let path = file_of(self.locate_at(project, id, &item)?)?;
-                Some((path, if Some(id) == current { Waiting::Here } else { Waiting::Later }))
-            })
+        let current = self.story.as_ref().and_then(Story::current);
+        let mut files: Vec<(PathBuf, Waiting)> = self
+            .story
+            .iter()
+            .flat_map(|story| story.items().into_iter().filter(|(id, item)| story.verdict(*id) == Verdict::Pending && !item.is_file_op()))
+            .filter_map(|(id, _)| Some((file_of(self.locate(project, id)?)?, if Some(id) == current { Waiting::Here } else { Waiting::Later })))
             .collect();
         // Nothing to review yet: Claude is answering where it was asked.
-        if current.is_none() && story.is_writing() && !self.in_panel {
-            let at = story.writing_about().and_then(|about| self.lines_of(project, about)).map_or_else(asked, file_of);
-            files.extend(at.map(|p| (p, Waiting::Here)));
+        if current.is_none()
+            && self.story.as_ref().is_none_or(Story::is_writing)
+            && let Some(Spot::Code(place)) = self.waiting_spot(project)
+        {
+            files.extend(file_of(self.in_tab(project, place)).map(|p| (p, Waiting::Here)));
         }
         files
-    }
-
-    /// Where item `id` is, opening its file (in a tab, not switched to) if it isn't open.
-    fn open_located_at(&self, project: &mut Project, id: ItemId, item: &Item) -> Option<Located> {
-        let located = self.locate_at(project, id, item)?;
-        match &located.path {
-            Some(path) if located.tab.is_none() && path.is_file() => {
-                project.open(path)?;
-                self.locate_at(project, id, item)
-            }
-            _ => Some(located),
-        }
-    }
-
-    /// Where an item is, opening its file (in a tab, not switched to) if it isn't open.
-    fn open_located(&self, project: &mut Project, item: &Item) -> Option<Located> {
-        let located = self.locate(project, item)?;
-        match &located.path {
-            Some(path) if located.tab.is_none() && path.is_file() => {
-                project.open(path)?;
-                self.locate(project, item)
-            }
-            _ => Some(located),
-        }
     }
 
     /// What the tree should show for item `id`: a file operation, the one
@@ -257,16 +224,16 @@ impl StoryState {
             Item::Create(rel) => Some(Proposal::Create(root.join(rel))),
             Item::Remove(rel) => Some(Proposal::Remove(root.join(rel.trim_end_matches('/')))),
             Item::Rename { from, to } => Some(Proposal::Rename(root.join(from.trim_end_matches('/')), to.clone())),
-            Item::Step(_) => self.locate(project, item)?.path.filter(|p| !p.exists()).map(Proposal::Create),
+            Item::Step(_) => self.locate(project, id)?.path.filter(|p| !p.exists()).map(Proposal::Create),
             Item::Note(_) => None,
         }
     }
 
     /// Accept (carrying it out) or skip the current item.
     fn decide(&mut self, project: &mut Project, verdict: Verdict) -> Result<(), String> {
-        let Some(item) = self.story.as_ref().and_then(Story::current_item) else { return Ok(()) };
+        let Some((id, item)) = self.story.as_ref().and_then(|s| Some((s.current()?, s.current_item()?))) else { return Ok(()) };
         if verdict == Verdict::Accepted {
-            self.apply(project, &item)?;
+            self.apply(project, id, &item)?;
         }
         if let Some(story) = self.story.as_mut() {
             story.decide(verdict);
@@ -274,7 +241,7 @@ impl StoryState {
         Ok(())
     }
 
-    fn apply(&self, project: &mut Project, item: &Item) -> Result<(), String> {
+    fn apply(&self, project: &mut Project, id: ItemId, item: &Item) -> Result<(), String> {
         let path = |rel: &str| project.root.join(rel.trim_end_matches('/'));
         match item {
             Item::Note(_) => {}
@@ -303,23 +270,23 @@ impl StoryState {
                     project.path_deleted(&target);
                 }
             }
-            Item::Step(step) => self.apply_step(project, step, item)?,
+            Item::Step(step) => self.apply_step(project, id, step)?,
         }
         Ok(())
     }
 
-    fn apply_step(&self, project: &mut Project, step: &Step, item: &Item) -> Result<(), String> {
+    fn apply_step(&self, project: &mut Project, id: ItemId, step: &Step) -> Result<(), String> {
         if !step.complete {
             return Err("that step is still being written".into());
         }
         // A step for a file that isn't there yet (Claude didn't propose creating it): make it.
-        if let Some(path) = self.locate(project, item).and_then(|l| l.path).filter(|p| !p.exists() && step.old.is_empty()) {
+        if let Some(path) = self.locate(project, id).and_then(|l| l.path).filter(|p| !p.exists() && step.old.is_empty()) {
             let rel = path.strip_prefix(&project.root).map_err(|_| format!("{} is outside the project", path.display()))?;
             fs::create(&project.root, &rel.to_string_lossy())?;
             project.tree.refresh();
         }
         let missing = "that step's file doesn't exist; backspace skips it";
-        let located = self.open_located(project, item).ok_or(missing)?;
+        let located = self.open(project, id).ok_or(missing)?;
         let tab = located.tab.and_then(|ix| project.tabs.get_mut(ix)).ok_or(missing)?;
         let edit = placement::edit(tab.doc.text(), step, located.near).ok_or("couldn't find where that step goes; backspace skips it")?;
         tab.doc.buffer.begin(tab.view.selection);
@@ -333,7 +300,7 @@ impl StoryState {
 
     /// After anything changes: move on, and put a newly current item where
     /// it'll be seen: its lines selected and centered in its file's tab, or
-    /// its proposal in the tree.
+    /// its proposal in the tree. (One in the panel is just there.)
     fn settle(&mut self, project: &mut Project) -> Show {
         let Some(story) = self.story.as_mut() else { return Show::Nothing };
         let id = match story.settle() {
@@ -352,27 +319,18 @@ impl StoryState {
         if in_tree {
             return Show::Tree;
         }
-        if self.in_panel_item(id, &item) {
-            return Show::Nothing;
-        }
-        let Some(Located { tab: Some(ix), near, .. }) = self.open_located_at(project, id, &item) else { return Show::Nothing };
+        let Some(Located { tab: Some(ix), .. }) = self.open(project, id) else { return Show::Nothing };
+        let Some(Located { near: lines, .. }) = self.lines_of(project, id) else { return Show::Tab(ix) };
         let Some(tab) = project.tabs.get_mut(ix) else { return Show::Nothing };
-        let (first, anchor, cursor) = match &item {
-            Item::Step(step) => match placement::view(tab.doc.text(), step, near) {
-                Some(view) => (view.first, view.anchor, tab.doc.buffer.line_end(view.anchor)),
-                None => return Show::Tab(ix),
-            },
-            Item::Note(note) => match protocol::locate(tab.doc.text(), &note.at, near) {
-                Some(at) => (at.start, at.end - 1, tab.doc.buffer.line_start(at.start)),
-                None => return Show::Tab(ix),
-            },
-            _ => return Show::Nothing,
-        };
         if self.docs_note {
             tab.view.autoscroll = Some(Autoscroll::Fit);
-        } else {
-            tab.select(Range::point(cursor), Autoscroll::Center(first..anchor + 1));
+            return Show::Tab(ix);
         }
+        let cursor = match item {
+            Item::Note(_) => tab.doc.buffer.line_start(lines.start),
+            _ => tab.doc.buffer.line_end(lines.end - 1),
+        };
+        tab.select(Range::point(cursor), Autoscroll::Center(lines));
         Show::Tab(ix)
     }
 
@@ -396,9 +354,10 @@ impl StoryState {
 }
 
 impl Editor {
-    /// Open the prompt about the cursor's lines (or the selection's),
-    /// optionally about some command output and with text typed in.
-    pub(super) fn open_story(&mut self, output: Option<String>, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open the prompt about the cursor's lines (or the selection's), with
+    /// what it's about and text typed in. Output asked about from its panel
+    /// is asked, and answered, there.
+    pub(super) fn open_story(&mut self, origin: Origin, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.backend.is_none() {
             self.project.say("asking Claude needs ANTHROPIC_API_KEY or Claude Code (`claude`) installed");
             return;
@@ -424,18 +383,10 @@ impl Editor {
         let span = buffer.lines_range(lines.clone());
         let end = span.end - usize::from(buffer.text()[span.clone()].ends_with('\n'));
         tab.view.selection = Range::new(span.start, end.max(span.start));
-        let mut state = StoryState::new(tab.doc.id, lines, output, root);
+        let mut state = StoryState::new(tab.doc.id, lines, origin, root);
         state.selection = kept;
         self.story = Some(state);
         self.open_prompt(PromptKind::Ask, typed, window, cx);
-    }
-
-    /// Ask about a tour's output from its panel: the prompt, and the answer, show there.
-    pub(super) fn open_story_in_panel(&mut self, output: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_story(Some(output), "", window, cx);
-        if let Some(state) = self.story.as_mut() {
-            state.in_panel = true;
-        }
     }
 
     /// Show `text` as a note under the cursor's line, reviewed like an
@@ -444,7 +395,7 @@ impl Editor {
         self.leave_insert();
         let Some(tab) = self.tab() else { return };
         let line = tab.doc.buffer.line_of(tab.cursor());
-        let mut state = StoryState::new(tab.doc.id, line..line + 1, None, self.project.root.clone());
+        let mut state = StoryState::new(tab.doc.id, line..line + 1, Origin::Lines, self.project.root.clone());
         self.modal.enter(Mode::Ai);
         state.docs_note = true;
         state.story = Some(Story::answered("Explain what's under the cursor; its documentation was shown.", text));
@@ -465,7 +416,7 @@ impl Editor {
                 story.follow_up(said);
                 state.shown = None;
             }
-            None => state.story = Some(Story::new(said, state.output.clone())),
+            None => state.story = Some(Story::new(said)),
         }
         self.close_prompt(window, cx);
         self.send_request(window, cx);

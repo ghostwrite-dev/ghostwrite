@@ -526,7 +526,7 @@ fn a_question_mid_tour_comes_back_to_the_same_stop(cx: &mut TestAppContext) {
     t.keys("enter");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Ai);
     t.input("what is this?").keys("enter");
-    assert!(t.read(|e| e.story.as_ref().and_then(|s| s.story.as_ref()).is_some_and(|s| s.output.as_deref().is_some_and(|o| o.contains("one\ntwo")))), "with the output");
+    assert!(t.read(|e| e.story.as_ref().is_some_and(|s| s.origin.output().is_some_and(|o| o.contains("one\ntwo")))), "with the output");
     t.keys("tab");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Tour, "back on the tour");
     // `space i` asks about the code, and the tour waits.
@@ -551,8 +551,7 @@ fn a_follow_up_is_answered_where_it_was_asked(cx: &mut TestAppContext) {
     let at = t.read(|e| {
         let state = e.story.as_ref().unwrap();
         let story = state.story.as_ref().unwrap();
-        let (id, item) = (story.current().unwrap(), story.current_item().unwrap());
-        let located = state.locate_at(&e.project, id, &item).unwrap();
+        let located = state.locate(&e.project, story.current().unwrap()).unwrap();
         (located.tab.map(|ix| e.project.tabs.get(ix).unwrap().doc.name().to_string()), located.near)
     });
     assert_eq!(at, (Some("lib.rs".into()), 2..3), "under the step's line, not the first file's");
@@ -565,12 +564,12 @@ fn a_question_about_output_is_answered_in_the_panel(cx: &mut TestAppContext) {
     let mut t = open("x\n", &["<answer>\nIt prints two lines.\n</answer>\n"], cx);
     run_sh(&mut t, "echo one; echo two");
     t.keys("enter");
-    assert!(t.read(|e| e.story.as_ref().is_some_and(|s| s.in_panel)), "asked from the panel");
+    assert!(t.read(|e| e.story.as_ref().is_some_and(|s| s.origin.in_panel())), "asked from the panel");
     t.input("what is this?").keys("enter");
     let in_panel = t.read(|e| {
         let state = e.story.as_ref().unwrap();
         let story = state.story.as_ref().unwrap();
-        state.in_panel_item(story.current().unwrap(), &story.current_item().unwrap())
+        state.spot(&e.project, story.current().unwrap()) == Some(ghostwrite_ai::Spot::Panel)
     });
     assert!(in_panel, "the answer shows in the panel");
     assert_eq!(t.active().as_deref(), Some("doc.txt"), "nothing jumps");

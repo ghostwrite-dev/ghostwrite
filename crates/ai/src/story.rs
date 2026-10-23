@@ -109,8 +109,6 @@ struct Reply {
 #[derive(Debug)]
 pub struct Story {
     pub instruction: String,
-    /// Command output it's about (an error from `:sh`).
-    pub output: Option<String>,
     history: Vec<FollowUp>,
     replies: Vec<Reply>,
     verdicts: HashMap<ItemId, Verdict>,
@@ -141,10 +139,9 @@ fn items_in(text: &str) -> Vec<Item> {
 
 impl Story {
     /// A request on its way: the plan will arrive in the first reply.
-    pub fn new(instruction: impl Into<String>, output: Option<String>) -> Self {
+    pub fn new(instruction: impl Into<String>) -> Self {
         Self {
             instruction: instruction.into(),
-            output,
             history: vec![],
             replies: vec![Reply { text: String::new(), at: 0, about: None }],
             verdicts: HashMap::new(),
@@ -157,7 +154,7 @@ impl Story {
 
     /// A story that starts with an answer already there (docs from `space k`).
     pub fn answered(instruction: impl Into<String>, answer: &str) -> Self {
-        let mut story = Self::new(instruction, None);
+        let mut story = Self::new(instruction);
         story.replies[0].text = format!("<answer>\n{answer}\n</answer>");
         story.writing = None;
         story.settle();
@@ -357,7 +354,7 @@ mod tests {
 
     #[test]
     fn steps_are_decided_in_order_and_the_last_finishes() {
-        let mut story = Story::new("implement it", None);
+        let mut story = Story::new("implement it");
         assert_eq!(story.settle(), Settled::Waiting);
         assert_eq!(arrived(&mut story, TWO_STEPS), Settled::At(plan(0)));
         story.decide(Verdict::Accepted);
@@ -369,7 +366,7 @@ mod tests {
 
     #[test]
     fn steps_show_up_while_streaming() {
-        let mut story = Story::new("implement it", None);
+        let mut story = Story::new("implement it");
         story.push_text(&TWO_STEPS[..40]);
         assert_eq!(story.settle(), Settled::At(plan(0)));
         assert!(matches!(story.current_item(), Some(Item::Step(s)) if !s.complete));
@@ -377,7 +374,7 @@ mod tests {
 
     #[test]
     fn a_question_mid_plan_is_answered_before_the_next_step() {
-        let mut story = Story::new("implement it", None);
+        let mut story = Story::new("implement it");
         arrived(&mut story, TWO_STEPS);
         story.decide(Verdict::Accepted);
         story.settle();
@@ -393,7 +390,7 @@ mod tests {
 
     #[test]
     fn the_review_waits_for_the_answer() {
-        let mut story = Story::new("walk me through this", None);
+        let mut story = Story::new("walk me through this");
         arrived(&mut story, TOUR);
         story.follow_up("is there a size limit?".into());
         assert_eq!(story.settle(), Settled::Waiting, "not on to the next note while Claude answers");
@@ -407,7 +404,7 @@ mod tests {
         assert!(matches!(story.settle(), Settled::At(id) if id == plan(1)), "then on with the walkthrough");
 
         // Notes after the answer can't change the rest: no need to wait for them.
-        let mut story = Story::new("walk me through this", None);
+        let mut story = Story::new("walk me through this");
         arrived(&mut story, TOUR);
         story.follow_up("ok".into());
         story.push_text("<answer>\nGood.\n</answer>\n");
@@ -420,7 +417,7 @@ mod tests {
 
     #[test]
     fn a_redirected_step_is_replaced_by_the_rest() {
-        let mut story = Story::new("implement it", None);
+        let mut story = Story::new("implement it");
         arrived(&mut story, TWO_STEPS);
         story.follow_up("use sum()".into());
         let corrected = "<rest>\n<step>\n<old>\n    pass\n</old>\n<new>\n    return sum((a, b))\n</new>\n</step>\n</rest>\n";
@@ -433,7 +430,7 @@ mod tests {
 
     #[test]
     fn a_comment_mid_walkthrough_revises_the_rest() {
-        let mut story = Story::new("walk me through this", None);
+        let mut story = Story::new("walk me through this");
         arrived(&mut story, TOUR);
         story.decide(Verdict::Accepted);
         story.settle();
@@ -447,7 +444,7 @@ mod tests {
 
     #[test]
     fn a_question_without_a_new_rest_keeps_the_rest() {
-        let mut story = Story::new("walk me through this", None);
+        let mut story = Story::new("walk me through this");
         arrived(&mut story, TOUR);
         story.follow_up("what's First about?".into());
         arrived(&mut story, "<answer>\nSetup.\n</answer>\n");
@@ -456,7 +453,7 @@ mod tests {
 
     #[test]
     fn an_edit_asked_mid_walkthrough_comes_next_and_the_walkthrough_goes_on() {
-        let mut story = Story::new("walk me through this", None);
+        let mut story = Story::new("walk me through this");
         arrived(&mut story, TOUR);
         story.follow_up("implement it".into());
         arrived(&mut story, "<step>\n<old>\n    pass\n</old>\n<new>\n    return 1\n</new>\n</step>\n");
@@ -465,7 +462,7 @@ mod tests {
 
     #[test]
     fn a_revised_plan_can_change_steps_after_a_question() {
-        let mut story = Story::new("implement it", None);
+        let mut story = Story::new("implement it");
         arrived(&mut story, TWO_STEPS);
         story.decide(Verdict::Accepted);
         story.settle();
@@ -477,7 +474,7 @@ mod tests {
 
     #[test]
     fn errors_wait_and_memory_is_picked_up() {
-        let mut story = Story::new("x", None);
+        let mut story = Story::new("x");
         story.failed("offline".into());
         assert_eq!(story.settle(), Settled::Waiting, "an error stays on screen");
         let mut story = Story::answered("docs", "It adds.");

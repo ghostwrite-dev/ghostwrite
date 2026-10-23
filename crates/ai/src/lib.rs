@@ -12,9 +12,11 @@
 //! - [`tools`]: read-only project tools for the API backend.
 //! - [`story`]: the review state machine.
 //! - [`placement`]: which file and lines an item applies to, and the edit a step makes.
+//! - [`layout`]: where each item shows: in the code, or in the panel it was asked from.
 
 pub mod backend;
 pub mod context;
+pub mod layout;
 pub mod placement;
 pub mod protocol;
 pub mod story;
@@ -22,6 +24,7 @@ pub mod tools;
 
 pub use backend::Backend;
 pub use context::{Interaction, Request};
+pub use layout::{Layout, Origin, Spot};
 pub use story::{FollowUp, Item, ItemId, Part, Settled, Story, Verdict};
 
 pub const MODEL: &str = "claude-opus-5-5";

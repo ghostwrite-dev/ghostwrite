@@ -7,6 +7,7 @@
 //! and shows each stop in its file. The editor switches tabs.
 
 use futures::StreamExt as _;
+use ghostwrite_ai::Origin;
 use ghostwrite_core::{Mode, Range, Review};
 use ghostwrite_project::files::{MAX_FOUND, grep, search_pattern};
 use ghostwrite_project::shell::{Location, Run};
@@ -236,10 +237,11 @@ impl Editor {
             Review::Ask => {
                 let handed = state.tour.hand_off();
                 match handed.output {
-                    Some(output) if handed.fix => self.open_story(Some(output), "fix this", window, cx),
+                    Some(output) if handed.fix => self.open_story(Origin::Fix(output), "fix this", window, cx),
                     // A question about the output: asked, and answered, in the panel.
-                    Some(output) => self.open_story_in_panel(output, window, cx),
-                    None => self.open_story(None, "", window, cx),
+                    Some(output) => self.open_story(Origin::Output(output), "", window, cx),
+                    // At a search match: about the code there.
+                    None => self.open_story(Origin::Lines, "", window, cx),
                 }
                 return;
             }
