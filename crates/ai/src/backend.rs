@@ -305,4 +305,70 @@ mod tests {
         let second = ask(text, 0..24, "implement it with type hints", vec![followup]);
         assert_eq!(protocol::reply_kind(&second), Some(Kind::Question));
     }
+
+    /// A small project: main.py calls into util.py, which can fail.
+    fn two_file_project() -> (std::path::PathBuf, String) {
+        let root = ghostwrite_project::scratch_dir("live");
+        let main = "from util import load\n\n\ndef main():\n    data = load(\"config.json\")\n    print(data[\"name\"])\n\n\nmain()\n";
+        std::fs::write(root.join("main.py"), main).unwrap();
+        let util = "import json\n\n\ndef load(path):\n    try:\n        with open(path) as f:\n            return json.load(f)\n    except FileNotFoundError:\n        return {\"name\": \"default\"}\n";
+        std::fs::write(root.join("util.py"), util).unwrap();
+        (root, main.to_string())
+    }
+
+    fn ask_in(root: &std::path::Path, text: &str, range: std::ops::Range<usize>, instruction: &str, followups: Vec<crate::FollowUp>) -> String {
+        let req = Request {
+            path: Some(root.join("main.py")),
+            language: "python".into(),
+            text: text.into(),
+            range,
+            instruction: instruction.into(),
+            followups,
+            output: None,
+            root: Some(root.to_path_buf()),
+        };
+        let mut out = Collect::default();
+        Backend::ClaudeCode.run(&req, &mut out, &AtomicBool::new(false)).unwrap();
+        println!("looked at: {:?}\n{}", out.1, out.0);
+        out.0
+    }
+
+    #[test]
+    #[ignore]
+    fn claude_code_tours_across_files() {
+        let (root, main) = two_file_project();
+        let out = ask_in(&root, &main, 0..main.len(), "give me a tour of how loading the config works", vec![]);
+        assert_eq!(protocol::reply_kind(&out), Some(Kind::Question), "{out}");
+        let notes = protocol::parse_notes(&out);
+        assert!(notes.iter().any(|n| n.file.as_deref() == Some("util.py")), "a note in util.py, named with <file>: {notes:?}");
+    }
+
+    #[test]
+    #[ignore]
+    fn claude_code_revises_the_rest_of_a_walkthrough() {
+        let (root, main) = two_file_project();
+        let first = ask_in(&root, &main, 0..main.len(), "walk me through this program step by step", vec![]);
+        let notes = protocol::parse_notes(&first);
+        assert!(notes.len() >= 2, "a walkthrough to steer: {first}");
+        let at = crate::Item::Note(notes[0].clone()).describe();
+        let said = "Skip the rest of that. Only show me how a missing config file is handled.";
+        let second = ask_in(&root, &main, 0..main.len(), "walk me through this program step by step", vec![crate::FollowUp { reply: first, at: Some(at), said: said.into() }]);
+        let (_, rest) = protocol::split_rest(&second);
+        assert!(rest.is_some(), "the walkthrough is revised with <rest>: {second}");
+    }
+
+    #[test]
+    #[ignore]
+    fn claude_code_redirects_a_step_with_a_new_rest() {
+        let text = "def total(xs):\n    pass\n";
+        let root = ghostwrite_project::scratch_dir("live-redirect");
+        std::fs::write(root.join("main.py"), text).unwrap();
+        let first = ask_in(&root, text, 0..text.len(), "implement it", vec![]);
+        let step = protocol::parse_pieces(&first).into_iter().find_map(|p| if let Piece::Step(s) = p { Some(s) } else { None }).expect("a step");
+        let at = crate::Item::Step(step).describe();
+        let second = ask_in(&root, text, 0..text.len(), "implement it", vec![crate::FollowUp { reply: first, at: Some(at), said: "don't use sum(); write an explicit for loop".into() }]);
+        let (_, rest) = protocol::split_rest(&second);
+        let steps: Vec<String> = protocol::parse_pieces(&rest.unwrap_or_default()).into_iter().filter_map(|p| if let Piece::Step(s) = p { Some(s.new.join("\n")) } else { None }).collect();
+        assert!(steps.iter().any(|s| s.contains("for ")), "the corrected steps come back in <rest>: {second}");
+    }
 }
