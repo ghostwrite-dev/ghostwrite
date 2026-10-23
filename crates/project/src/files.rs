@@ -86,6 +86,29 @@ pub fn grep(root: &Path, pattern: &Regex, open: &HashMap<PathBuf, String>) -> Ve
     found
 }
 
+/// The project's uncommitted changes, as `git diff` shows them (plus new,
+/// untracked files by name), cut off after `max` bytes. `None` outside a
+/// repository or with nothing changed.
+pub fn uncommitted(root: &Path, max: usize) -> Option<String> {
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").arg("-C").arg(root).args(args).stderr(std::process::Stdio::null()).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let mut diff = git(&["diff", "HEAD", "--no-color", "--no-ext-diff"]).or_else(|| git(&["diff", "--no-color", "--no-ext-diff"]))?;
+    let untracked = git(&["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    if !untracked.trim().is_empty() {
+        diff.push_str(&format!("\nNew files, not yet in git:\n{}", untracked.trim_end()));
+    }
+    if diff.trim().is_empty() {
+        return None;
+    }
+    if diff.len() > max {
+        diff.truncate(diff.floor_char_boundary(max));
+        diff.push_str("\n… (cut off)");
+    }
+    Some(diff)
+}
+
 /// `path` inside the project (resolved), or `None` if it would leave it.
 pub fn inside(root: &Path, path: &str) -> Option<PathBuf> {
     let root = root.canonicalize().ok()?;
@@ -114,6 +137,23 @@ mod tests {
         assert_eq!(hits("parse(", &none), [("a.rs".into(), 1, 8..14)], "not a regex: taken as typed");
         let open = [(root.join("b.rs"), "parse here\n".to_string())].into_iter().collect();
         assert_eq!(hits("parse", &open).last().cloned(), Some(("b.rs".into(), 0, 0..5)), "unsaved text counts");
+    }
+
+    #[test]
+    fn uncommitted_changes_come_from_git() {
+        let root = crate::scratch_dir("diff");
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&root).args(args).output().unwrap();
+        assert_eq!(uncommitted(&root, 1000), None, "not a repository");
+        git(&["init", "-q"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a"]);
+        assert_eq!(uncommitted(&root, 1000), None, "nothing changed");
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        std::fs::write(root.join("b.txt"), "new\n").unwrap();
+        let diff = uncommitted(&root, 1000).unwrap();
+        assert!(diff.contains("-one\n+two") && diff.contains("New files, not yet in git:\nb.txt"), "{diff}");
+        assert!(uncommitted(&root, 10).unwrap().ends_with("(cut off)"));
     }
 
     #[test]

@@ -611,3 +611,19 @@ fn the_tree_marks_where_the_story_is_waiting(cx: &mut TestAppContext) {
     t.keys("tab");
     assert_eq!(waiting(&mut t), [("doc.txt".into(), super::story::Waiting::Here)], "lib.rs is done");
 }
+
+#[gpui::test]
+fn claude_hears_the_whole_conversation_and_the_editor(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[TWO_STEPS, "<answer>\nOK.\n</answer>\n"], cx);
+    std::fs::write(t.dir.join("other.py"), "x = 1\n").unwrap();
+    t.command("e other.py").command("e doc.txt");
+    t.ask("types and body").keys("tab");
+    t.keys("enter").input("why int?").keys("enter");
+    let req = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap());
+    assert_eq!(req.surroundings.open_files, ["doc.txt", "other.py"], "what is open, in tab order");
+    let followup = &req.followups[0];
+    assert_eq!(followup.reply, TWO_STEPS, "Claude's reply, whole");
+    assert_eq!(followup.decided.len(), 1, "what was accepted since");
+    assert!(followup.at.as_deref().is_some_and(|at| at.contains("int -> int") || at.contains("b: int")), "where they were");
+    assert_eq!(followup.said, "why int?");
+}

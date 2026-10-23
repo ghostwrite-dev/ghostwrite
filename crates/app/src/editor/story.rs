@@ -18,7 +18,7 @@ use futures::StreamExt as _;
 use ghostwrite_ai::backend::Listener;
 use ghostwrite_ai::placement::{self, Asked, Place, Placer};
 use ghostwrite_ai::protocol::Step;
-use ghostwrite_ai::{Interaction, Item, ItemId, Layout, Origin, Request, Settled, Spot, Story, Verdict};
+use ghostwrite_ai::{Interaction, Item, ItemId, Layout, Origin, Request, Settled, Spot, Story, Surroundings, Verdict};
 use ghostwrite_core::{Mode, Range, Review};
 use ghostwrite_project::tree::Proposal;
 use ghostwrite_project::{fs, store};
@@ -41,6 +41,8 @@ pub(super) struct StoryState {
     shown: Option<ItemId>,
     /// Asked from select mode: the selection to give back afterwards.
     selection: Option<Range>,
+    /// The Claude Code session the story is in, resumed for each follow-up.
+    session: Option<String>,
     placer: Placer,
     cancel: Arc<AtomicBool>,
     _task: Option<Task<()>>,
@@ -79,6 +81,7 @@ pub(super) enum Show {
 enum Message {
     Text(String),
     Looking(String),
+    Session(String),
     Done,
     Failed(String),
 }
@@ -93,11 +96,27 @@ impl Listener for Forward {
     fn looking(&mut self, what: String) {
         self.0.unbounded_send(Message::Looking(what)).ok();
     }
+
+    fn session(&mut self, id: String) {
+        self.0.unbounded_send(Message::Session(id)).ok();
+    }
 }
 
 impl StoryState {
     fn new(doc: DocId, lines: Lines<usize>, origin: Origin, root: PathBuf) -> Self {
-        Self { story: None, doc, lines, origin, docs_note: false, shown: None, selection: None, placer: Placer::new(root), cancel: Arc::default(), _task: None }
+        Self {
+            story: None,
+            doc,
+            lines,
+            origin,
+            docs_note: false,
+            shown: None,
+            selection: None,
+            session: None,
+            placer: Placer::new(root),
+            cancel: Arc::default(),
+            _task: None,
+        }
     }
 
     /// The first request has been sent.
@@ -106,7 +125,7 @@ impl StoryState {
     }
 
     /// The request for the story so far.
-    fn request(&self, project: &Project) -> Option<Request> {
+    pub(super) fn request(&self, project: &Project) -> Option<Request> {
         let story = self.story.as_ref()?;
         let doc = &project.tabs.by_id(self.doc)?.doc;
         Some(Request {
@@ -118,12 +137,42 @@ impl StoryState {
             followups: story.followups().to_vec(),
             output: self.origin.output().map(str::to_string),
             root: Some(project.root.clone()),
+            surroundings: self.surroundings(project),
+            session: self.session.clone(),
         })
     }
 
+    /// What's around the request in the editor: the open files, and
+    /// diagnostics within a few lines of the marked ones.
+    fn surroundings(&self, project: &Project) -> Surroundings {
+        const NEAR: usize = 5;
+        let open_files = project.tabs.iter().filter_map(|t| t.doc.path.as_deref().map(|p| project.display(p))).collect();
+        let near = self.lines.start.saturating_sub(NEAR)..self.lines.end + NEAR;
+        let diagnostics = project
+            .tabs
+            .by_id(self.doc)
+            .map(|t| {
+                t.doc
+                    .diagnostics
+                    .iter()
+                    .filter_map(|d| {
+                        let line = t.doc.buffer.line_of(d.range.start);
+                        near.contains(&line).then(|| format!("line {}: {}: {}", line + 1, d.severity.label(), d.message.lines().next().unwrap_or_default()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Surroundings { open_files, diagnostics }
+    }
+
     fn receive(&mut self, message: Message) {
+        if let Message::Session(id) = message {
+            self.session = Some(id);
+            return;
+        }
         let Some(story) = self.story.as_mut() else { return };
         match message {
+            Message::Session(_) => {}
             Message::Text(chunk) => story.push_text(&chunk),
             Message::Looking(what) => story.looking = Some(what),
             Message::Done => story.finished_writing(),
@@ -348,7 +397,7 @@ impl StoryState {
             let path = project.tabs.by_id(self.doc).and_then(|t| t.doc.path.clone());
             let file = path.map_or("untitled".into(), |p| project.display(&p));
             let said = story.followups().iter().map(|f| f.said.clone()).collect();
-            Interaction::new(file, story.instruction.clone(), said, story.outcome()).log(&project.root);
+            Interaction::new(file, story.instruction.clone(), said, story.outcome(), story.recap()).log(&project.root);
         }
     }
 }

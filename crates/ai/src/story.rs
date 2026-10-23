@@ -87,11 +87,14 @@ pub enum Settled {
     Finished,
 }
 
-/// What the user said mid-review, for the next request.
+/// One turn of the conversation: Claude's latest reply, what the user did
+/// with it, and what they said next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FollowUp {
-    /// Claude's reply the user was reviewing.
+    /// Claude's reply just before this.
     pub reply: String,
+    /// What the user accepted and skipped since (`accepted: …`, `skipped: …`).
+    pub decided: Vec<String>,
     /// The item they were at, as Claude wrote it.
     pub at: Option<String>,
     pub said: String,
@@ -110,6 +113,8 @@ struct Reply {
 pub struct Story {
     pub instruction: String,
     history: Vec<FollowUp>,
+    /// Decisions since the last follow-up, for the next one.
+    decided: Vec<String>,
     replies: Vec<Reply>,
     verdicts: HashMap<ItemId, Verdict>,
     current: Option<ItemId>,
@@ -143,6 +148,7 @@ impl Story {
         Self {
             instruction: instruction.into(),
             history: vec![],
+            decided: vec![],
             replies: vec![Reply { text: String::new(), at: 0, about: None }],
             verdicts: HashMap::new(),
             current: None,
@@ -241,8 +247,8 @@ impl Story {
         if let (true, Some(id)) = (read, self.current) {
             self.verdicts.insert(id, Verdict::Accepted);
         }
-        let reviewing = self.current.map_or(self.replies.len() - 1, |id| id.reply);
-        self.history.push(FollowUp { reply: self.replies[reviewing].text.clone(), at: item.map(Item::describe), said });
+        let reply = self.replies.last().map(|r| r.text.clone()).unwrap_or_default();
+        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), at: item.map(Item::describe), said });
         self.replies.push(Reply { text: String::new(), at, about: self.current });
         self.error = None;
         self.current = None;
@@ -268,9 +274,41 @@ impl Story {
 
     /// The current item was accepted (and applied) or skipped.
     pub fn decide(&mut self, verdict: Verdict) {
-        if let Some(id) = self.current.take() {
-            self.verdicts.insert(id, verdict);
+        let Some(id) = self.current.take() else { return };
+        // Reading a note isn't a decision worth telling Claude about.
+        if let Some(item) = self.item(id).filter(|i| !matches!(i, Item::Note(_))) {
+            let what = if verdict == Verdict::Accepted { "accepted" } else { "skipped" };
+            self.decided.push(format!("{what}: {}", item.describe()));
         }
+        self.verdicts.insert(id, verdict);
+    }
+
+    /// What Claude said, in brief, for the log of interactions: its notes
+    /// (cut short), or the changes it proposed and how many were applied.
+    pub fn recap(&self) -> String {
+        const MAX: usize = 600;
+        let items = self.items();
+        let notes: Vec<String> = items.iter().filter_map(|(_, i)| if let Item::Note(n) = i { Some(n.text.replace('\n', " ")) } else { None }).collect();
+        let mut files: Vec<String> = items
+            .iter()
+            .filter_map(|(_, i)| match i {
+                Item::Step(s) => Some(s.file.clone().unwrap_or_else(|| "the file asked about".into())),
+                Item::Create(p) | Item::Remove(p) => Some(p.clone()),
+                Item::Rename { from, .. } => Some(from.clone()),
+                Item::Note(_) => None,
+            })
+            .collect();
+        files.dedup();
+        let mut recap = notes.join(" / ");
+        if !files.is_empty() {
+            let (kept, total) = self.summary();
+            recap.push_str(&format!("{}proposed {total} change(s) in {}, {kept} applied", if recap.is_empty() { "" } else { " / " }, files.join(", ")));
+        }
+        if recap.len() > MAX {
+            recap.truncate(recap.floor_char_boundary(MAX));
+            recap.push('…');
+        }
+        recap
     }
 
     /// Move on to the next item to review, or finish when nothing is left.
@@ -381,6 +419,9 @@ mod tests {
         story.follow_up("why int?".into());
         assert_eq!(story.writing_about(), Some(plan(1)), "the answer is on its way to where it was asked");
         assert!(story.followups()[0].at.as_deref().is_some_and(|at| at.contains(") -> int:")), "Claude is told where the user is");
+        assert_eq!(story.followups()[0].decided.len(), 1, "and what they accepted");
+        assert!(story.followups()[0].decided[0].starts_with("accepted: a step"));
+        assert_eq!(story.followups()[0].reply, TWO_STEPS, "and the latest reply, whole");
         let answer = ItemId { reply: 1, part: Part::Answer, index: 0 };
         assert_eq!(arrived(&mut story, "<answer>\n<note>\nBecause both are ints.\n</note>\n</answer>\n"), Settled::At(answer));
         assert_eq!(story.asked_about(answer), Some(plan(1)));
@@ -483,5 +524,10 @@ mod tests {
         arrived(&mut story, "<answer>\nNoted.\n</answer>\n<memory>\nLikes doctests.\n</memory>\n");
         assert_eq!(story.memory_update().as_deref(), Some("Likes doctests."));
         assert_eq!(story.outcome(), "answered");
+        assert_eq!(story.recap(), "It adds. / Noted.");
+        let mut story = Story::new("implement it");
+        arrived(&mut story, TWO_STEPS);
+        story.decide(Verdict::Accepted);
+        assert_eq!(story.recap(), "proposed 2 change(s) in the file asked about, 1 applied");
     }
 }

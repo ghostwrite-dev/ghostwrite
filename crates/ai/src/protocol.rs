@@ -120,7 +120,25 @@ them under 300 words.
 the notes
 </memory>
 
-Most replies don't need it.";
+Most replies don't need it.
+
+The user reviews your reply one step or note at a time, and can say something at any point: a question, a \
+comment, a correction, a change of direction. Then they'll tell you where they are and what they said. Reply in \
+two parts, both optional:
+
+<answer>
+what answers them now, shown right where they are: notes (or steps for something to add right there)
+</answer>
+<rest>
+the new plan from where they are on, in the same format as a first reply: steps, file operations, or an \
+<answer> with notes
+</rest>
+
+The <rest> replaces the step they're at (or, at a note they've read, what follows it) and everything after it, \
+so include all of what's still to come. Whenever what they said changes what you'd do next (a correction, a \
+redirect, a different approach or focus), the new plan goes in <rest>, not in the first part: corrected steps \
+outside <rest> would come in addition to the old ones, not instead of them. Leave <rest> out only if everything \
+after stays exactly as it was; an empty <rest></rest> drops it all.";
 
 /// What Claude made of the request: steps that edit, or an answer that doesn't.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

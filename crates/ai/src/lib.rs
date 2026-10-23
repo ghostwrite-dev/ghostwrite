@@ -23,7 +23,7 @@ pub mod story;
 pub mod tools;
 
 pub use backend::Backend;
-pub use context::{Interaction, Request};
+pub use context::{Interaction, Request, Role, Surroundings};
 pub use layout::{Layout, Origin, Spot};
 pub use story::{FollowUp, Item, ItemId, Part, Settled, Story, Verdict};
 

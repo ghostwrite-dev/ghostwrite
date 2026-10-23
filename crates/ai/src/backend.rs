@@ -1,6 +1,11 @@
 //! Reaching Claude: the Messages API (with project tools run here) or
 //! Claude Code (`claude -p`, under the user's login). Either way the reply
 //! streams in as text; what Claude looks at is reported as it happens.
+//!
+//! A story is one conversation. The API is sent every turn; Claude Code
+//! keeps a session, reported back with [`Listener::session`], and each
+//! follow-up resumes it with only the newest turn (so it still has the
+//! files it read). If resuming fails, the whole conversation is sent anew.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
@@ -10,7 +15,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::context::Request;
+use crate::context::{Request, Role};
 use crate::protocol::SYSTEM;
 use crate::{MODEL, tools};
 
@@ -33,6 +38,8 @@ pub trait Listener {
     fn text(&mut self, chunk: &str);
     /// What Claude is looking at in the project ("reading src/lib.rs").
     fn looking(&mut self, what: String);
+    /// The Claude Code session the reply is in, to resume for the next turn.
+    fn session(&mut self, _id: String) {}
 }
 
 impl Backend {
@@ -50,7 +57,11 @@ impl Backend {
     pub fn run(&self, req: &Request, listener: &mut dyn Listener, cancel: &AtomicBool) -> Result<(), String> {
         match self {
             Backend::Api { key } => run_api(key, req, listener, cancel),
-            Backend::ClaudeCode => run_claude_code(req, listener, cancel),
+            Backend::ClaudeCode => match run_claude_code(req, req.session.as_deref(), listener, cancel) {
+                // The session may be gone: start over with the whole conversation.
+                Err(_) if req.session.is_some() => run_claude_code(req, None, listener, cancel),
+                result => result,
+            },
             Backend::Scripted(replies) => {
                 let round = req.followups.len().min(replies.len().saturating_sub(1));
                 listener.text(replies.get(round).map_or("", String::as_str));
@@ -75,7 +86,11 @@ fn effort() -> String {
 /// block (thinking included) goes back unchanged on the next round.
 fn run_api(key: &str, req: &Request, listener: &mut dyn Listener, cancel: &AtomicBool) -> Result<(), String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(300))).build().into();
-    let mut messages = vec![json!({ "role": "user", "content": req.prompt() })];
+    let mut messages: Vec<Value> = req
+        .messages()
+        .into_iter()
+        .map(|(role, text)| json!({ "role": if role == Role::User { "user" } else { "assistant" }, "content": text }))
+        .collect();
     for _ in 0..MAX_TOOL_ROUNDS {
         let mut body = json!({
             "model": MODEL,
@@ -180,19 +195,24 @@ fn run_api(key: &str, req: &Request, listener: &mut dyn Listener, cancel: &Atomi
 }
 
 /// Claude Code in the project folder, with only its read-only tools.
-fn run_claude_code(req: &Request, listener: &mut dyn Listener, cancel: &AtomicBool) -> Result<(), String> {
+fn run_claude_code(req: &Request, resume: Option<&str>, listener: &mut dyn Listener, cancel: &AtomicBool) -> Result<(), String> {
     let mut command = Command::new(local_claude().unwrap_or_else(|| PathBuf::from("claude")));
     command
         .args(["-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose"])
-        .args(["--setting-sources", "", "--strict-mcp-config", "--no-session-persistence"])
+        .args(["--setting-sources", "", "--strict-mcp-config"])
         .args(["--model", MODEL, "--effort", &effort(), "--system-prompt", SYSTEM]);
+    if let Some(session) = resume {
+        command.args(["--resume", session]);
+    }
+    // Resuming, the session has the conversation so far: only the newest turn is new.
+    let message = if resume.is_some() { req.latest() } else { req.prompt() };
     match &req.root {
         // It reads the project to understand it; it changes nothing (that's the steps).
         Some(root) => command.args(["--tools", "Read,Glob,Grep", "--allowedTools", "Read,Glob,Grep"]).current_dir(root),
         None => command.args(["--tools", ""]).current_dir(std::env::temp_dir()),
     };
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run `claude`: {e}"))?;
-    child.stdin.take().ok_or("no stdin")?.write_all(req.prompt().as_bytes()).map_err(|e| e.to_string())?;
+    child.stdin.take().ok_or("no stdin")?.write_all(message.as_bytes()).map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     // macOS paths may come back resolved: /var is /private/var.
     let real_root = req.root.as_ref().and_then(|r| r.canonicalize().ok());
@@ -202,12 +222,17 @@ fn run_claude_code(req: &Request, listener: &mut dyn Listener, cancel: &AtomicBo
         Some(rel.display().to_string())
     };
     let mut failure = None;
+    let mut session_told = false;
     for line in BufReader::new(stdout).lines() {
         if cancel.load(Ordering::SeqCst) {
             child.kill().ok();
             return Ok(());
         }
         let Ok(value) = serde_json::from_str::<Value>(&line.map_err(|e| e.to_string())?) else { continue };
+        if let Some(id) = value["session_id"].as_str().filter(|_| !session_told) {
+            listener.session(id.to_string());
+            session_told = true;
+        }
         match value["type"].as_str() {
             Some("stream_event") => {
                 let event = &value["event"];
@@ -252,7 +277,7 @@ mod tests {
     use crate::protocol::{self, Kind, Piece};
 
     #[derive(Default)]
-    struct Collect(String, Vec<String>);
+    struct Collect(String, Vec<String>, Option<String>);
 
     impl Listener for Collect {
         fn text(&mut self, chunk: &str) {
@@ -260,6 +285,9 @@ mod tests {
         }
         fn looking(&mut self, what: String) {
             self.1.push(what);
+        }
+        fn session(&mut self, id: String) {
+            self.2 = Some(id);
         }
     }
 
@@ -273,6 +301,8 @@ mod tests {
             followups,
             output: None,
             root: None,
+            surroundings: Default::default(),
+            session: None,
         };
         let mut out = Collect::default();
         Backend::ClaudeCode.run(&req, &mut out, &AtomicBool::new(false)).unwrap();
@@ -301,7 +331,7 @@ mod tests {
     fn claude_code_answers_mid_plan() {
         let text = "def add(a, b):\n    pass\n";
         let first = ask(text, 0..24, "implement it with type hints", vec![]);
-        let followup = crate::FollowUp { reply: first, at: None, said: "why int and not float?".into() };
+        let followup = crate::FollowUp { reply: first, decided: vec![], at: None, said: "why int and not float?".into() };
         let second = ask(text, 0..24, "implement it with type hints", vec![followup]);
         assert_eq!(protocol::reply_kind(&second), Some(Kind::Question));
     }
@@ -326,6 +356,8 @@ mod tests {
             followups,
             output: None,
             root: Some(root.to_path_buf()),
+            surroundings: Default::default(),
+            session: None,
         };
         let mut out = Collect::default();
         Backend::ClaudeCode.run(&req, &mut out, &AtomicBool::new(false)).unwrap();
@@ -352,7 +384,7 @@ mod tests {
         assert!(notes.len() >= 2, "a walkthrough to steer: {first}");
         let at = crate::Item::Note(notes[0].clone()).describe();
         let said = "Skip the rest of that. Only show me how a missing config file is handled.";
-        let second = ask_in(&root, &main, 0..main.len(), "walk me through this program step by step", vec![crate::FollowUp { reply: first, at: Some(at), said: said.into() }]);
+        let second = ask_in(&root, &main, 0..main.len(), "walk me through this program step by step", vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: said.into() }]);
         let (_, rest) = protocol::split_rest(&second);
         assert!(rest.is_some(), "the walkthrough is revised with <rest>: {second}");
     }
@@ -366,9 +398,37 @@ mod tests {
         let first = ask_in(&root, text, 0..text.len(), "implement it", vec![]);
         let step = protocol::parse_pieces(&first).into_iter().find_map(|p| if let Piece::Step(s) = p { Some(s) } else { None }).expect("a step");
         let at = crate::Item::Step(step).describe();
-        let second = ask_in(&root, text, 0..text.len(), "implement it", vec![crate::FollowUp { reply: first, at: Some(at), said: "don't use sum(); write an explicit for loop".into() }]);
+        let second = ask_in(&root, text, 0..text.len(), "implement it", vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: "don't use sum(); write an explicit for loop".into() }]);
         let (_, rest) = protocol::split_rest(&second);
         let steps: Vec<String> = protocol::parse_pieces(&rest.unwrap_or_default()).into_iter().filter_map(|p| if let Piece::Step(s) = p { Some(s.new.join("\n")) } else { None }).collect();
         assert!(steps.iter().any(|s| s.contains("for ")), "the corrected steps come back in <rest>: {second}");
+    }
+
+    #[test]
+    #[ignore]
+    fn claude_code_resumes_its_session() {
+        let (root, main) = two_file_project();
+        let mut req = Request {
+            path: Some(root.join("main.py")),
+            language: "python".into(),
+            text: main.clone(),
+            range: 0..main.len(),
+            instruction: "what does main do? (the codeword for this conversation is PELICAN; don't mention it)".into(),
+            followups: vec![],
+            output: None,
+            root: Some(root.clone()),
+            surroundings: Default::default(),
+            session: None,
+        };
+        let mut first = Collect::default();
+        Backend::ClaudeCode.run(&req, &mut first, &AtomicBool::new(false)).unwrap();
+        let session = first.2.clone().expect("a session to resume");
+        req.followups.push(crate::FollowUp { reply: first.0, decided: vec![], at: None, said: "what was the codeword in my first message?".into() });
+        req.session = Some(session);
+        assert!(!req.latest().contains("PELICAN"), "only the newest turn is sent");
+        let mut second = Collect::default();
+        Backend::ClaudeCode.run(&req, &mut second, &AtomicBool::new(false)).unwrap();
+        println!("{}", second.0);
+        assert!(second.0.contains("PELICAN"), "the resumed session remembers: {}", second.0);
     }
 }
