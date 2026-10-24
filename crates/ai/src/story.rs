@@ -110,6 +110,8 @@ pub struct FollowUp {
     pub said: String,
     /// Ghostwrite, not the user, is speaking: Claude's reply couldn't be used.
     pub correction: bool,
+    /// A `:sh` command the user ran since that reply, with its output.
+    pub command: Option<String>,
 }
 
 #[derive(Debug)]
@@ -271,22 +273,13 @@ impl Story {
     /// text is `text` unless it's the file asked about, which Claude is
     /// shown anyway): Claude rewrites it and what follows.
     pub fn step_misplaced(&mut self, file: &str, text: Option<&str>) {
-        let mut said = format!(
-            "your step's <old> lines aren't in {file} as it is now, so it can't be applied. Copy <old> exactly from the \
-             file as it is (a step it builds on may have been skipped). Reply with only <rest>: the corrected step and \
-             everything after it."
-        );
-        if let Some(text) = text {
-            let text = &text[..text.floor_char_boundary(crate::settings().context_bytes / 2)];
-            said.push_str(&format!("\n\n{file} as it is now:\n<file>\n{text}\n</file>"));
-        }
-        self.revise(said);
+        self.revise(protocol::misplaced_step(file, text));
     }
 
     /// The latest reply is complete but there's nothing in it to review:
     /// Claude writes it again, in the format.
     pub fn reply_unusable(&mut self) {
-        self.revise("there's nothing in your reply in the reply format (no <step>, file operation or <answer> with notes), so the user sees nothing. Reply again, in the format.".into());
+        self.revise(protocol::NOTHING_TO_REVIEW.into());
     }
 
     /// Whether the last reply, now complete, has nothing to review and isn't
@@ -315,11 +308,19 @@ impl Story {
             self.verdicts.insert(id, Verdict::Accepted);
         }
         let reply = self.replies.last().map(|r| r.text.clone()).unwrap_or_default();
-        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), at: item.map(Item::describe), said, correction });
+        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), at: item.map(Item::describe), said, correction, command: None });
         self.replies.push(Reply { text: String::new(), at, about: self.current, correction });
         self.error = None;
         self.current = None;
         self.writing = Some(self.replies.len() - 1);
+    }
+
+    /// The user ran `command` (with its output) since Claude's last reply:
+    /// the newest follow-up says so.
+    pub fn ran(&mut self, command: String) {
+        if let Some(followup) = self.history.last_mut() {
+            followup.command = Some(command);
+        }
     }
 
     /// More of the reply being written.

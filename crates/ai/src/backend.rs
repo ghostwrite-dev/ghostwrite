@@ -327,7 +327,7 @@ mod tests {
     fn claude_code_answers_mid_plan() {
         let text = "def add(a, b):\n    pass\n";
         let first = ask(text, 0..24, "implement it with type hints", vec![]);
-        let followup = crate::FollowUp { reply: first, decided: vec![], at: None, said: "why int and not float?".into(), correction: false };
+        let followup = crate::FollowUp { reply: first, decided: vec![], at: None, said: "why int and not float?".into(), correction: false, command: None };
         let second = ask(text, 0..24, "implement it with type hints", vec![followup]);
         assert_eq!(protocol::reply_kind(&second), Some(Kind::Question));
     }
@@ -384,7 +384,7 @@ mod tests {
             &main,
             0..main.len(),
             "walk me through this program step by step",
-            vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: said.into(), correction: false }],
+            vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: said.into(), correction: false, command: None }],
         );
         let (_, rest) = protocol::split_rest(&second);
         assert!(rest.is_some(), "the walkthrough is revised with <rest>: {second}");
@@ -410,6 +410,7 @@ mod tests {
                 at: Some(at),
                 said: "don't use sum(); write an explicit for loop".into(),
                 correction: false,
+                command: None,
             }],
         );
         let (_, rest) = protocol::split_rest(&second);
@@ -444,6 +445,7 @@ mod tests {
             at: None,
             said: "what was the codeword in my first message?".into(),
             correction: false,
+            command: None,
         });
         req.session = Some(session);
         assert!(!req.latest().contains("PELICAN"), "only the newest turn is sent");

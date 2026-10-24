@@ -45,6 +45,32 @@ pub struct Ghost {
     pub name: String,
 }
 
+/// The folders to list: the root and the open ones.
+#[derive(Debug, Clone)]
+pub struct Listing {
+    root: PathBuf,
+    expanded: HashSet<PathBuf>,
+}
+
+impl Listing {
+    /// The rows, read from disk.
+    pub fn list(&self) -> Vec<Row> {
+        fn walk(dir: &Path, depth: usize, expanded: &HashSet<PathBuf>, rows: &mut Vec<Row>) {
+            for (path, is_dir) in list_dir(dir) {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let open = is_dir && expanded.contains(&path);
+                rows.push(Row { path: path.clone(), name, depth, is_dir });
+                if open {
+                    walk(&path, depth + 1, expanded, rows);
+                }
+            }
+        }
+        let mut rows = vec![];
+        walk(&self.root, 0, &self.expanded, &mut rows);
+        rows
+    }
+}
+
 #[derive(Debug)]
 pub struct Tree {
     root: PathBuf,
@@ -93,19 +119,22 @@ impl Tree {
 
     /// Re-list from disk, keeping the cursor on the same path if it's still there.
     pub fn refresh(&mut self) {
-        fn walk(dir: &Path, depth: usize, expanded: &HashSet<PathBuf>, rows: &mut Vec<Row>) {
-            for (path, is_dir) in list_dir(dir) {
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let open = is_dir && expanded.contains(&path);
-                rows.push(Row { path: path.clone(), name, depth, is_dir });
-                if open {
-                    walk(&path, depth + 1, expanded, rows);
-                }
-            }
-        }
+        let rows = self.listing().list();
+        self.set_rows(rows);
+    }
+
+    /// What re-listing reads, to do it away from the UI; [`Tree::listed`] takes the result.
+    pub fn listing(&self) -> Listing {
+        Listing { root: self.root.clone(), expanded: self.expanded.clone() }
+    }
+
+    /// The rows `listing` read, if the same folders are still open (else re-list).
+    pub fn listed(&mut self, listing: &Listing, rows: Vec<Row>) {
+        if listing.expanded == self.expanded { self.set_rows(rows) } else { self.refresh() }
+    }
+
+    fn set_rows(&mut self, rows: Vec<Row>) {
         let at = self.selected().map(|r| r.path.clone());
-        let mut rows = vec![];
-        walk(&self.root, 0, &self.expanded, &mut rows);
         self.rows = rows;
         self.cursor = at.and_then(|p| self.index_of(&p)).unwrap_or(self.cursor).min(self.rows.len().saturating_sub(1));
     }

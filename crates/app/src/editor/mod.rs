@@ -15,15 +15,18 @@
 //! platform's input handler.
 //!
 //! - [`project`], [`tabs`], [`document`]: the model
-//! - [`commands`]: `:` commands
+//! - [`commands`]: `:` commands, in the [`prompt`]
+//! - [`input`]: text from the platform
 //! - [`story`] (drawn by [`story_view`]), [`shell`], [`tour`], [`language`], [`tree`]: features
 //! - [`view`] and [`element`]: drawing
 
 mod commands;
 mod document;
 mod element;
+mod input;
 mod language;
 mod project;
+mod prompt;
 mod shell;
 mod story;
 mod story_view;
@@ -45,8 +48,8 @@ use ghostwrite_core::modal::{Outcome, Registers, Target};
 use ghostwrite_core::{Buffer, Effect, Key, Modal, Mode, Range, Review};
 use ghostwrite_project::store::{self, Session};
 use gpui::{
-    App, AppContext as _, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Keystroke, PathPromptOptions,
-    Pixels, Point, PromptLevel, Subscription, UTF16Selection, UniformListScrollHandle, Window, px,
+    App, AppContext as _, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Keystroke, PathPromptOptions, Pixels, PromptLevel,
+    Subscription, Window,
 };
 
 pub use document::{DocId, Document};
@@ -54,7 +57,7 @@ pub use project::Project;
 pub use tabs::{Autoscroll, Tab, Tabs};
 
 use crate::keys::key_of;
-use crate::ui::text_field::{TextField, TextFieldEvent};
+use prompt::{Prompt, PromptKind};
 
 pub enum EditorEvent {
     /// `:project`: the projects page, or straight into the given folder.
@@ -75,24 +78,6 @@ impl Default for Options {
     }
 }
 
-/// What a prompt is for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PromptKind {
-    Command,
-    /// Asking Claude, or saying something about the item under review.
-    Ask,
-    /// Naming a new file or folder in this folder.
-    TreeAdd(PathBuf),
-    TreeRename(PathBuf),
-}
-
-/// The one open prompt: it has the keyboard until it closes.
-struct Prompt {
-    kind: PromptKind,
-    field: Entity<TextField>,
-    _subscription: Subscription,
-}
-
 /// What the code view measured when it last drew.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Measured {
@@ -108,11 +93,7 @@ pub struct Editor {
     modal: Modal,
     /// The yank register, shared by all documents.
     yanked: String,
-    show_tree: bool,
-    tree_width: Pixels,
-    tree_scroll: UniformListScrollHandle,
-    /// Dragging the tree's edge.
-    resizing_tree: bool,
+    tree_pane: tree::TreePane,
     prompt: Option<Prompt>,
     /// Earlier `:` commands, oldest first, and where ↑/↓ is in them.
     history: Vec<String>,
@@ -220,10 +201,7 @@ impl Editor {
             focus,
             modal: Modal::default(),
             yanked: String::new(),
-            show_tree: true,
-            tree_width: px(store::tree_width().unwrap_or(240.)),
-            tree_scroll: UniformListScrollHandle::new(),
-            resizing_tree: false,
+            tree_pane: tree::TreePane::new(),
             prompt: None,
             history: store::command_history(),
             history_at: None,
@@ -258,13 +236,24 @@ impl Editor {
         self.project.tab()
     }
 
-    /// Another program changed `paths`.
+    /// Another program changed `paths`: read them again in the background.
     fn disk_changed(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let reread = self.project.to_reread(paths);
+        let read = cx.background_spawn(async move { reread.read() });
+        cx.spawn(async move |this, cx| {
+            let disk = read.await;
+            this.update(cx, |this, cx| this.reread(disk, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn reread(&mut self, disk: project::Disk, cx: &mut Context<Self>) {
         // An insert session can't outlive its text being replaced.
-        if self.tab().is_some_and(|t| !t.doc.dirty && t.doc.path.as_ref().is_some_and(|p| paths.contains(p))) {
+        let replaced = self.tab().is_some_and(|t| !t.doc.dirty && t.doc.path.as_deref().and_then(|p| disk.text(p)).is_some_and(|text| text != t.doc.text()));
+        if replaced {
             self.leave_insert();
         }
-        if self.project.disk_changed(paths) {
+        if self.project.reread(disk) {
             self.completion = None;
             cx.notify();
         }
@@ -483,150 +472,4 @@ impl Editor {
             Effect::Diagnostics => self.diagnostics_tour(cx),
         }
     }
-
-    /// Typed text, in insert mode (anywhere else it's ignored).
-    fn insert_text(&mut self, text: &str, replacing: Option<Bytes<usize>>, cx: &mut Context<Self>) {
-        if self.modal.mode != Mode::Insert {
-            return;
-        }
-        let Some(tab) = self.project.tabs.active_mut() else { return };
-        if let Some(range) = replacing {
-            tab.view.selection = Range::new(range.start, range.end).clamp(tab.doc.buffer.len());
-        }
-        self.modal.insert(text, &mut tab.target(1));
-        tab.view.autoscroll = Some(Autoscroll::Fit);
-        tab.sync();
-        self.after_typing(text, cx);
-        cx.notify();
-    }
-
-    // Prompts.
-
-    fn open_prompt(&mut self, kind: PromptKind, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let placeholder = match kind {
-            PromptKind::Ask => "Ask Claude, or tell it what to change…",
-            PromptKind::Command => "",
-            PromptKind::TreeAdd(_) => "name, or name/ for a folder",
-            PromptKind::TreeRename(_) => "new name",
-        };
-        let field = cx.new(|cx| TextField::new(text, placeholder, cx));
-        let subscription = cx.subscribe_in(&field, window, |this, field, event, window, cx| {
-            let text = field.read(cx).text().to_string();
-            this.prompt_event(*event, text, window, cx);
-        });
-        field.read(cx).focus(window);
-        if kind == PromptKind::Command {
-            self.history_at = None;
-            self.project.status = None;
-        }
-        self.prompt = Some(Prompt { kind, field, _subscription: subscription });
-        cx.notify();
-    }
-
-    fn close_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.prompt = None;
-        window.focus(&self.focus);
-        cx.notify();
-    }
-
-    fn asking(&self) -> bool {
-        self.prompt.as_ref().is_some_and(|p| p.kind == PromptKind::Ask)
-    }
-
-    /// The prompt's field while asking Claude.
-    fn ask_field(&self) -> Option<Entity<TextField>> {
-        self.prompt.as_ref().filter(|p| p.kind == PromptKind::Ask).map(|p| p.field.clone())
-    }
-
-    fn prompt_event(&mut self, event: TextFieldEvent, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(kind) = self.prompt.as_ref().map(|p| p.kind.clone()) else { return };
-        match (event, kind) {
-            (TextFieldEvent::Submit, PromptKind::Command) => {
-                self.close_prompt(window, cx);
-                self.remember_command(&text);
-                if let Err(e) = self.run_command(&text, window, cx) {
-                    self.project.status = (!e.is_empty()).then(|| e.into());
-                }
-            }
-            (TextFieldEvent::Submit, PromptKind::Ask) => self.ask(text, window, cx),
-            (TextFieldEvent::Submit, PromptKind::TreeAdd(dir)) => {
-                self.close_prompt(window, cx);
-                self.tree_add(&dir, &text, cx);
-            }
-            (TextFieldEvent::Submit, PromptKind::TreeRename(from)) => {
-                self.close_prompt(window, cx);
-                self.tree_rename(&from, &text);
-            }
-            (TextFieldEvent::Cancel, PromptKind::Ask) => self.cancel_ask(window, cx),
-            (TextFieldEvent::Cancel, _) => self.close_prompt(window, cx),
-            (TextFieldEvent::Up | TextFieldEvent::Down, PromptKind::Command) => self.history_step(event == TextFieldEvent::Up, cx),
-            (TextFieldEvent::Complete, PromptKind::Command) => self.complete_command(&text, cx),
-            _ => {}
-        }
-        cx.notify();
-    }
-}
-
-impl EntityInputHandler for Editor {
-    fn text_for_range(&mut self, range: Bytes<usize>, actual: &mut Option<Bytes<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
-        let text = self.tab()?.doc.text();
-        let range = from_utf16(text, &range);
-        actual.replace(to_utf16(text, &range));
-        Some(text[range].to_string())
-    }
-
-    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
-        let tab = self.tab()?;
-        let sel = tab.view.selection;
-        Some(UTF16Selection { range: to_utf16(tab.doc.text(), &sel.bytes()), reversed: sel.head < sel.anchor })
-    }
-
-    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Bytes<usize>> {
-        Some(to_utf16(self.tab()?.doc.text(), self.marked.as_ref()?))
-    }
-
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.marked = None;
-    }
-
-    fn replace_text_in_range(&mut self, range: Option<Bytes<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
-        let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.text(), &range?)));
-        self.insert_text(text, replacing, cx);
-    }
-
-    fn replace_and_mark_text_in_range(&mut self, range: Option<Bytes<usize>>, text: &str, _: Option<Bytes<usize>>, _: &mut Window, cx: &mut Context<Self>) {
-        let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.text(), &range?)));
-        let start = replacing.as_ref().map(|r| r.start).or_else(|| self.tab().map(|t| t.view.selection.from()));
-        self.insert_text(text, replacing, cx);
-        if self.modal.mode == Mode::Insert {
-            self.marked = start.filter(|_| !text.is_empty()).map(|s| s..s + text.len());
-        }
-    }
-
-    fn bounds_for_range(&mut self, _: Bytes<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
-        self.measured.cursor
-    }
-
-    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
-        None
-    }
-}
-
-fn to_utf16(text: &str, range: &Bytes<usize>) -> Bytes<usize> {
-    let units = |at: usize| text[..at.min(text.len())].chars().map(char::len_utf16).sum::<usize>();
-    units(range.start)..units(range.end)
-}
-
-fn from_utf16(text: &str, range: &Bytes<usize>) -> Bytes<usize> {
-    let byte = |units: usize| {
-        let mut count = 0;
-        for (i, c) in text.char_indices() {
-            if count >= units {
-                return i;
-            }
-            count += c.len_utf16();
-        }
-        text.len()
-    };
-    byte(range.start)..byte(range.end)
 }

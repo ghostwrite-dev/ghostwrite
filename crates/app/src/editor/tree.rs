@@ -7,13 +7,28 @@ use ghostwrite_core::Mode;
 use ghostwrite_core::modal::TreeCommand;
 use ghostwrite_project::{fs, store};
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, PromptLevel, ScrollStrategy, SharedString, Window, div, prelude::*, px,
-    uniform_list,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, PromptLevel, ScrollStrategy, SharedString, UniformListScrollHandle,
+    Window, div, prelude::*, px, uniform_list,
 };
 
 use super::story::Waiting;
 use super::{Editor, PromptKind};
 use crate::theme::theme;
+
+/// The tree's side of the window: shown or not, how wide, and where it's scrolled.
+pub(super) struct TreePane {
+    pub(super) shown: bool,
+    width: Pixels,
+    scroll: UniformListScrollHandle,
+    /// Dragging its edge.
+    resizing: bool,
+}
+
+impl TreePane {
+    pub(super) fn new() -> Self {
+        Self { shown: true, width: px(store::tree_width().unwrap_or(240.)), scroll: UniformListScrollHandle::new(), resizing: false }
+    }
+}
 
 const ROW_HEIGHT: f32 = 24.;
 const INDENT: f32 = 14.;
@@ -52,7 +67,7 @@ impl Editor {
     pub(super) fn enter_tree(&mut self, cx: &mut Context<Self>) {
         self.leave_insert();
         self.modal.to_tree();
-        self.show_tree = true;
+        self.tree_pane.shown = true;
         self.project.tree.set_active(self.project.active_path());
         if let Some(path) = self.project.active_path() {
             self.project.tree.reveal(&path);
@@ -62,8 +77,8 @@ impl Editor {
     }
 
     pub(super) fn toggle_tree(&mut self, cx: &mut Context<Self>) {
-        self.show_tree = !self.show_tree;
-        if !self.show_tree && self.modal.mode == Mode::Tree {
+        self.tree_pane.shown = !self.tree_pane.shown;
+        if !self.tree_pane.shown && self.modal.mode == Mode::Tree {
             self.modal.mode = Mode::Normal;
         }
         cx.notify();
@@ -108,7 +123,7 @@ impl Editor {
     fn scroll_tree_to_cursor(&self, strategy: ScrollStrategy) {
         let cursor = self.project.tree.cursor();
         if let Some(ix) = self.tree_lines(None).iter().position(|l| matches!(l, Line::Row(i) if *i == cursor)) {
-            self.tree_scroll.scroll_to_item(ix, strategy);
+            self.tree_pane.scroll.scroll_to_item(ix, strategy);
         }
     }
 
@@ -162,7 +177,7 @@ impl Editor {
         let rows = self.project.tree.rows();
         let ghost = self.project.tree.ghost();
         let proposed = self.project.tree.proposal().and_then(|p| p.row_path());
-        let cols = |depth: usize| ((f32::from(self.tree_width) - (8. + INDENT * depth as f32 + 16.) - 8.) / 7.).max(20.) as usize;
+        let cols = |depth: usize| ((f32::from(self.tree_pane.width) - (8. + INDENT * depth as f32 + 16.) - 8.) / 7.).max(20.) as usize;
         let under = |depth: usize| -> Vec<Line> {
             let Some(annex) = annex else { return vec![] };
             if annex.asking {
@@ -325,12 +340,12 @@ impl Editor {
                     .collect()
             }),
         )
-        .track_scroll(self.tree_scroll.clone())
+        .track_scroll(self.tree_pane.scroll.clone())
         .flex_1();
         div()
             .relative()
             .flex_none()
-            .w(self.tree_width)
+            .w(self.tree_pane.width)
             .h_full()
             .flex()
             .flex_col()
@@ -356,7 +371,7 @@ impl Editor {
             .child(div().id("tree-edge").absolute().top_0().right(px(-3.)).w(px(6.)).h_full().cursor_col_resize().on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.resizing_tree = true;
+                    this.tree_pane.resizing = true;
                     cx.stop_propagation();
                 }),
             ))
@@ -365,15 +380,15 @@ impl Editor {
 
     /// While dragging the tree's edge.
     pub(super) fn drag_tree_edge(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if self.resizing_tree {
-            self.tree_width = event.position.x.clamp(px(140.), px(640.));
+        if self.tree_pane.resizing {
+            self.tree_pane.width = event.position.x.clamp(px(140.), px(640.));
             cx.notify();
         }
     }
 
     pub(super) fn end_tree_drag(&mut self) {
-        if std::mem::take(&mut self.resizing_tree) {
-            store::save_tree_width(f32::from(self.tree_width));
+        if std::mem::take(&mut self.tree_pane.resizing) {
+            store::save_tree_width(f32::from(self.tree_pane.width));
         }
     }
 }

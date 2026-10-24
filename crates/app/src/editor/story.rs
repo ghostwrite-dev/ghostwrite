@@ -43,6 +43,11 @@ pub(super) struct StoryState {
     selection: Option<Range>,
     /// The Claude Code session the story is in, resumed for each follow-up.
     session: Option<String>,
+    /// The `:sh` command (with output) the first request carried: `None`
+    /// until it's sent. Kept, so the conversation's start stays the same.
+    pub(super) first_command: Option<Option<String>>,
+    /// The command Claude was last told about.
+    told_command: Option<String>,
     placer: Placer,
     cancel: Arc<AtomicBool>,
     _task: Option<Task<()>>,
@@ -114,6 +119,8 @@ impl StoryState {
             shown: None,
             selection: None,
             session: None,
+            first_command: None,
+            told_command: None,
             placer: Placer::new(root),
             cancel: Arc::default(),
             _task: None,
@@ -369,7 +376,7 @@ impl StoryState {
 
     /// After anything changes: move on, and put a newly current item where
     /// it'll be seen: its lines selected and centered in its file's tab, or
-    /// its proposal in the tree. (One in the panel is just there.)
+    /// its proposal in the tree.
     fn settle(&mut self, project: &mut Project) -> Show {
         let Some(story) = self.story.as_mut() else { return Show::Nothing };
         let id = match story.settle() {
@@ -514,8 +521,20 @@ impl Editor {
         self.project.write_all();
         let Some(backend) = self.backend.clone() else { return };
         let Some(state) = self.story.as_mut() else { return };
+        // The first request says what the last command was; a follow-up, what's been run since.
         let command = self.shell.as_ref().map(|s| s.context());
-        let Some(req) = state.request(&self.project, command) else { return };
+        match &state.first_command {
+            None => state.told_command.clone_from(&command),
+            Some(_) if command != state.told_command => {
+                if let (Some(command), Some(story)) = (&command, state.story.as_mut()) {
+                    story.ran(command.clone());
+                }
+                state.told_command.clone_from(&command);
+            }
+            Some(_) => {}
+        }
+        let first = state.first_command.get_or_insert(command).clone();
+        let Some(req) = state.request(&self.project, first) else { return };
         // Whatever was still coming is superseded.
         state.cancel.store(true, Ordering::SeqCst);
         state.cancel = Arc::new(AtomicBool::new(false));
@@ -587,7 +606,7 @@ impl Editor {
                     self.activate(ix, cx);
                 }
             }
-            Show::Tree => self.show_tree = true,
+            Show::Tree => self.tree_pane.shown = true,
             Show::Finished => self.finish_story(cx),
         }
         cx.notify();

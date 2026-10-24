@@ -3,6 +3,7 @@
 //! told the last command and its output with every request, and `:output`
 //! tours its errors (or pages) once it's done.
 
+use std::collections::VecDeque;
 use std::path::Path;
 
 use futures::StreamExt as _;
@@ -14,10 +15,14 @@ use super::Editor;
 
 /// Bytes of output Claude is told: the end, where the errors usually are.
 const MAX_CONTEXT: usize = 12_000;
+/// Lines of output kept (the last ones), so a server left running can't fill memory.
+const MAX_LINES: usize = 10_000;
 
 pub(super) struct Shell {
     command: String,
-    output: Vec<String>,
+    /// The last [`MAX_LINES`] lines, and how many came before them.
+    output: VecDeque<String>,
+    dropped: usize,
     /// `None` while it runs; then its exit code (`None`: stopped).
     exit: Option<Option<i32>>,
     /// The process, while it runs.
@@ -47,7 +52,14 @@ impl Shell {
         let state = self.exit.map_or("still running".to_string(), exit_label);
         let mut tail = vec![];
         let mut bytes = 0;
-        for line in self.output.iter().rev() {
+        let mut lines = self.output.iter().rev();
+        loop {
+            let Some(line) = lines.next() else {
+                if self.dropped > 0 {
+                    tail.push("… (earlier output cut)");
+                }
+                break;
+            };
             bytes += line.len() + 1;
             if bytes > MAX_CONTEXT {
                 tail.push("… (earlier output cut)");
@@ -63,7 +75,7 @@ impl Shell {
     /// The finished command's output, to tour.
     pub(super) fn tour(&self, root: &Path) -> Result<Tour, String> {
         let Some(exit) = self.exit else { return Err(format!("`{}` is still running (:stop stops it)", self.command)) };
-        Tour::command(self.command.clone(), self.output.clone(), exit, root).ok_or_else(|| format!("`{}` had no output", self.command))
+        Tour::command(self.command.clone(), self.output.iter().cloned().collect(), exit, root).ok_or_else(|| format!("`{}` had no output", self.command))
     }
 }
 
@@ -91,7 +103,7 @@ impl Editor {
             }
         });
         self.project.say(format!("running `{command}`…"));
-        self.shell = Some(Shell { command, output: vec![], exit: None, run: Some(run), _task: task });
+        self.shell = Some(Shell { command, output: VecDeque::new(), dropped: 0, exit: None, run: Some(run), _task: task });
         cx.notify();
         Ok(())
     }
@@ -100,11 +112,18 @@ impl Editor {
     fn shell_output(&mut self, message: Result<String, Option<i32>>, cx: &mut Context<Self>) -> bool {
         let Some(shell) = self.shell.as_mut() else { return false };
         match message {
-            Ok(line) => shell.output.push(line),
+            Ok(line) => {
+                if shell.output.len() == MAX_LINES {
+                    shell.output.pop_front();
+                    shell.dropped += 1;
+                }
+                shell.output.push_back(line);
+            }
             Err(code) => {
                 shell.run = None;
                 shell.exit = Some(code);
-                let errors = locations(&shell.output.join("\n"), &self.project.root).len();
+                let text = shell.output.iter().map(String::as_str).collect::<Vec<_>>().join("\n");
+                let errors = locations(&text, &self.project.root).len();
                 let more = match errors {
                     0 if shell.output.is_empty() => String::new(),
                     0 => " · :output to read it".into(),

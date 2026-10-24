@@ -140,6 +140,25 @@ redirect, a different approach or focus), the new plan goes in <rest>, not in th
 outside <rest> would come in addition to the old ones, not instead of them. Leave <rest> out only if everything \
 after stays exactly as it was; an empty <rest></rest> drops it all.";
 
+/// What Claude is told when a step doesn't apply: its `<old>` lines aren't
+/// in `file`, shown as it is (`text`) unless it's the file asked about,
+/// which every follow-up shows anyway.
+pub fn misplaced_step(file: &str, text: Option<&str>) -> String {
+    let mut said = format!(
+        "your step's <old> lines aren't in {file} as it is now, so it can't be applied. Copy <old> exactly from the file as it \
+         is (a step it builds on may have been skipped). Reply with only <rest>: the corrected step and everything after it."
+    );
+    if let Some(text) = text {
+        let text = &text[..text.floor_char_boundary(crate::settings().context_bytes / 2)];
+        said.push_str(&format!("\n\n{file} as it is now:\n<file>\n{text}\n</file>"));
+    }
+    said
+}
+
+/// What Claude is told when a reply has nothing in the format to review.
+pub const NOTHING_TO_REVIEW: &str = "there's nothing in your reply in the reply format (no <step>, file operation or <answer> \
+    with notes), so the user sees nothing. Reply again, in the format.";
+
 /// What Claude made of the request: steps that edit, or an answer that doesn't.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {

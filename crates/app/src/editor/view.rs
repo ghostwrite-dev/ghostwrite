@@ -364,7 +364,7 @@ impl gpui::Render for Editor {
             }
             None => self.render_empty(cx),
         };
-        let tree = self.show_tree.then(|| self.render_tree(cx));
+        let tree = self.tree_pane.shown.then(|| self.render_tree(cx));
         let tabs = (!self.project.tabs.is_empty()).then(|| self.render_tabs(cx));
         div()
             .key_context("Editor")

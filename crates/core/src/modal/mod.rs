@@ -10,7 +10,7 @@
 //! [`Modal::tree_key`] turns keys into [`TreeCommand`]s.
 //!
 //! Two modes are for reviewing: AI mode while a Claude story is up, and tour
-//! mode while a tour is (`:sh` errors, diagnostics, search matches). Tab,
+//! mode while a tour is (`:output` errors, diagnostics, search matches). Tab,
 //! Shift+Tab, Backspace, Enter and Esc become [`Review`] keys; you can move
 //! around to look, but not edit. They're entered over another mode with
 //! [`Modal::enter`] and [`Modal::leave`] goes back to it, so asking Claude

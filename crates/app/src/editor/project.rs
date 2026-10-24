@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use ghostwrite_core::Range;
 use ghostwrite_project::store::Session;
-use ghostwrite_project::tree::Tree;
+use ghostwrite_project::tree::{Listing, Row, Tree};
 use gpui::SharedString;
 
 use super::{Autoscroll, Document, Tab, Tabs};
@@ -34,6 +34,38 @@ impl ghostwrite_ai::placement::Files for ProjectFiles<'_> {
 
     fn all(&self) -> Vec<PathBuf> {
         ghostwrite_project::files::files(self.root, self.root).into_iter().map(|rel| self.root.join(rel)).collect()
+    }
+}
+
+/// What to read from disk again, away from the UI.
+pub struct Reread {
+    listing: Option<Listing>,
+    files: Vec<PathBuf>,
+}
+
+/// What [`Reread::read`] found: the tree's rows, and each open file's text
+/// (files gone or unreadable left out: what's on screen is all there is).
+pub struct Disk {
+    rows: Option<(Listing, Vec<Row>)>,
+    texts: Vec<(PathBuf, String)>,
+}
+
+impl Reread {
+    /// Read it. Blocks: run it in the background.
+    pub fn read(self) -> Disk {
+        let rows = self.listing.map(|listing| {
+            let rows = listing.list();
+            (listing, rows)
+        });
+        let texts = self.files.into_iter().filter_map(|path| std::fs::read_to_string(&path).ok().map(|text| (path, text))).collect();
+        Disk { rows, texts }
+    }
+}
+
+impl Disk {
+    /// The new text of `path`, if it was read.
+    pub fn text(&self, path: &Path) -> Option<&str> {
+        self.texts.iter().find(|(p, _)| p == path).map(|(_, t)| t.as_str())
     }
 }
 
@@ -171,19 +203,26 @@ impl Project {
         }
     }
 
-    /// Another program changed `paths`: re-list the tree if it shows them,
-    /// and reload the open files among them. A file with unsaved changes
-    /// keeps them; the status says so. Whether anything on screen changed.
-    pub fn disk_changed(&mut self, paths: &[PathBuf]) -> bool {
-        let mut changed = self.tree.shows_any(paths);
-        if changed {
-            self.tree.refresh();
+    /// What to read again after another program changed `paths`: the tree's
+    /// folders if it shows any of them, and the open files among them.
+    pub fn to_reread(&self, paths: &[PathBuf]) -> Reread {
+        let listing = self.tree.shows_any(paths).then(|| self.tree.listing());
+        let files = self.tabs.iter().filter_map(|t| t.doc.path.clone()).filter(|p| paths.contains(p)).collect();
+        Reread { listing, files }
+    }
+
+    /// Show what was read again: the tree's rows, and the open files' new
+    /// text. A file with unsaved changes keeps them; the status says so.
+    /// Whether anything on screen changed.
+    pub fn reread(&mut self, disk: Disk) -> bool {
+        let mut changed = false;
+        if let Some((listing, rows)) = disk.rows {
+            self.tree.listed(&listing, rows);
+            changed = true;
         }
         let mut kept = vec![];
-        for tab in self.tabs.iter_mut() {
-            let Some(path) = tab.doc.path.clone().filter(|p| paths.contains(p)) else { continue };
-            // Gone or unreadable: what's on screen is all there is now.
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        for (path, text) in disk.texts {
+            let Some(tab) = self.tabs.index_of_path(&path).and_then(|ix| self.tabs.get_mut(ix)) else { continue };
             if text == tab.doc.text() {
                 // Our own write, or someone wrote what's on screen.
                 changed |= std::mem::take(&mut tab.doc.dirty);

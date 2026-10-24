@@ -118,6 +118,7 @@ fn typing_in_insert_mode(cx: &mut TestAppContext) {
 fn changed_elsewhere(t: &mut Setup, paths: &[&str]) {
     let paths: Vec<PathBuf> = paths.iter().map(|p| t.dir.join(p)).collect();
     t.editor.update(t.cx, |e, cx| e.disk_changed(&paths, cx));
+    t.cx.run_until_parked();
 }
 
 #[gpui::test]
@@ -675,4 +676,39 @@ fn switching_to_a_storys_file_keeps_it_centered_on_the_item(cx: &mut TestAppCont
         e.tab().unwrap().view.autoscroll.clone()
     });
     assert_eq!(scroll, Some(super::Autoscroll::Center(1..2)));
+}
+
+#[gpui::test]
+fn the_watcher_brings_in_other_programs_changes(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut t = open("one\n", &[], cx);
+    std::fs::write(t.dir.join("doc.txt"), "changed elsewhere\n").unwrap();
+    std::fs::write(t.dir.join("new.txt"), "").unwrap();
+    let new = t.dir.join("new.txt");
+    for _ in 0..500 {
+        if t.text() == "changed elsewhere\n" && t.read(|e| e.project.tree.index_of(&new).is_some()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        t.cx.run_until_parked();
+    }
+    panic!("the change never arrived: {:?}", t.text());
+}
+
+#[gpui::test]
+fn claude_hears_about_commands_run_mid_story(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut t = open(ADD, &[TWO_STEPS, "<answer>\nOK.\n</answer>\n"], cx);
+    run_sh(&mut t, "echo before");
+    t.ask("types and body");
+    run_sh(&mut t, "echo during");
+    t.keys("enter").input("does it pass now?").keys("enter");
+    let req = t.read(|e| {
+        let state = e.story.as_ref().unwrap();
+        state.request(&e.project, Some("first".into())).unwrap()
+    });
+    let followup = &req.followups[0];
+    assert_eq!(followup.command.as_deref(), Some("$ echo during (✓ exit 0)\nduring"), "the newest turn says what ran since");
+    let first = t.read(|e| e.story.as_ref().unwrap().first_command.clone());
+    assert_eq!(first, Some(Some("$ echo before (✓ exit 0)\nbefore".into())), "the start of the conversation stays as it was");
 }

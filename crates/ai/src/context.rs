@@ -122,6 +122,9 @@ impl Request {
         if let Some(at) = &followup.at {
             out.push_str(&format!("They're at this part of your reply:\n<at>\n{}\n</at>\n\n", at.trim()));
         }
+        if let Some(command) = &followup.command {
+            out.push_str(&format!("Since your reply, the user ran a command (`:sh`):\n<output>\n{}\n</output>\n\n", command.trim_end()));
+        }
         if followup.correction {
             out.push_str(&format!("Ghostwrite couldn't use your reply: {}", followup.said.trim()));
         } else {
@@ -280,6 +283,7 @@ mod tests {
             at: Some("a step".into()),
             said: "keep the old name".into(),
             correction: false,
+            command: None,
         };
         let req = Request {
             followups: vec![followup.clone(), FollowUp { decided: vec![], at: None, said: "and add docs".into(), ..followup.clone() }],
@@ -295,9 +299,10 @@ mod tests {
         assert_eq!(req.latest(), turns[4].1, "resuming a session sends only that");
         let flat = req.prompt();
         assert!(flat.contains("Your reply:\n<earlier>\n<step>…</step>\n</earlier>") && flat.ends_with(&turns[4].1));
-        let fix = FollowUp { said: "its <old> lines aren't in lib.rs".into(), correction: true, ..followup };
+        let fix = FollowUp { said: "its <old> lines aren't in lib.rs".into(), correction: true, command: Some("$ make (✗ exit 2)\nboom".into()), ..followup };
         let turns = Request { followups: vec![fix], ..request(None) }.messages();
         assert!(turns[2].1.contains("Ghostwrite couldn't use your reply: its <old> lines aren't in lib.rs"), "{}", turns[2].1);
+        assert!(turns[2].1.contains("the user ran a command (`:sh`):\n<output>\n$ make (✗ exit 2)\nboom\n</output>"), "{}", turns[2].1);
     }
 
     #[test]
