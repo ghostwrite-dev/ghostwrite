@@ -12,9 +12,6 @@ use gpui::SharedString;
 
 use super::{Autoscroll, Document, Tab, Tabs};
 
-/// Files bigger than this aren't opened, so a stray log or binary can't hang the editor.
-const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024;
-
 pub struct Project {
     pub root: PathBuf,
     pub tabs: Tabs,
@@ -90,10 +87,11 @@ impl Project {
         if let Some(ix) = self.tabs.index_of_path(&path) {
             return Some(ix);
         }
+        let max = crate::config::get().max_file_size;
         if let Ok(meta) = std::fs::metadata(&path)
-            && meta.len() > MAX_FILE_SIZE
+            && meta.len() > max
         {
-            self.say(format!("{} is too large to open ({} MB, limit {} MB)", path.display(), meta.len() >> 20, MAX_FILE_SIZE >> 20));
+            self.say(format!("{} is too large to open ({} MB, limit {} MB)", path.display(), meta.len() >> 20, max >> 20));
             return None;
         }
         match std::fs::read_to_string(&path) {
@@ -117,8 +115,9 @@ impl Project {
         }
         self.tabs.set_active(ix);
         self.tree.set_active(self.active_path());
+        // Keep a scroll already asked for (a story's item centered in its file).
         if let Some(tab) = self.tab_mut() {
-            tab.view.autoscroll = Some(Autoscroll::Fit);
+            tab.view.autoscroll.get_or_insert(Autoscroll::Fit);
         }
     }
 
@@ -170,6 +169,36 @@ impl Project {
         if kept > 0 {
             self.say(format!("{kept} deleted file(s) still open with unsaved changes"));
         }
+    }
+
+    /// Another program changed `paths`: re-list the tree if it shows them,
+    /// and reload the open files among them. A file with unsaved changes
+    /// keeps them; the status says so. Whether anything on screen changed.
+    pub fn disk_changed(&mut self, paths: &[PathBuf]) -> bool {
+        let mut changed = self.tree.shows_any(paths);
+        if changed {
+            self.tree.refresh();
+        }
+        let mut kept = vec![];
+        for tab in self.tabs.iter_mut() {
+            let Some(path) = tab.doc.path.clone().filter(|p| paths.contains(p)) else { continue };
+            // Gone or unreadable: what's on screen is all there is now.
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            if text == tab.doc.text() {
+                // Our own write, or someone wrote what's on screen.
+                changed |= std::mem::take(&mut tab.doc.dirty);
+            } else if tab.doc.dirty {
+                kept.push(tab.doc.name());
+            } else {
+                tab.reload(text);
+                changed = true;
+            }
+        }
+        if !kept.is_empty() {
+            self.say(format!("{} changed on disk, keeping your unsaved changes (:reload! takes the file's)", kept.join(", ")));
+            changed = true;
+        }
+        changed
     }
 
     /// Diagnostics from a server, onto the file they're for.

@@ -74,7 +74,8 @@ const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
             (":e ‹path›  :w  :wa", "open, write, write all"),
             (":n :bn :bp :bc", "new, next, previous, close tab"),
             (":rl  :rm  :42", "reload, trash file, go to line"),
-            (":sh ‹cmd›", "run, then tour mode: tab through errors"),
+            (":sh ‹cmd›  :stop", "run in the background; Claude sees it"),
+            (":output", "tour its errors or output"),
             (":tree  :project  :qa", "file tree, projects, quit"),
             ("↑ ↓  tab", "history, complete"),
         ],
@@ -399,7 +400,7 @@ impl gpui::Render for Editor {
                     .min_h_0()
                     .flex()
                     .children(tree)
-                    .child(div().flex_1().min_w_0().flex().flex_col().children(tabs).child(body).children(self.story.as_ref().and_then(|s| s.panel(&self.project, self.ask_field(), &theme)))
+                    .child(div().flex_1().min_w_0().flex().flex_col().children(tabs).child(body)
                             .children(self.tour.as_ref().and_then(|t| t.panel(&theme))).children(self.render_command_line(cx))),
             )
             .child(self.render_status(cx))

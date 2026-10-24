@@ -110,6 +110,11 @@ impl Tree {
         self.cursor = at.and_then(|p| self.index_of(&p)).unwrap_or(self.cursor).min(self.rows.len().saturating_sub(1));
     }
 
+    /// Whether any of `paths` is (or would be) a row: its folder is the root or open.
+    pub fn shows_any(&self, paths: &[PathBuf]) -> bool {
+        paths.iter().filter_map(|p| p.parent()).any(|dir| dir == self.root || self.expanded.contains(dir))
+    }
+
     pub fn index_of(&self, path: &Path) -> Option<usize> {
         self.rows.iter().position(|r| r.path == path)
     }

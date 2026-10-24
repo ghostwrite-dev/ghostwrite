@@ -7,6 +7,7 @@
 //! - [`theme`], [`actions`], [`keys`]: look, menus, and keystrokes as modal keys
 
 mod actions;
+mod config;
 mod editor;
 mod keys;
 mod projects_page;
@@ -23,6 +24,9 @@ use crate::workspace::Workspace;
 
 fn main() {
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let config = config::get();
+    ghostwrite_ai::configure(ghostwrite_ai::Settings { model: config.model.clone(), context_bytes: config.context_bytes, max_diff: config.max_diff });
+    ghostwrite_project::store::set_max_recent(config.max_recent_projects);
 
     // Finder hands files over as file:// URLs, at launch or while running.
     let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();

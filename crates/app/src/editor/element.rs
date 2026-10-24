@@ -23,9 +23,6 @@ use super::tabs::{Autoscroll, Tab};
 use super::{Editor, Measured};
 use crate::theme::{Theme, theme};
 
-const TAB_WIDTH: usize = 4;
-/// Lines kept between the cursor and the edge when scrolling to it.
-const MARGIN_LINES: f32 = 3.;
 
 /// A mark on some text: a background, a strike, or a different color.
 #[derive(Clone, Debug)]
@@ -152,7 +149,7 @@ impl Geometry {
         let mut top = snap.scroll_top;
         match &snap.autoscroll {
             Some(Autoscroll::Fit) => {
-                let margin = (self.line_height * MARGIN_LINES).min(view_height / 3.);
+                let margin = (self.line_height * crate::config::get().margin_lines).min(view_height / 3.);
                 let (from, to) = (self.top(snap.cursor_line), self.bottom(snap.cursor_line));
                 if from - margin < top {
                     top = from - margin;
@@ -511,7 +508,8 @@ fn expand_tabs(text: &str) -> (String, Option<Vec<usize>>) {
     for (i, c) in text.char_indices() {
         map.resize(i + 1, out.len());
         if c == '\t' {
-            let spaces = TAB_WIDTH - column % TAB_WIDTH;
+            let tab_width = crate::config::get().tab_width;
+            let spaces = tab_width - column % tab_width;
             out.extend(std::iter::repeat_n(' ', spaces));
             column += spaces;
         } else {

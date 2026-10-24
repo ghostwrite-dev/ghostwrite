@@ -7,10 +7,15 @@ use std::sync::OnceLock;
 
 use serde_json::{Value, json};
 
-const MAX_RECENT: usize = 20;
+static MAX_RECENT: OnceLock<usize> = OnceLock::new();
 const MAX_HISTORY: usize = 200;
 
 static REDIRECT: OnceLock<PathBuf> = OnceLock::new();
+
+/// How many recent projects to keep (20 unless set), once, at launch.
+pub fn set_max_recent(n: usize) {
+    MAX_RECENT.set(n).ok();
+}
 
 /// Keep state in a scratch folder for the rest of the process (tests).
 pub fn redirect_for_tests() {
@@ -66,7 +71,7 @@ pub fn touch_project(project: &Path) {
     let mut projects = recent_projects();
     projects.retain(|p| p != project);
     projects.insert(0, project.to_path_buf());
-    projects.truncate(MAX_RECENT);
+    projects.truncate(*MAX_RECENT.get_or_init(|| 20));
     write_lines("projects", &projects.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
 }
 

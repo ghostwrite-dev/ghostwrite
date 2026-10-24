@@ -81,6 +81,15 @@ pub fn clean_line(line: &str) -> String {
     line.replace('\t', "    ")
 }
 
+/// How a command ended (`None`: it was stopped).
+pub fn exit_label(code: Option<i32>) -> String {
+    match code {
+        Some(0) => "✓ exit 0".into(),
+        Some(code) => format!("✗ exit {code}"),
+        None => "✗ stopped".into(),
+    }
+}
+
 /// A place in the code, and what's said about it there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Location {

@@ -114,6 +114,31 @@ fn typing_in_insert_mode(cx: &mut TestAppContext) {
     assert_eq!(t.text(), "one\ntwo\n", "the insert is one undo step");
 }
 
+/// What the watcher reports when another program changes `paths`.
+fn changed_elsewhere(t: &mut Setup, paths: &[&str]) {
+    let paths: Vec<PathBuf> = paths.iter().map(|p| t.dir.join(p)).collect();
+    t.editor.update(t.cx, |e, cx| e.disk_changed(&paths, cx));
+}
+
+#[gpui::test]
+fn changes_from_other_programs_show_up(cx: &mut TestAppContext) {
+    let mut t = open("one\ntwo\n", &[], cx);
+    t.keys("j l");
+    std::fs::write(t.dir.join("doc.txt"), "one\nTWO\nthree\n").unwrap();
+    std::fs::write(t.dir.join("new.txt"), "").unwrap();
+    changed_elsewhere(&mut t, &["doc.txt", "new.txt"]);
+    assert_eq!(t.text(), "one\nTWO\nthree\n", "a clean file reloads");
+    assert_eq!(t.cursor(), 5, "on the same line and column");
+    assert!(t.read(|e| e.project.tree.index_of(&e.project.root.join("new.txt")).is_some()), "the tree lists the new file");
+
+    t.keys("x d");
+    std::fs::write(t.dir.join("doc.txt"), "theirs\n").unwrap();
+    changed_elsewhere(&mut t, &["doc.txt"]);
+    assert_eq!(t.text(), "one\nthree\n", "unsaved changes are kept");
+    assert!(t.status().unwrap().contains("changed on disk"));
+    assert!(t.read(|e| e.tab().unwrap().doc.dirty));
+}
+
 #[gpui::test]
 fn command_line_opens_writes_and_closes(cx: &mut TestAppContext) {
     let mut t = open("one\ntwo\nthree\n", &[], cx);
@@ -369,7 +394,7 @@ fn docs_notes_leave_the_cursor_alone(cx: &mut TestAppContext) {
 fn run_sh(t: &mut Setup, command: &str) {
     t.command(&format!("sh {command}"));
     for _ in 0..200 {
-        if t.read(|e| e.tour.as_ref().is_none_or(|state| !state.tour.running())) {
+        if t.read(|e| e.shell.as_ref().is_none_or(|s| !s.running())) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -378,13 +403,30 @@ fn run_sh(t: &mut Setup, command: &str) {
     panic!("`{command}` never finished");
 }
 
+const TWO_ERRORS: &str = "printf 'error: bad\\n  --> a.py:2:1\\n\\nerror: worse\\n --> b.py:1\\n'; exit 1";
+
 #[gpui::test]
-fn sh_errors_are_stops_across_files(cx: &mut TestAppContext) {
+fn sh_runs_in_the_background(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
     std::fs::write(t.dir.join("a.py"), "one\ntwo\nthree\n").unwrap();
     std::fs::write(t.dir.join("b.py"), "uno\n").unwrap();
-    run_sh(&mut t, "printf 'error: bad\\n  --> a.py:2:1\\n\\nerror: worse\\n --> b.py:1\\n'; exit 1");
+    run_sh(&mut t, TWO_ERRORS);
+    assert_eq!(t.read(|e| e.modal.mode), Mode::Normal, "nothing takes over");
+    assert_eq!(t.active().as_deref(), Some("doc.txt"), "nothing jumps");
+    assert_eq!(t.status().as_deref(), Some(&*format!("`{}`: ✗ exit 1, 2 locations · :output to go through", TWO_ERRORS)));
+    t.keys("i").input("still ").keys("escape");
+    assert_eq!(t.text(), "still x\n", "editing goes on");
+}
+
+#[gpui::test]
+fn output_tours_the_last_commands_errors(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut t = open("x\n", &[], cx);
+    std::fs::write(t.dir.join("a.py"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(t.dir.join("b.py"), "uno\n").unwrap();
+    run_sh(&mut t, TWO_ERRORS);
+    t.command("output");
     assert_eq!(t.active().as_deref(), Some("a.py"), "the first error opens its file");
     assert_eq!(t.cursor(), 4, "at its line");
     t.keys("tab");
@@ -397,18 +439,13 @@ fn sh_errors_are_stops_across_files(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn enter_hands_an_error_to_claude_then_moves_on(cx: &mut TestAppContext) {
+fn claude_is_told_the_last_command(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let mut t = open("x\n", &["<step>\n<old>\ntwo\n</old>\n<new>\n2\n</new>\n</step>\n"], cx);
-    std::fs::write(t.dir.join("a.py"), "one\ntwo\n").unwrap();
-    std::fs::write(t.dir.join("b.py"), "uno\n").unwrap();
-    run_sh(&mut t, "printf 'error: bad\\n  --> a.py:2\\n\\nerror: worse\\n --> b.py:1\\n'");
-    t.keys("enter");
-    let typed = t.read(|e| e.prompt.as_ref().map(|p| p.field.clone())).map(|f| f.read_with(t.cx, |f, _| f.text().to_string()));
-    assert_eq!(typed.as_deref(), Some("fix this"));
-    t.keys("enter").keys("tab");
-    assert_eq!(t.file("a.py"), "one\n2\n", "moving on to b.py writes a.py");
-    assert_eq!(t.active().as_deref(), Some("b.py"), "Claude is done: on to the next error");
+    let mut t = open("x\n", &["<answer>\nIt failed.\n</answer>\n"], cx);
+    run_sh(&mut t, "echo one; echo two; exit 2");
+    t.ask("why did that fail?");
+    let command = t.read(|e| e.story.as_ref().unwrap().request(&e.project, e.shell.as_ref().map(|s| s.context())).unwrap().surroundings.command);
+    assert_eq!(command.as_deref(), Some("$ echo one; echo two; exit 2 (✗ exit 2)\none\ntwo"));
 }
 
 #[gpui::test]
@@ -499,41 +536,17 @@ fn ai_mode_from_the_tree_goes_back_to_the_tree(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn fixing_a_tours_error_goes_ai_then_tour_then_home(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let mut t = open("x\n", &["<step>\n<old>\ntwo\n</old>\n<new>\n2\n</new>\n</step>\n"], cx);
-    std::fs::write(t.dir.join("a.py"), "one\ntwo\n").unwrap();
-    std::fs::write(t.dir.join("b.py"), "uno\n").unwrap();
-    run_sh(&mut t, "printf 'error: bad\\n  --> a.py:2\\n\\nerror: worse\\n --> b.py:1\\n'");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tour);
-    t.keys("enter");
-    t.keys("enter");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Ai);
-    t.keys("tab");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tour, "the fix is in: back to the tour, at the next error");
-    assert_eq!(t.active().as_deref(), Some("b.py"));
-    t.keys("tab");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Normal, "the tour is over");
-}
-
-#[gpui::test]
 fn a_question_mid_tour_comes_back_to_the_same_stop(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &["<answer>\nIt prints lines.\n</answer>\n"], cx);
     run_sh(&mut t, "echo one; echo two");
+    t.command("output");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Tour);
-    // Enter on a page of output asks about it.
+    // Enter asks Claude, as any question.
     t.keys("enter");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Ai);
-    t.input("what is this?").keys("enter");
-    assert!(t.read(|e| e.story.as_ref().is_some_and(|s| s.origin.output().is_some_and(|o| o.contains("one\ntwo")))), "with the output");
-    t.keys("tab");
+    t.input("what is this?").keys("enter").keys("tab");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Tour, "back on the tour");
-    // `space i` asks about the code, and the tour waits.
-    t.keys("space i");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Ai);
-    t.input("and this?").keys("enter").keys("tab");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tour, "still at the same stop");
     t.keys("tab");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Normal);
 }
@@ -556,25 +569,6 @@ fn a_follow_up_is_answered_where_it_was_asked(cx: &mut TestAppContext) {
     });
     assert_eq!(at, (Some("lib.rs".into()), 2..3), "under the step's line, not the first file's");
     assert_eq!(t.active().as_deref(), Some("src/lib.rs"), "and the view stays there");
-}
-
-#[gpui::test]
-fn a_question_about_output_is_answered_in_the_panel(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let mut t = open("x\n", &["<answer>\nIt prints two lines.\n</answer>\n"], cx);
-    run_sh(&mut t, "echo one; echo two");
-    t.keys("enter");
-    assert!(t.read(|e| e.story.as_ref().is_some_and(|s| s.origin.in_panel())), "asked from the panel");
-    t.input("what is this?").keys("enter");
-    let in_panel = t.read(|e| {
-        let state = e.story.as_ref().unwrap();
-        let story = state.story.as_ref().unwrap();
-        state.spot(&e.project, story.current().unwrap()) == Some(ghostwrite_ai::Spot::Panel)
-    });
-    assert!(in_panel, "the answer shows in the panel");
-    assert_eq!(t.active().as_deref(), Some("doc.txt"), "nothing jumps");
-    t.keys("tab");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tour);
 }
 
 #[gpui::test]
@@ -619,11 +613,60 @@ fn claude_hears_the_whole_conversation_and_the_editor(cx: &mut TestAppContext) {
     t.command("e other.py").command("e doc.txt");
     t.ask("types and body").keys("tab");
     t.keys("enter").input("why int?").keys("enter");
-    let req = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap());
+    let req = t.read(|e| e.story.as_ref().unwrap().request(&e.project, None).unwrap());
     assert_eq!(req.surroundings.open_files, ["doc.txt", "other.py"], "what is open, in tab order");
     let followup = &req.followups[0];
     assert_eq!(followup.reply, TWO_STEPS, "Claude's reply, whole");
     assert_eq!(followup.decided.len(), 1, "what was accepted since");
     assert!(followup.at.as_deref().is_some_and(|at| at.contains("int -> int") || at.contains("b: int")), "where they were");
     assert_eq!(followup.said, "why int?");
+}
+
+#[gpui::test]
+fn a_step_that_doesnt_apply_is_rewritten_first(cx: &mut TestAppContext) {
+    let wrong = "<step>\n<old>\n    return None\n</old>\n<new>\n    return a + b\n</new>\n</step>\n";
+    let right = "<rest>\n<step>\n<old>\n    pass\n</old>\n<new>\n    return a + b\n</new>\n</step>\n</rest>\n";
+    let mut t = open(ADD, &[wrong, right], cx);
+    t.ask("implement it");
+    let followups = t.read(|e| e.story.as_ref().unwrap().story.as_ref().unwrap().followups().to_vec());
+    assert_eq!(followups.len(), 1, "Claude was told, without the user");
+    assert!(followups[0].correction && followups[0].said.contains("aren't in doc.txt"), "{:?}", followups[0]);
+    t.keys("tab");
+    assert_eq!(t.text(), "def add(a, b):\n    return a + b\n", "the rewritten step is the one shown");
+    assert!(!t.reviewing());
+}
+
+#[gpui::test]
+fn a_reply_without_the_format_is_asked_again(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &["Sure, I'd return a + b.", "<step>\n<old>\n    pass\n</old>\n<new>\n    return a + b\n</new>\n</step>\n"], cx);
+    t.ask("implement it");
+    assert!(t.reviewing(), "the story didn't just end");
+    t.keys("tab");
+    assert_eq!(t.text(), "def add(a, b):\n    return a + b\n");
+}
+
+#[gpui::test]
+fn corrections_stop_after_a_few_tries(cx: &mut TestAppContext) {
+    let wrong = "<step>\n<old>\n    return None\n</old>\n<new>\n    return a + b\n</new>\n</step>\n";
+    let mut t = open(ADD, &[wrong], cx);
+    t.ask("implement it");
+    let n = t.read(|e| e.story.as_ref().unwrap().story.as_ref().unwrap().followups().len());
+    assert_eq!(n, ghostwrite_ai::story::MAX_REVISIONS);
+    assert!(t.reviewing(), "the step is left to skip");
+    t.keys("backspace");
+    assert!(!t.reviewing());
+}
+
+#[gpui::test]
+fn switching_to_a_storys_file_keeps_it_centered_on_the_item(cx: &mut TestAppContext) {
+    let t = open("x\n", &[], cx);
+    std::fs::write(t.dir.join("other.txt"), "a\nb\nc\n").unwrap();
+    let path = t.dir.join("other.txt");
+    let scroll = t.editor.update(t.cx, |e, _| {
+        let ix = e.project.open(&path).unwrap();
+        e.project.tabs.get_mut(ix).unwrap().select(ghostwrite_core::Range::point(2), super::Autoscroll::Center(1..2));
+        e.project.activate(ix);
+        e.tab().unwrap().view.autoscroll.clone()
+    });
+    assert_eq!(scroll, Some(super::Autoscroll::Center(1..2)));
 }

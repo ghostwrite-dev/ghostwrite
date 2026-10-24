@@ -10,6 +10,10 @@
 //! Without one, the rest stays. While the reply is on its way the review
 //! waits where you are.
 //!
+//! A reply Ghostwrite can't use (a step whose lines aren't in its file, or
+//! nothing in the reply format) goes back to Claude the same way, as a
+//! correction, until it's right or [`MAX_REVISIONS`] tries in a row fail.
+//!
 //! This is the bookkeeping only. Applying an accepted step to a buffer, or
 //! creating a file, is the editor's job; it tells the story afterwards with
 //! [`Story::decide`].
@@ -17,6 +21,9 @@
 use std::collections::HashMap;
 
 use crate::protocol::{self, Kind, Note, Piece, Step};
+
+/// Corrections Claude gets in a row before a step is left for the user to skip.
+pub const MAX_REVISIONS: usize = 3;
 
 /// Which part of a reply an item is in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -98,6 +105,8 @@ pub struct FollowUp {
     /// The item they were at, as Claude wrote it.
     pub at: Option<String>,
     pub said: String,
+    /// Ghostwrite, not the user, is speaking: Claude's reply couldn't be used.
+    pub correction: bool,
 }
 
 #[derive(Debug)]
@@ -107,6 +116,8 @@ struct Reply {
     at: usize,
     /// The item it was asked about.
     about: Option<ItemId>,
+    /// It answers a correction: all of it is the new plan from there.
+    correction: bool,
 }
 
 #[derive(Debug)]
@@ -123,6 +134,8 @@ pub struct Story {
     pub error: Option<String>,
     /// What Claude is looking at in the project right now.
     pub looking: Option<String>,
+    /// Corrections sent since the user last decided something.
+    revisions: usize,
 }
 
 /// The items in some reply text: notes for an answer, pieces for a change.
@@ -149,12 +162,13 @@ impl Story {
             instruction: instruction.into(),
             history: vec![],
             decided: vec![],
-            replies: vec![Reply { text: String::new(), at: 0, about: None }],
+            replies: vec![Reply { text: String::new(), at: 0, about: None, correction: false }],
             verdicts: HashMap::new(),
             current: None,
             writing: Some(0),
             error: None,
             looking: None,
+            revisions: 0,
         }
     }
 
@@ -186,7 +200,11 @@ impl Story {
             return (vec![], Some(items_in(text)));
         }
         let (now, rest) = protocol::split_rest(text);
-        (items_in(&now), rest.map(|r| items_in(&r)))
+        match rest {
+            // Asked for only a <rest> and given the steps without one: they still replace.
+            None if self.replies[k].correction => (vec![], Some(items_in(text))),
+            rest => (items_in(&now), rest.map(|r| items_in(&r))),
+        }
     }
 
     /// Everything to review, in order. Each follow-up's answer goes where it
@@ -237,6 +255,52 @@ impl Story {
     /// The user says something about the current item (or the reply so far).
     /// The answer streams into a new reply, which may revise what comes after.
     pub fn follow_up(&mut self, said: String) {
+        self.revisions = 0;
+        self.follow(said, false);
+    }
+
+    /// Whether Claude may still be asked to correct its reply.
+    pub fn can_revise(&self) -> bool {
+        self.revisions < MAX_REVISIONS
+    }
+
+    /// The current step's `<old>` lines aren't in its file (`file`, whose
+    /// text is `text` unless it's the file asked about, which Claude is
+    /// shown anyway): Claude rewrites it and what follows.
+    pub fn step_misplaced(&mut self, file: &str, text: Option<&str>) {
+        let mut said = format!(
+            "your step's <old> lines aren't in {file} as it is now, so it can't be applied. Copy <old> exactly from the \
+             file as it is (a step it builds on may have been skipped). Reply with only <rest>: the corrected step and \
+             everything after it."
+        );
+        if let Some(text) = text {
+            let text = &text[..text.floor_char_boundary(crate::settings().context_bytes / 2)];
+            said.push_str(&format!("\n\n{file} as it is now:\n<file>\n{text}\n</file>"));
+        }
+        self.revise(said);
+    }
+
+    /// The latest reply is complete but there's nothing in it to review:
+    /// Claude writes it again, in the format.
+    pub fn reply_unusable(&mut self) {
+        self.revise("there's nothing in your reply in the reply format (no <step>, file operation or <answer> with notes), so the user sees nothing. Reply again, in the format.".into());
+    }
+
+    /// Whether the last reply, now complete, has nothing to review and isn't
+    /// an intended empty revision (`<rest></rest>`) or just notes for later.
+    pub fn is_unusable(&self) -> bool {
+        let Some(reply) = self.replies.last().filter(|_| self.writing.is_none() && self.error.is_none()) else { return false };
+        let text = &reply.text;
+        let kept = protocol::split_rest(text).1.is_some() || protocol::memory_update(text).is_some();
+        !text.trim().is_empty() && !kept && protocol::reply_kind(text).is_none()
+    }
+
+    fn revise(&mut self, said: String) {
+        self.revisions += 1;
+        self.follow(said, true);
+    }
+
+    fn follow(&mut self, said: String, correction: bool) {
         let items = self.items();
         let here = self.current.and_then(|c| items.iter().position(|(id, _)| *id == c));
         let item = here.map(|i| &items[i].1);
@@ -248,8 +312,8 @@ impl Story {
             self.verdicts.insert(id, Verdict::Accepted);
         }
         let reply = self.replies.last().map(|r| r.text.clone()).unwrap_or_default();
-        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), at: item.map(Item::describe), said });
-        self.replies.push(Reply { text: String::new(), at, about: self.current });
+        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), at: item.map(Item::describe), said, correction });
+        self.replies.push(Reply { text: String::new(), at, about: self.current, correction });
         self.error = None;
         self.current = None;
         self.writing = Some(self.replies.len() - 1);
@@ -275,6 +339,7 @@ impl Story {
     /// The current item was accepted (and applied) or skipped.
     pub fn decide(&mut self, verdict: Verdict) {
         let Some(id) = self.current.take() else { return };
+        self.revisions = 0;
         // Reading a note isn't a decision worth telling Claude about.
         if let Some(item) = self.item(id).filter(|i| !matches!(i, Item::Note(_))) {
             let what = if verdict == Verdict::Accepted { "accepted" } else { "skipped" };
@@ -355,7 +420,8 @@ impl Story {
             out.push_str(&format!("\n--- reply\n{}\n", reply.text));
         }
         for (said, n) in self.history.iter().zip(1..) {
-            out.push_str(&format!("\n--- follow-up {n}: {}\n", said.said));
+            let who = if said.correction { "correction" } else { "follow-up" };
+            out.push_str(&format!("\n--- {who} {n}: {}\n", said.said));
         }
         out
     }

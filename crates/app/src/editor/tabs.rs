@@ -52,6 +52,15 @@ impl Tab {
         self.view.selection = self.view.selection.clamp(self.doc.buffer.len());
     }
 
+    /// Take the file's new text from disk, keeping the cursor's line and column.
+    pub fn reload(&mut self, text: String) {
+        let (line, column) = self.cursor_position();
+        self.doc.reload(text);
+        self.sync();
+        self.doc.dirty = false;
+        self.view.selection = Range::point(ghostwrite_core::offset_of(self.doc.text(), line, column));
+    }
+
     /// What modal editing works on.
     pub fn target(&mut self, page_rows: usize) -> Target<'_> {
         Target { buffer: &mut self.doc.buffer, selection: &mut self.view.selection, indent: &self.doc.indent, page_rows }

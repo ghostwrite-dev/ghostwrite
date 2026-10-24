@@ -8,7 +8,7 @@
 
 use ghostwrite_ai::placement;
 use ghostwrite_ai::protocol::{self, Note};
-use ghostwrite_ai::{Item, Spot, Story};
+use ghostwrite_ai::{Item, Story};
 use gpui::{AnyElement, Entity, Hsla, div, prelude::*, px};
 
 use super::element::{Block, BlockSizes, Decoration};
@@ -77,7 +77,7 @@ impl StoryState {
         // Before asking, or waiting for the reply: where the answer is coming.
         let current = story.and_then(|s| Some((s.current()?, s.current_item()?)));
         let Some((id, item)) = current else {
-            let Some(Spot::Code(place)) = self.waiting_spot(project) else { return (vec![], None) };
+            let Some(place) = self.waiting_spot(project) else { return (vec![], None) };
             let located = self.in_tab(project, place);
             if !here(&located) {
                 return (vec![], None);
@@ -88,7 +88,7 @@ impl StoryState {
             return (vec![], Some(block(located.near.end.saturating_sub(1), spec, theme)));
         };
 
-        // In the code, in this tab (an answer in the panel shows there).
+        // In this tab.
         let Some(located) = self.locate(project, id).filter(here) else { return (vec![], None) };
         // An item in another file than the one asked about says which.
         let file = located.path.as_ref().map_or(String::new(), |p| format!("{} · ", project.display(p)));
@@ -122,46 +122,6 @@ impl StoryState {
             }
             _ => (vec![], None),
         }
-    }
-
-    /// A story asked from the tour panel shows there: the output it's about,
-    /// the prompt, what's happening, and answers that belong there.
-    pub(super) fn panel(&self, project: &Project, ask: Option<Entity<TextField>>, theme: &Theme) -> Option<AnyElement> {
-        if !self.origin.in_panel() {
-            return None;
-        }
-        let story = self.story.as_ref();
-        let current = story.and_then(|s| Some((s.current()?, s.current_item()?)));
-        let (note, hint) = match &current {
-            Some((id, Item::Note(note))) if self.spot(project, *id) == Some(Spot::Panel) => (Some(note.text.clone()), format!("⇥ next · ⏎ ask{}", progress(story))),
-            // The current item is in the code; so is a question about it.
-            Some(_) => return None,
-            None if self.waiting_spot(project) != Some(Spot::Panel) => return None,
-            None => (None, waiting_hint(story)),
-        };
-        let context = self.origin.output().into_iter().flat_map(|o| o.lines().skip(1)).take(ghostwrite_project::tour::PAGE_ROWS).map(|l| div().whitespace_nowrap().overflow_hidden().text_color(theme.muted_foreground).child(l.to_string()));
-        let row = |child: AnyElement| div().flex().items_center().gap_2().child(div().flex_none().text_xs().text_color(theme.warning).child("✦")).child(child);
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .px_3()
-                .py_1()
-                .border_t_1()
-                .border_color(theme.border)
-                .font_family(theme.mono_font.clone())
-                .text_size(theme.mono_size)
-                .children(context)
-                .children(note.map(|text| div().pl_4().text_color(theme.foreground).child(text)))
-                .children(ask.is_none().then(|| row(div().text_xs().text_color(theme.muted_foreground).child(hint).into_any_element())))
-                .children(ask.map(|field| {
-                    let hint = if story.is_some() { "⏎ send · esc" } else { "⏎ ask · esc" };
-                    row(div().flex_1().flex().items_center().child(div().flex_1().min_w_0().overflow_hidden().child(field)).child(div().flex_none().ml_3().text_xs().text_color(theme.muted_foreground).child(hint)).into_any_element())
-                }))
-                .into_any_element(),
-        )
     }
 }
 

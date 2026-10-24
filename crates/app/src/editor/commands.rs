@@ -21,8 +21,12 @@ pub enum Command {
     Remove { path: Option<String>, force: bool },
     Reload { force: bool },
     Goto(usize),
-    /// Run a shell command (`None`: the last one again).
+    /// Run a shell command in the background (`None`: the last one again).
     Shell(Option<String>),
+    /// Stop the running command.
+    Stop,
+    /// Tour the last command's errors, or its output.
+    Output,
     /// Search the project; the matches are a tour.
     Grep(String),
     /// Show or hide the file tree.
@@ -33,7 +37,7 @@ pub enum Command {
 
 /// Names Tab completes, as typed in helix.
 const NAMES: &[&str] = &[
-    "open", "edit", "write", "write-all", "write-quit-all", "quit-all", "quit-all!", "new", "reload", "reload!", "rm", "rm!", "sh", "grep",
+    "open", "edit", "write", "write-all", "write-quit-all", "quit-all", "quit-all!", "new", "reload", "reload!", "rm", "rm!", "sh", "stop", "output", "grep",
     "buffer-next", "buffer-previous", "buffer-close", "buffer-close!", "tree", "project",
 ];
 
@@ -53,6 +57,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
     };
     match name {
         "sh" | "shell" | "run" => Ok(Command::Shell((!rest.is_empty()).then(|| rest.to_string()))),
+        "stop" => no_args(Command::Stop),
+        "output" | "out" => no_args(Command::Output),
         "grep" | "g" | "search" if rest.is_empty() => Err(format!(":{name} needs something to search for")),
         "grep" | "g" | "search" => Ok(Command::Grep(rest.to_string())),
         "o" | "open" | "e" | "edit" if args.is_empty() => Err(format!(":{name} needs a path")),
@@ -216,9 +222,7 @@ impl Editor {
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("couldn't reload: {e}"))?;
                 self.leave_insert();
                 if let Some(tab) = self.tab_mut() {
-                    tab.doc.reload(text);
-                    tab.sync();
-                    tab.doc.dirty = false;
+                    tab.reload(text);
                 }
             }
             Command::Goto(line) => {
@@ -229,8 +233,10 @@ impl Editor {
             }
             Command::Shell(command) => {
                 let command = command.or_else(|| self.last_shell.clone()).ok_or("usage: :sh <command>")?;
-                self.start_shell(command, window, cx)?;
+                self.start_shell(command, cx)?;
             }
+            Command::Stop => self.stop_shell()?,
+            Command::Output => self.output_tour(cx)?,
             Command::Grep(pattern) => self.start_search(&pattern, window, cx)?,
             Command::Tree => self.toggle_tree(cx),
             Command::Project(path) => {

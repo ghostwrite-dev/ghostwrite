@@ -1,9 +1,11 @@
 //! What Claude is told. A story is a conversation: the first message carries
 //! the context (Claude's own notes from earlier sessions, the user's recent
 //! interactions and what Claude said in them, the project's files, the
-//! editor around the request, uncommitted changes), then the file with the
-//! lines marked and the request. Each follow-up turn says what the user
-//! accepted and skipped, where they are, and what they said.
+//! editor around the request, the last `:sh` command and its output,
+//! uncommitted changes), then the file with the lines marked and the
+//! request. Each follow-up turn says what the user accepted and skipped,
+//! where they are, and what they said (or, when Ghostwrite couldn't use
+//! Claude's reply, why).
 //!
 //! [`Request::messages`] gives the turns for a backend that holds a
 //! conversation; [`Request::prompt`] flattens them into one message; and
@@ -19,16 +21,12 @@ use serde_json::{Value, json};
 
 use crate::story::FollowUp;
 
-/// The file around the lines is context; very large files get a window.
-const CONTEXT_BYTES: usize = 200_000;
 /// Files listed in the prompt.
 const MAX_LISTED: usize = 400;
 /// Earlier interactions shown in the prompt, and how many of the newest
 /// come with what Claude said in them.
 const RECENT: usize = 12;
 const RECAPPED: usize = 4;
-/// Uncommitted changes shown.
-const MAX_DIFF: usize = 12_000;
 
 /// What's around the request in the editor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +35,8 @@ pub struct Surroundings {
     pub open_files: Vec<String>,
     /// Diagnostics near the marked lines (`line 12: error: …`).
     pub diagnostics: Vec<String>,
+    /// The last command run with `:sh`: `$ command`, how it went, and its output.
+    pub command: Option<String>,
 }
 
 pub struct Request {
@@ -48,8 +48,6 @@ pub struct Request {
     pub instruction: String,
     /// The conversation since: each of Claude's replies and what the user did and said next.
     pub followups: Vec<FollowUp>,
-    /// Command output the request is about (an error from `:sh`), if any.
-    pub output: Option<String>,
     /// The project, which paths are relative to.
     pub root: Option<PathBuf>,
     pub surroundings: Surroundings,
@@ -109,9 +107,6 @@ impl Request {
         }
         out.push_str(&self.surroundings_block());
         out.push_str(&format!("File: {} ({})\n\n<file>\n{}\n</file>\n\n", self.file_name(), self.language, self.file_window(true)));
-        if let Some(output) = &self.output {
-            out.push_str(&format!("Command output about the marked lines:\n<output>\n{}\n</output>\n\n", output.trim()));
-        }
         out.push_str(&format!("Request: {}", self.instruction.trim()));
         out
     }
@@ -127,7 +122,11 @@ impl Request {
         if let Some(at) = &followup.at {
             out.push_str(&format!("They're at this part of your reply:\n<at>\n{}\n</at>\n\n", at.trim()));
         }
-        out.push_str(&format!("The user says: {}", followup.said.trim()));
+        if followup.correction {
+            out.push_str(&format!("Ghostwrite couldn't use your reply: {}", followup.said.trim()));
+        } else {
+            out.push_str(&format!("The user says: {}", followup.said.trim()));
+        }
         if latest {
             out.push_str(&format!("\n\n{} as it is now:\n<file>\n{}\n</file>\n\n{FOLLOW_UP_GUIDE}", self.file_name(), self.file_window(false)));
         }
@@ -137,8 +136,10 @@ impl Request {
     /// The file around the marked lines (marked with `<cursor>` if `marked`).
     fn file_window(&self, marked: bool) -> String {
         let (text, range) = (&self.text, self.range.start.min(self.text.len())..self.range.end.min(self.text.len()));
-        let start = text.floor_char_boundary(range.start.saturating_sub(CONTEXT_BYTES / 2));
-        let end = text.floor_char_boundary((range.end + CONTEXT_BYTES / 2).min(text.len()));
+        // The file around the lines is context; very large files get a window.
+        let half = crate::settings().context_bytes / 2;
+        let start = text.floor_char_boundary(range.start.saturating_sub(half));
+        let end = text.floor_char_boundary((range.end + half).min(text.len()));
         if !marked {
             return text[start..end].to_string();
         }
@@ -155,7 +156,10 @@ impl Request {
         if !s.diagnostics.is_empty() {
             out.push_str(&format!("Diagnostics near the marked lines:\n{}\n\n", s.diagnostics.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n")));
         }
-        if let Some(diff) = self.root.as_deref().and_then(|root| files::uncommitted(root, MAX_DIFF)) {
+        if let Some(command) = &s.command {
+            out.push_str(&format!("The user's last command in the editor (`:sh`), for context:\n<output>\n{}\n</output>\n\n", command.trim_end()));
+        }
+        if let Some(diff) = self.root.as_deref().and_then(|root| files::uncommitted(root, crate::settings().max_diff)) {
             out.push_str(&format!("Uncommitted changes in the project:\n<diff>\n{}\n</diff>\n\n", diff.trim_end()));
         }
         out
@@ -255,7 +259,6 @@ mod tests {
             range: 10..20,
             instruction: "rename to c".into(),
             followups: vec![],
-            output: None,
             root,
             surroundings: Surroundings::default(),
             session: None,
@@ -276,8 +279,9 @@ mod tests {
             decided: vec!["accepted: a step".into()],
             at: Some("a step".into()),
             said: "keep the old name".into(),
+            correction: false,
         };
-        let req = Request { followups: vec![followup.clone(), FollowUp { decided: vec![], at: None, said: "and add docs".into(), ..followup }], ..request(None) };
+        let req = Request { followups: vec![followup.clone(), FollowUp { decided: vec![], at: None, said: "and add docs".into(), ..followup.clone() }], ..request(None) };
         let turns = req.messages();
         let roles: Vec<Role> = turns.iter().map(|(r, _)| *r).collect();
         assert_eq!(roles, [Role::User, Role::Assistant, Role::User, Role::Assistant, Role::User]);
@@ -288,6 +292,9 @@ mod tests {
         assert_eq!(req.latest(), turns[4].1, "resuming a session sends only that");
         let flat = req.prompt();
         assert!(flat.contains("Your reply:\n<earlier>\n<step>…</step>\n</earlier>") && flat.ends_with(&turns[4].1));
+        let fix = FollowUp { said: "its <old> lines aren't in lib.rs".into(), correction: true, ..followup };
+        let turns = Request { followups: vec![fix], ..request(None) }.messages();
+        assert!(turns[2].1.contains("Ghostwrite couldn't use your reply: its <old> lines aren't in lib.rs"), "{}", turns[2].1);
     }
 
     #[test]
@@ -296,11 +303,16 @@ mod tests {
         let root = ghostwrite_project::scratch_dir("context");
         store::save_memory(&root, "The user likes early returns.");
         Interaction::new("main.rs".into(), "add logging".into(), vec!["use tracing".into()], "applied 2 of 2 steps".into(), "proposed 2 change(s) in main.rs, 2 applied".into()).log(&root);
-        let surroundings = Surroundings { open_files: vec!["lib.rs".into(), "main.rs".into()], diagnostics: vec!["line 2: error: unused".into()] };
+        let surroundings = Surroundings {
+            open_files: vec!["lib.rs".into(), "main.rs".into()],
+            diagnostics: vec!["line 2: error: unused".into()],
+            command: Some("$ cargo check (✗ exit 101)\nerror: oops".into()),
+        };
         let prompt = Request { surroundings, ..request(Some(root.clone())) }.prompt();
         assert!(prompt.contains("<memory>\nThe user likes early returns.\n</memory>"), "{prompt}");
         assert!(prompt.contains("just now in main.rs: \"add logging\" (applied 2 of 2 steps)\n  then: \"use tracing\"\n  you said: proposed 2 change(s) in main.rs, 2 applied"), "{prompt}");
         assert!(prompt.contains("Open in the editor: lib.rs, main.rs") && prompt.contains("Diagnostics near the marked lines:\n- line 2: error: unused"));
+        assert!(prompt.contains("<output>\n$ cargo check (✗ exit 101)\nerror: oops\n</output>"), "{prompt}");
         assert!(prompt.contains("File: lib.rs (rust)"));
     }
 }

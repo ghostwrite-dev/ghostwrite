@@ -1,7 +1,7 @@
 //! The project on disk: what's in it ([`files`]), changing it ([`fs`]),
 //! running commands in it ([`shell`]) and touring their output ([`tour`]),
-//! the file tree ([`tree`]), and what Ghostwrite remembers between launches
-//! ([`store`]).
+//! the file tree ([`tree`]), noticing changes made by other programs
+//! ([`watch`]), and what Ghostwrite remembers between launches ([`store`]).
 
 pub mod files;
 pub mod fs;
@@ -9,6 +9,7 @@ pub mod shell;
 pub mod store;
 pub mod tour;
 pub mod tree;
+pub mod watch;
 
 use std::path::{Path, PathBuf};
 

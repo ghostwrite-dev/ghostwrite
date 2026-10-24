@@ -12,7 +12,7 @@
 //! - [`tools`]: read-only project tools for the API backend.
 //! - [`story`]: the review state machine.
 //! - [`placement`]: which file and lines an item applies to, and the edit a step makes.
-//! - [`layout`]: where each item shows: in the code, or in the panel it was asked from.
+//! - [`layout`]: where each item shows in the code.
 
 pub mod backend;
 pub mod context;
@@ -24,7 +24,31 @@ pub mod tools;
 
 pub use backend::Backend;
 pub use context::{Interaction, Request, Role, Surroundings};
-pub use layout::{Layout, Origin, Spot};
+pub use layout::Layout;
 pub use story::{FollowUp, Item, ItemId, Part, Settled, Story, Verdict};
 
-pub const MODEL: &str = "claude-opus-5-5";
+/// Settings the app reads from its config and hands over at launch.
+pub struct Settings {
+    pub model: String,
+    /// Bytes of the file around the marked lines sent as context.
+    pub context_bytes: usize,
+    /// Bytes of uncommitted changes sent.
+    pub max_diff: usize,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { model: "claude-opus-5-5".into(), context_bytes: 200_000, max_diff: 12_000 }
+    }
+}
+
+static SETTINGS: std::sync::OnceLock<Settings> = std::sync::OnceLock::new();
+
+/// Set the settings, once, before the first request.
+pub fn configure(settings: Settings) {
+    SETTINGS.set(settings).ok();
+}
+
+pub(crate) fn settings() -> &'static Settings {
+    SETTINGS.get_or_init(Settings::default)
+}

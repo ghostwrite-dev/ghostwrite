@@ -1,18 +1,16 @@
-//! Tours in the editor: `:sh <command>` runs it with its output in a panel
-//! above the command line; once it exits, its errors are stops to Tab
-//! through. `space d` tours the file's diagnostics, `:grep` / `space /` the
-//! project's matches. Enter hands the stop to Claude.
+//! Tours in the editor: `:output` tours the last `:sh` command's errors
+//! (or its pages of output), `space d` the file's diagnostics, `:grep` /
+//! `space /` the project's matches. Tab goes on, Shift+Tab back; Enter asks
+//! Claude about the stop, as any question, and the tour waits.
 //!
-//! [`Tour`] keeps the bookkeeping; [`TourState`] adds the running command
-//! and shows each stop in its file. The editor switches tabs.
+//! [`Tour`] keeps the bookkeeping; [`TourState`] shows each stop in its
+//! file. The editor switches tabs.
 
-use futures::StreamExt as _;
-use ghostwrite_ai::Origin;
 use ghostwrite_core::{Mode, Range, Review};
 use ghostwrite_project::files::{MAX_FOUND, grep, search_pattern};
-use ghostwrite_project::shell::{Location, Run};
+use ghostwrite_project::shell::Location;
 use ghostwrite_project::tour::{Moved, Source, Stop, Tour};
-use gpui::{AnyElement, AppContext as _, Context, Task, Window, div, prelude::*};
+use gpui::{AnyElement, AppContext as _, Context, Window, div, prelude::*};
 
 use super::element::Decoration;
 use super::{Autoscroll, Document, Editor, Project};
@@ -20,22 +18,11 @@ use crate::theme::Theme;
 
 pub(super) struct TourState {
     pub(super) tour: Tour,
-    /// The command, while it runs (dropping it stops it).
-    run: Option<Run>,
-    _task: Option<Task<()>>,
-}
-
-impl Drop for TourState {
-    fn drop(&mut self) {
-        if let Some(run) = &self.run {
-            run.stop();
-        }
-    }
 }
 
 impl TourState {
     fn new(tour: Tour) -> Self {
-        Self { tour, run: None, _task: None }
+        Self { tour }
     }
 
     /// Select the current stop in its file (opening it); the tab to show.
@@ -73,7 +60,7 @@ impl TourState {
         if tour.paused() {
             return None;
         }
-        let color = if tour.running() || tour.source() == Source::Search {
+        let color = if tour.source() == Source::Search {
             theme.muted_foreground
         } else if tour.failed() || tour.source() != Source::Command {
             theme.danger
@@ -103,53 +90,12 @@ impl TourState {
 }
 
 impl Editor {
-    /// `:sh`: start a command (stopping any still running).
-    pub(super) fn start_shell(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
-        self.last_shell = Some(command.clone());
-        let run = Run::start(&command, &self.project.root).map_err(|e| format!("couldn't run `{command}`: {e}"))?;
-        let (tx, mut rx) = futures::channel::mpsc::unbounded::<Result<String, Option<i32>>>();
-        let reader = run.handle();
-        cx.background_spawn(async move {
-            let lines = tx.clone();
-            let code = reader.stream(&mut |line| drop(lines.unbounded_send(Ok(line))));
-            tx.unbounded_send(Err(code)).ok();
-        })
-        .detach();
-        let task = cx.spawn_in(window, async move |this, cx| {
-            while let Some(message) = rx.next().await {
-                let done = message.is_err();
-                let alive = this.update(cx, |this, cx| this.shell_output(message, cx)).unwrap_or(false);
-                if done || !alive {
-                    break;
-                }
-            }
-        });
-        let mut state = TourState::new(Tour::command(command));
-        state.run = Some(run);
-        state._task = Some(task);
-        self.begin_tour(state);
-        cx.notify();
+    /// `:output`: tour the last command's errors, or its output.
+    pub(super) fn output_tour(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let tour = self.shell.as_ref().ok_or("no command has run yet (:sh ‹command›)")?.tour(&self.project.root)?;
+        self.begin_tour(TourState::new(tour));
+        self.show_stop(cx);
         Ok(())
-    }
-
-    /// A line of output, or the exit. `false` once there's no command to feed.
-    fn shell_output(&mut self, message: Result<String, Option<i32>>, cx: &mut Context<Self>) -> bool {
-        let Some(state) = self.tour.as_mut().filter(|s| s.tour.source() == Source::Command) else { return false };
-        match message {
-            Ok(line) => state.tour.push_output(line),
-            Err(code) => {
-                state.run = None;
-                if state.tour.exited(code, &self.project.root) {
-                    self.show_stop(cx);
-                } else {
-                    let said = format!("`{}`: {}, no output", state.tour.title, state.tour.exit_label());
-                    self.project.say(said);
-                    self.end_tour();
-                }
-            }
-        }
-        cx.notify();
-        true
     }
 
     /// `space d`: tour this file's diagnostics.
@@ -220,31 +166,16 @@ impl Editor {
     }
 
     /// A review key for the tour, if one is up: Tab on (the last finishes),
-    /// Shift+Tab back, Enter hands the stop to Claude, Esc stops or closes.
+    /// Shift+Tab back, Enter asks Claude about the stop, Esc closes.
     pub(super) fn tour_review(&mut self, key: Review, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.tour.as_mut().filter(|s| !s.tour.paused()) else { return };
         let moved = match key {
-            // Esc stops a running command, and closes a finished tour.
-            Review::Stop => {
-                let running = state.run.as_ref().map(Run::stop).is_some();
-                if !running {
-                    self.end_tour();
-                }
-                return;
-            }
+            Review::Stop => return self.end_tour(),
             Review::Next => state.tour.forward(),
             Review::Back => state.tour.back(),
-            Review::Ask => {
-                let handed = state.tour.hand_off();
-                match handed.output {
-                    Some(output) if handed.fix => self.open_story(Origin::Fix(output), "fix this", window, cx),
-                    // A question about the output: asked, and answered, in the panel.
-                    Some(output) => self.open_story(Origin::Output(output), "", window, cx),
-                    // At a search match: about the code there.
-                    None => self.open_story(Origin::Lines, "", window, cx),
-                }
-                return;
-            }
+            // A question like any other, about the lines at the stop; the
+            // command and its output go along anyway.
+            Review::Ask => return self.open_story("", window, cx),
             Review::Skip => return,
         };
         self.tour_moved(moved, cx);
@@ -263,7 +194,7 @@ impl Editor {
         }
     }
 
-    /// Claude is done with a stop: on to the next one.
+    /// Claude is done: back to the stop.
     pub(super) fn resume_tour(&mut self, cx: &mut Context<Self>) {
         let Some(state) = self.tour.as_mut().filter(|s| s.tour.paused()) else { return };
         let moved = state.tour.resume();

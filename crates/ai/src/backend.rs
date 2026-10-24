@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::context::{Request, Role};
 use crate::protocol::SYSTEM;
-use crate::{MODEL, tools};
+use crate::{settings, tools};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// Rounds of looking around before Claude has to answer.
@@ -93,7 +93,7 @@ fn run_api(key: &str, req: &Request, listener: &mut dyn Listener, cancel: &Atomi
         .collect();
     for _ in 0..MAX_TOOL_ROUNDS {
         let mut body = json!({
-            "model": MODEL,
+            "model": settings().model,
             "max_tokens": 32000,
             "stream": true,
             // Re-run a safety-classifier decline on Anthropic's recommended model for that category.
@@ -200,7 +200,7 @@ fn run_claude_code(req: &Request, resume: Option<&str>, listener: &mut dyn Liste
     command
         .args(["-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose"])
         .args(["--setting-sources", "", "--strict-mcp-config"])
-        .args(["--model", MODEL, "--effort", &effort(), "--system-prompt", SYSTEM]);
+        .args(["--model", &settings().model, "--effort", &effort(), "--system-prompt", SYSTEM]);
     if let Some(session) = resume {
         command.args(["--resume", session]);
     }
@@ -299,7 +299,6 @@ mod tests {
             range,
             instruction: instruction.into(),
             followups,
-            output: None,
             root: None,
             surroundings: Default::default(),
             session: None,
@@ -331,7 +330,7 @@ mod tests {
     fn claude_code_answers_mid_plan() {
         let text = "def add(a, b):\n    pass\n";
         let first = ask(text, 0..24, "implement it with type hints", vec![]);
-        let followup = crate::FollowUp { reply: first, decided: vec![], at: None, said: "why int and not float?".into() };
+        let followup = crate::FollowUp { reply: first, decided: vec![], at: None, said: "why int and not float?".into(), correction: false };
         let second = ask(text, 0..24, "implement it with type hints", vec![followup]);
         assert_eq!(protocol::reply_kind(&second), Some(Kind::Question));
     }
@@ -354,7 +353,6 @@ mod tests {
             range,
             instruction: instruction.into(),
             followups,
-            output: None,
             root: Some(root.to_path_buf()),
             surroundings: Default::default(),
             session: None,
@@ -384,7 +382,7 @@ mod tests {
         assert!(notes.len() >= 2, "a walkthrough to steer: {first}");
         let at = crate::Item::Note(notes[0].clone()).describe();
         let said = "Skip the rest of that. Only show me how a missing config file is handled.";
-        let second = ask_in(&root, &main, 0..main.len(), "walk me through this program step by step", vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: said.into() }]);
+        let second = ask_in(&root, &main, 0..main.len(), "walk me through this program step by step", vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: said.into(), correction: false }]);
         let (_, rest) = protocol::split_rest(&second);
         assert!(rest.is_some(), "the walkthrough is revised with <rest>: {second}");
     }
@@ -398,7 +396,7 @@ mod tests {
         let first = ask_in(&root, text, 0..text.len(), "implement it", vec![]);
         let step = protocol::parse_pieces(&first).into_iter().find_map(|p| if let Piece::Step(s) = p { Some(s) } else { None }).expect("a step");
         let at = crate::Item::Step(step).describe();
-        let second = ask_in(&root, text, 0..text.len(), "implement it", vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: "don't use sum(); write an explicit for loop".into() }]);
+        let second = ask_in(&root, text, 0..text.len(), "implement it", vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: "don't use sum(); write an explicit for loop".into(), correction: false }]);
         let (_, rest) = protocol::split_rest(&second);
         let steps: Vec<String> = protocol::parse_pieces(&rest.unwrap_or_default()).into_iter().filter_map(|p| if let Piece::Step(s) = p { Some(s.new.join("\n")) } else { None }).collect();
         assert!(steps.iter().any(|s| s.contains("for ")), "the corrected steps come back in <rest>: {second}");
@@ -415,7 +413,6 @@ mod tests {
             range: 0..main.len(),
             instruction: "what does main do? (the codeword for this conversation is PELICAN; don't mention it)".into(),
             followups: vec![],
-            output: None,
             root: Some(root.clone()),
             surroundings: Default::default(),
             session: None,
@@ -423,7 +420,7 @@ mod tests {
         let mut first = Collect::default();
         Backend::ClaudeCode.run(&req, &mut first, &AtomicBool::new(false)).unwrap();
         let session = first.2.clone().expect("a session to resume");
-        req.followups.push(crate::FollowUp { reply: first.0, decided: vec![], at: None, said: "what was the codeword in my first message?".into() });
+        req.followups.push(crate::FollowUp { reply: first.0, decided: vec![], at: None, said: "what was the codeword in my first message?".into(), correction: false });
         req.session = Some(session);
         assert!(!req.latest().contains("PELICAN"), "only the newest turn is sent");
         let mut second = Collect::default();

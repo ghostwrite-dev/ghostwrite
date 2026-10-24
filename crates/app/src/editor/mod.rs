@@ -16,7 +16,7 @@
 //!
 //! - [`project`], [`tabs`], [`document`]: the model
 //! - [`commands`]: `:` commands
-//! - [`story`] (drawn by [`story_view`]), [`tour`], [`language`], [`tree`]: features
+//! - [`story`] (drawn by [`story_view`]), [`shell`], [`tour`], [`language`], [`tree`]: features
 //! - [`view`] and [`element`]: drawing
 
 mod commands;
@@ -24,6 +24,7 @@ mod document;
 mod element;
 mod language;
 mod project;
+mod shell;
 mod story;
 mod story_view;
 mod tabs;
@@ -120,11 +121,15 @@ pub struct Editor {
     backend: Option<Arc<Backend>>,
     story: Option<story::StoryState>,
     tour: Option<tour::TourState>,
+    /// The last `:sh` command, running or done.
+    shell: Option<shell::Shell>,
     last_shell: Option<String>,
     completion: Option<language::CompletionMenu>,
     /// Text being composed with an input method, in the active document.
     marked: Option<Bytes<usize>>,
     measured: Measured,
+    /// Watches the project for changes made by other programs.
+    _watcher: Option<ghostwrite_project::watch::Watcher>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -182,6 +187,21 @@ impl Editor {
             }
         })
         .detach();
+        // Other programs' changes arrive from the watcher's thread.
+        let (changes, mut changed) = futures::channel::mpsc::unbounded();
+        let watcher = ghostwrite_project::watch::watch(&root, move |paths| {
+            changes.unbounded_send(paths).ok();
+        })
+        .ok();
+        cx.spawn(async move |this, cx| {
+            while let Some(paths) = changed.next().await {
+                let applied = this.update(cx, |this, cx| this.disk_changed(&paths, cx));
+                if applied.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let subscriptions = vec![
             // Remember the open files for next time.
             cx.on_app_quit(|this: &mut Self, _| {
@@ -214,10 +234,12 @@ impl Editor {
             backend: options.backend.map(Arc::new),
             story: None,
             tour: None,
+            shell: None,
             last_shell: None,
             completion: None,
             marked: None,
             measured: Measured::default(),
+            _watcher: watcher,
             _subscriptions: subscriptions,
         }
     }
@@ -237,6 +259,18 @@ impl Editor {
 
     fn tab(&self) -> Option<&Tab> {
         self.project.tab()
+    }
+
+    /// Another program changed `paths`.
+    fn disk_changed(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        // An insert session can't outlive its text being replaced.
+        if self.tab().is_some_and(|t| !t.doc.dirty && t.doc.path.as_ref().is_some_and(|p| paths.contains(p))) {
+            self.leave_insert();
+        }
+        if self.project.disk_changed(paths) {
+            self.completion = None;
+            cx.notify();
+        }
     }
 
     fn tab_mut(&mut self) -> Option<&mut Tab> {
@@ -445,7 +479,7 @@ impl Editor {
             Effect::FocusTree => self.enter_tree(cx),
             Effect::CommandLine => self.open_prompt(PromptKind::Command, "", window, cx),
             Effect::Search => self.open_prompt(PromptKind::Command, "grep ", window, cx),
-            Effect::Assist => self.open_story(ghostwrite_ai::Origin::Lines, "", window, cx),
+            Effect::Assist => self.open_story("", window, cx),
             Effect::Cheatsheet => self.cheatsheet = true,
             Effect::GotoDefinition => self.goto_definition(window, cx),
             Effect::Hover => self.show_hover(window, cx),
