@@ -26,9 +26,7 @@ impl<F: Files> Layout<'_, F> {
         let item = self.story.item(id)?;
         let unpinned = matches!(&item, Item::Note(Note { file: None, at, .. }) if at.is_empty());
         // A follow-up's answer goes where it was asked.
-        if unpinned
-            && let Some(lines) = self.story.asked_about(id).and_then(|about| self.lines(about))
-        {
+        if unpinned && let Some(lines) = self.story.asked_about(id).and_then(|about| self.lines(about)) {
             return Some(lines);
         }
         Some(self.placer.place(&item, &self.asked, &self.files))

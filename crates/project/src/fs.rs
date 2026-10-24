@@ -15,9 +15,7 @@ pub fn create(dir: &Path, name: &str) -> Result<PathBuf, String> {
     let made = if name.ends_with('/') {
         std::fs::create_dir_all(&path)
     } else {
-        path.parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map(drop))
+        path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map(drop))
     };
     made.map(|()| path).map_err(|e| format!("couldn't create {name}: {e}"))
 }

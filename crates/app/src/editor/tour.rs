@@ -69,7 +69,10 @@ impl TourState {
         };
         // Command output keeps its lines; an error's message wraps to the panel.
         let wrap = matches!(tour.current(), Some(Stop::Error(_)));
-        let rows = tour.rows().into_iter().map(|l| div().when(!wrap, |d| d.whitespace_nowrap().overflow_hidden()).child(if l.is_empty() { " ".to_string() } else { l }));
+        let rows = tour
+            .rows()
+            .into_iter()
+            .map(|l| div().when(!wrap, |d| d.whitespace_nowrap().overflow_hidden()).child(if l.is_empty() { " ".to_string() } else { l }));
         Some(
             div()
                 .flex_none()

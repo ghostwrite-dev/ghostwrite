@@ -130,24 +130,19 @@ impl Render for ProjectsPage {
                     .flex_col()
                     .gap_4()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Projects"))
-                            .child(
-                                div()
-                                    .id("open-folder")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .bg(theme.accent)
-                                    .text_color(theme.accent_foreground)
-                                    .hover(|s| s.opacity(0.85))
-                                    .child("Open Folder…  o")
-                                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
-                            ),
+                        div().flex().items_center().justify_between().child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Projects")).child(
+                            div()
+                                .id("open-folder")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .bg(theme.accent)
+                                .text_color(theme.accent_foreground)
+                                .hover(|s| s.opacity(0.85))
+                                .child("Open Folder…  o")
+                                .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
+                        ),
                     )
                     .child(if rows.is_empty() {
                         div().text_color(theme.muted_foreground).child("No recent projects. Open a folder to start.").into_any_element()

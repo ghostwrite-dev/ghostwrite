@@ -14,15 +14,14 @@ use ghostwrite_core::syntax::SCOPES;
 use ghostwrite_core::{Mode, Range};
 use ghostwrite_lsp::Severity;
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, FocusHandle, Font,
-    GlobalElementId, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, ScrollWheelEvent,
-    ShapedLine, SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle, Window, fill, font, point, px, relative,
+    AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, FocusHandle, Font, GlobalElementId,
+    Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString,
+    StrikethroughStyle, Style, TextRun, UnderlineStyle, Window, fill, font, point, px, relative,
 };
 
 use super::tabs::{Autoscroll, Tab};
 use super::{Editor, Measured};
 use crate::theme::{Theme, theme};
-
 
 /// A mark on some text: a background, a strike, or a different color.
 #[derive(Clone, Debug)]
@@ -242,7 +241,15 @@ impl Element for CodeView {
         (window.request_layout(style, [], cx), ())
     }
 
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Prepainted {
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Prepainted {
         let theme = theme(cx).clone();
         let metrics = Metrics::measure(&theme, window);
         let focused = self.focus.is_focused(window);
@@ -284,7 +291,16 @@ impl Element for CodeView {
         Prepainted { lines, quads, cursor_glyph, gutter, text_bounds, gutter_bounds, line_height: metrics.line_height, scroll_left }
     }
 
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), state: &mut Prepainted, window: &mut Window, cx: &mut App) {
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        state: &mut Prepainted,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         window.handle_input(&self.focus, ElementInputHandler::new(bounds, self.editor.clone()), cx);
         let background = theme(cx).background;
         let line_height = state.line_height;
@@ -374,7 +390,17 @@ impl CodeView {
 
     /// What's filled behind the text: the cursor's line, marks, the selection.
     #[allow(clippy::too_many_arguments)]
-    fn backgrounds(&self, snap: &Snapshot, lines: &[LaidLine], text: &str, theme: &Theme, text_bounds: Bounds<Pixels>, scroll_left: Pixels, line_height: Pixels, focused: bool) -> Vec<PaintQuad> {
+    fn backgrounds(
+        &self,
+        snap: &Snapshot,
+        lines: &[LaidLine],
+        text: &str,
+        theme: &Theme,
+        text_bounds: Bounds<Pixels>,
+        scroll_left: Pixels,
+        line_height: Pixels,
+        focused: bool,
+    ) -> Vec<PaintQuad> {
         let origin_x = text_bounds.left() - scroll_left;
         let mut quads = vec![];
         let span = |range: &Bytes<usize>, color: Hsla, quads: &mut Vec<PaintQuad>| {
@@ -444,7 +470,9 @@ impl CodeView {
 
 /// Keep the cursor in view sideways when asked to show it.
 fn scroll_sideways(snap: &Snapshot, lines: &[LaidLine], metrics: &Metrics, text_bounds: Bounds<Pixels>) -> Pixels {
-    let Some(laid) = lines.iter().find(|l| l.start <= snap.cursor && snap.cursor <= l.end).filter(|_| snap.autoscroll.is_some()) else { return snap.scroll_left };
+    let Some(laid) = lines.iter().find(|l| l.start <= snap.cursor && snap.cursor <= l.end).filter(|_| snap.autoscroll.is_some()) else {
+        return snap.scroll_left;
+    };
     let x = laid.x(snap.cursor);
     let room = text_bounds.size.width - metrics.char_width * 4.;
     if x < snap.scroll_left {

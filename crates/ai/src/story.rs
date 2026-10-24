@@ -51,7 +51,10 @@ pub enum Item {
     /// A file or folder to move to the Trash.
     Remove(String),
     /// A file or folder to move.
-    Rename { from: String, to: String },
+    Rename {
+        from: String,
+        to: String,
+    },
 }
 
 impl Item {

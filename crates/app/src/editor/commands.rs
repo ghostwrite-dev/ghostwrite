@@ -11,15 +11,26 @@ use super::{Editor, EditorEvent};
 pub enum Command {
     Open(Vec<String>),
     Write(Option<String>),
-    WriteAll { quit: bool },
-    QuitAll { force: bool },
+    WriteAll {
+        quit: bool,
+    },
+    QuitAll {
+        force: bool,
+    },
     New,
     BufferNext,
     BufferPrev,
-    BufferClose { force: bool },
+    BufferClose {
+        force: bool,
+    },
     /// Move the current file, or `path`, to the Trash.
-    Remove { path: Option<String>, force: bool },
-    Reload { force: bool },
+    Remove {
+        path: Option<String>,
+        force: bool,
+    },
+    Reload {
+        force: bool,
+    },
     Goto(usize),
     /// Run a shell command in the background (`None`: the last one again).
     Shell(Option<String>),
@@ -37,8 +48,28 @@ pub enum Command {
 
 /// Names Tab completes, as typed in helix.
 const NAMES: &[&str] = &[
-    "open", "edit", "write", "write-all", "write-quit-all", "quit-all", "quit-all!", "new", "reload", "reload!", "rm", "rm!", "sh", "stop", "output", "grep",
-    "buffer-next", "buffer-previous", "buffer-close", "buffer-close!", "tree", "project",
+    "open",
+    "edit",
+    "write",
+    "write-all",
+    "write-quit-all",
+    "quit-all",
+    "quit-all!",
+    "new",
+    "reload",
+    "reload!",
+    "rm",
+    "rm!",
+    "sh",
+    "stop",
+    "output",
+    "grep",
+    "buffer-next",
+    "buffer-previous",
+    "buffer-close",
+    "buffer-close!",
+    "tree",
+    "project",
 ];
 
 pub fn parse(line: &str) -> Result<Command, String> {

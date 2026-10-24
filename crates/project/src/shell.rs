@@ -106,9 +106,7 @@ pub struct Location {
 pub fn locations(output: &str, root: &Path) -> Vec<Location> {
     static REFERENCE: OnceLock<Regex> = OnceLock::new();
     static TRACEBACK: OnceLock<Regex> = OnceLock::new();
-    let reference = REFERENCE.get_or_init(|| {
-        Regex::new(r"(?:^|[\s(\x22'`])((?:[\w.@~+-]+/)*[\w.@+-]+\.[A-Za-z0-9]+):(\d+)(?::\d+)?").expect("valid regex")
-    });
+    let reference = REFERENCE.get_or_init(|| Regex::new(r"(?:^|[\s(\x22'`])((?:[\w.@~+-]+/)*[\w.@+-]+\.[A-Za-z0-9]+):(\d+)(?::\d+)?").expect("valid regex"));
     let traceback = TRACEBACK.get_or_init(|| Regex::new(r#"File "([^"]+)", line (\d+)"#).expect("valid regex"));
     let resolve = |path: &str| {
         let p = Path::new(path.trim_start_matches("./"));

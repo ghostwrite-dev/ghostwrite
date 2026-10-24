@@ -168,11 +168,8 @@ impl Registers for Regs<'_> {
 impl Editor {
     pub fn new(root: PathBuf, options: Options, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (events, mut diagnostics) = futures::channel::mpsc::unbounded();
-        let servers = if options.language_servers {
-            ghostwrite_lsp::Registry::new(root.clone(), events)
-        } else {
-            ghostwrite_lsp::Registry::disabled(root.clone())
-        };
+        let servers =
+            if options.language_servers { ghostwrite_lsp::Registry::new(root.clone(), events) } else { ghostwrite_lsp::Registry::disabled(root.clone()) };
         // Diagnostics arrive from the servers' reader threads.
         cx.spawn(async move |this, cx| {
             while let Some(ghostwrite_lsp::Event::Diagnostics { path, diagnostics }) = diagnostics.next().await {

@@ -84,7 +84,8 @@ impl StoryState {
             }
             let hint = waiting_hint(story);
             let rows = if ask.is_some() { vec![] } else { vec![Row::Hint(hint, theme.warning)] };
-            let spec = BlockSpec { indent: indent_of(located.near.start), rows, prompt: prompt(if story.is_some() { "⏎ send · esc" } else { "⏎ ask · esc" }) };
+            let spec =
+                BlockSpec { indent: indent_of(located.near.start), rows, prompt: prompt(if story.is_some() { "⏎ send · esc" } else { "⏎ ask · esc" }) };
             return (vec![], Some(block(located.near.end.saturating_sub(1), spec, theme)));
         };
 
@@ -151,13 +152,17 @@ fn block(line: usize, spec: BlockSpec, theme: &Theme) -> Block {
 fn build(spec: BlockSpec, theme: &Theme, sizes: BlockSizes) -> AnyElement {
     let columns = |indent: usize| (((f32::from(sizes.width) - 48.) / f32::from(sizes.char_width.max(px(1.)))) as usize).saturating_sub(indent).max(24);
     let indent = sizes.char_width * spec.indent as f32;
-    let line = |text: String, color: Hsla| div().h(sizes.line_height).flex().items_center().whitespace_nowrap().text_color(color).child(if text.is_empty() { " ".to_string() } else { text });
+    let line = |text: String, color: Hsla| {
+        div().h(sizes.line_height).flex().items_center().whitespace_nowrap().text_color(color).child(if text.is_empty() { " ".to_string() } else { text })
+    };
     let mut rows: Vec<AnyElement> = vec![];
     for row in spec.rows {
         match row {
             // Code carries its own indentation.
             Row::Code(code) => rows.extend(protocol::wrap_code(&code, columns(0)).into_iter().map(|l| line(l, theme.muted_foreground).into_any_element())),
-            Row::Prose(text) => rows.extend(protocol::wrap(&text, columns(spec.indent)).into_iter().map(|l| line(l, theme.foreground).pl(indent).into_any_element())),
+            Row::Prose(text) => {
+                rows.extend(protocol::wrap(&text, columns(spec.indent)).into_iter().map(|l| line(l, theme.foreground).pl(indent).into_any_element()))
+            }
             Row::Hint(hint, color) => rows.push(
                 div()
                     .h(sizes.line_height)

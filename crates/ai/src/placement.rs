@@ -169,7 +169,12 @@ mod tests {
     }
 
     fn step(file: Option<&str>, old: &[&str], new: &[&str]) -> Item {
-        Item::Step(Step { file: file.map(str::to_string), old: old.iter().map(|s| s.to_string()).collect(), new: new.iter().map(|s| s.to_string()).collect(), complete: true })
+        Item::Step(Step {
+            file: file.map(str::to_string),
+            old: old.iter().map(|s| s.to_string()).collect(),
+            new: new.iter().map(|s| s.to_string()).collect(),
+            complete: true,
+        })
     }
 
     fn apply(text: &str, item: &Item, near: Range<usize>) -> String {
@@ -181,7 +186,11 @@ mod tests {
     #[test]
     fn steps_find_their_files() {
         let root = PathBuf::from("/p");
-        let project = Project(vec![(root.join("main.rs"), "fn main() {}\n".into()), (root.join("util.rs"), "pub fn one() {}".into()), (root.join("lib.rs"), "x = 1\n".into())]);
+        let project = Project(vec![
+            (root.join("main.rs"), "fn main() {}\n".into()),
+            (root.join("util.rs"), "pub fn one() {}".into()),
+            (root.join("lib.rs"), "x = 1\n".into()),
+        ]);
         let asked = Asked { path: Some(&root.join("main.rs")), text: "fn main() {}\n", lines: 0..1 };
         let placer = Placer::new(root.clone());
         let place = |item: &Item| placer.place(item, &asked, &project);

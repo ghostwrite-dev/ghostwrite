@@ -80,7 +80,13 @@ impl Workspace {
         if !editor.read(cx).is_dirty() {
             return then(self, window, cx);
         }
-        let answer = window.prompt(PromptLevel::Warning, "Leave this project without saving?", Some("Unsaved changes in open tabs will be lost."), &["Leave", "Cancel"], cx);
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Leave this project without saving?",
+            Some("Unsaved changes in open tabs will be lost."),
+            &["Leave", "Cancel"],
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
             if answer.await == Ok(0) {
                 this.update_in(cx, |this, window, cx| then(this, window, cx)).ok();
@@ -122,11 +128,6 @@ impl Render for Workspace {
             Screen::Projects(page) => page.clone().into_any_element(),
             Screen::Project(editor) => editor.clone().into_any_element(),
         };
-        div()
-            .key_context("Workspace")
-            .on_action(cx.listener(Self::show_projects))
-            .on_action(cx.listener(Self::open_folder))
-            .size_full()
-            .child(content)
+        div().key_context("Workspace").on_action(cx.listener(Self::show_projects)).on_action(cx.listener(Self::open_folder)).size_full().child(content)
     }
 }

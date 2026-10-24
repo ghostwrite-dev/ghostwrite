@@ -4,9 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
+use ghostwrite_core::Buffer;
 use ghostwrite_core::indent::IndentUnit;
 use ghostwrite_core::syntax::{Language, Span};
-use ghostwrite_core::Buffer;
 use ghostwrite_lsp::Diagnostic;
 use gpui::SharedString;
 
@@ -92,7 +92,6 @@ impl Document {
         }
     }
 
-
     /// Write to `path` (a new path renames the document).
     pub fn save(&mut self, path: PathBuf) -> std::io::Result<()> {
         std::fs::write(&path, self.buffer.text())?;
@@ -127,5 +126,4 @@ impl Document {
     pub fn set_diagnostics(&mut self, diagnostics: Vec<ghostwrite_lsp::RawDiagnostic>) {
         self.diagnostics = ghostwrite_lsp::convert::diagnostics(self.buffer.text(), diagnostics);
     }
-
 }

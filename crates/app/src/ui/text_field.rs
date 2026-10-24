@@ -5,17 +5,38 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*,
-    px, relative, size,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
+    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 
 use crate::theme::theme;
 
 actions!(
     text_field,
-    [Backspace, Delete, DeleteWord, DeleteToStart, Left, Right, WordLeft, WordRight, SelectLeft, SelectRight, SelectAll, Home, End, Paste, Cut, Copy, Submit, Cancel, Up, Down, Complete]
+    [
+        Backspace,
+        Delete,
+        DeleteWord,
+        DeleteToStart,
+        Left,
+        Right,
+        WordLeft,
+        WordRight,
+        SelectLeft,
+        SelectRight,
+        SelectAll,
+        Home,
+        End,
+        Paste,
+        Cut,
+        Copy,
+        Submit,
+        Cancel,
+        Up,
+        Down,
+        Complete
+    ]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -331,7 +352,14 @@ impl EntityInputHandler for TextField {
         self.replace(range, text, cx);
     }
 
-    fn replace_and_mark_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, new_selected: Option<Range<usize>>, _: &mut Window, cx: &mut Context<Self>) {
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        new_selected: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let range = range.as_ref().map(|r| self.range_from_utf16(r)).or(self.marked.clone()).unwrap_or(self.selected.clone());
         self.text.replace_range(range.clone(), text);
         self.marked = (!text.is_empty()).then(|| range.start..range.start + text.len());
@@ -347,7 +375,10 @@ impl EntityInputHandler for TextField {
     fn bounds_for_range(&mut self, range: Range<usize>, bounds: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
         let layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range);
-        Some(Bounds::from_corners(point(bounds.left() + layout.x_for_index(range.start), bounds.top()), point(bounds.left() + layout.x_for_index(range.end), bounds.bottom())))
+        Some(Bounds::from_corners(
+            point(bounds.left() + layout.x_for_index(range.start), bounds.top()),
+            point(bounds.left() + layout.x_for_index(range.end), bounds.bottom()),
+        ))
     }
 
     fn character_index_for_point(&mut self, point: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
@@ -430,7 +461,15 @@ impl Element for TextFieldElement {
         (window.request_layout(style, [], cx), ())
     }
 
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Prepainted {
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Prepainted {
         let field = self.field.read(cx);
         let style = window.text_style();
         let theme = theme(cx);
@@ -459,7 +498,16 @@ impl Element for TextFieldElement {
         Prepainted { line, cursor, selection }
     }
 
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), prepainted: &mut Prepainted, window: &mut Window, cx: &mut App) {
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        prepainted: &mut Prepainted,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let focus = self.field.read(cx).focus.clone();
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.field.clone()), cx);
         if let Some(selection) = prepainted.selection.take() {

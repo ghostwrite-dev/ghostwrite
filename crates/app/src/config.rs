@@ -44,10 +44,7 @@ pub fn get() -> &'static Config {
 
 fn load() -> Config {
     let mut config = Config::default();
-    let Some(json) = path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-    else {
+    let Some(json) = path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) else {
         return config;
     };
     if let Some(mb) = json.get("max_file_size_mb").and_then(|v| v.as_u64()) {

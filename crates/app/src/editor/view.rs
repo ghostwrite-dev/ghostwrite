@@ -4,8 +4,7 @@
 
 use ghostwrite_core::{Mode, Range};
 use gpui::{
-    AnyElement, ClipboardItem, Context, FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, SharedString, Window, div,
-    prelude::*, px,
+    AnyElement, ClipboardItem, Context, FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, SharedString, Window, div, prelude::*, px,
 };
 
 use super::element::CodeView;
@@ -55,7 +54,12 @@ const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
     ),
     (
         "Language server",
-        &[("space k", "docs for what's under the cursor"), ("space d", "tour this file's diagnostics"), ("space /", "search the project (:grep)"), ("typing", "completion menu (enter picks)")],
+        &[
+            ("space k", "docs for what's under the cursor"),
+            ("space d", "tour this file's diagnostics"),
+            ("space /", "search the project (:grep)"),
+            ("typing", "completion menu (enter picks)"),
+        ],
     ),
     (
         "AI mode  space i",
@@ -188,7 +192,9 @@ impl Editor {
             .project
             .status
             .clone()
-            .or_else(|| tab.and_then(Tab::diagnostic_at_cursor).map(|d| format!("{}: {}", d.severity.label(), d.message.lines().next().unwrap_or_default()).into()))
+            .or_else(|| {
+                tab.and_then(Tab::diagnostic_at_cursor).map(|d| format!("{}: {}", d.severity.label(), d.message.lines().next().unwrap_or_default()).into())
+            })
             .or_else(|| tab.map(|t| t.doc.name()))
             .unwrap_or_else(|| "no file open".into());
         let position = tab.map(|t| {
@@ -233,16 +239,7 @@ impl Editor {
                     )
                     .child(div().min_w_0().overflow_hidden().text_ellipsis().child(message)),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_3()
-                    .child(self.modal.pending_label())
-                    .children(server)
-                    .children(position),
-            )
+            .child(div().flex().flex_none().items_center().gap_3().child(self.modal.pending_label()).children(server).children(position))
             .into_any_element()
     }
 
@@ -282,8 +279,19 @@ impl Editor {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(div().flex().justify_between().child(div().font_weight(FontWeight::SEMIBOLD).child("Keys")).child(div().text_xs().text_color(theme.muted_foreground).child("any key closes")))
-                    .child(div().flex().gap_6().children(columns.iter().map(|col| div().flex().flex_col().gap_4().children(col.iter().map(|&i| section(&CHEATSHEET[i])))))),
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Keys"))
+                            .child(div().text_xs().text_color(theme.muted_foreground).child("any key closes")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_6()
+                            .children(columns.iter().map(|col| div().flex().flex_col().gap_4().children(col.iter().map(|&i| section(&CHEATSHEET[i]))))),
+                    ),
             )
             .into_any_element()
     }
@@ -395,13 +403,17 @@ impl gpui::Render for Editor {
             .text_color(theme.foreground)
             .font_family(theme.ui_font.clone())
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .children(tree)
-                    .child(div().flex_1().min_w_0().flex().flex_col().children(tabs).child(body)
-                            .children(self.tour.as_ref().and_then(|t| t.panel(&theme))).children(self.render_command_line(cx))),
+                div().flex_1().min_h_0().flex().children(tree).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .children(tabs)
+                        .child(body)
+                        .children(self.tour.as_ref().and_then(|t| t.panel(&theme)))
+                        .children(self.render_command_line(cx)),
+                ),
             )
             .child(self.render_status(cx))
             .children(self.cheatsheet.then(|| self.render_cheatsheet(cx)))

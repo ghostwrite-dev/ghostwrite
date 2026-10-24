@@ -292,7 +292,10 @@ pub enum Piece {
     /// A file or folder to move to the Trash.
     Remove(String),
     /// A file or folder to move to a new path.
-    Rename { from: String, to: String },
+    Rename {
+        from: String,
+        to: String,
+    },
 }
 
 /// The pieces of a change so far. A step shows up once its `<old>` is
@@ -460,7 +463,11 @@ mod tests {
     #[test]
     fn notes_can_be_in_other_files() {
         let reply = "<answer>\n<note>\n<file>\nsrc/lib.rs\n</file>\n<at>\npub fn run() {\n</at>\nIt starts here.\n</note>\n<note>\n<file>\nsrc/ma";
-        assert_eq!(parse_notes(reply), vec![Note { file: Some("src/lib.rs".into()), at: lines(&["pub fn run() {"]), text: "It starts here.".into() }], "a note waits for its file");
+        assert_eq!(
+            parse_notes(reply),
+            vec![Note { file: Some("src/lib.rs".into()), at: lines(&["pub fn run() {"]), text: "It starts here.".into() }],
+            "a note waits for its file"
+        );
     }
 
     #[test]
@@ -483,7 +490,8 @@ mod tests {
 
     #[test]
     fn steps_appear_as_they_stream() {
-        let full = "<step>\n<old>\n    pass\n</old>\n<new>\n    total = a + b\n    return total\n</new>\n</step>\n<step>\n<old>\n</old>\n<new>\nx\n</new>\n</step>";
+        let full =
+            "<step>\n<old>\n    pass\n</old>\n<new>\n    total = a + b\n    return total\n</new>\n</step>\n<step>\n<old>\n</old>\n<new>\nx\n</new>\n</step>";
         assert_eq!(steps(&full[..20]), vec![]);
         let partial = &full[..full.find("    return").unwrap() + 6];
         assert_eq!(steps(partial), vec![Step { file: None, old: lines(&["    pass"]), new: lines(&["    total = a + b", "    re"]), complete: false }]);

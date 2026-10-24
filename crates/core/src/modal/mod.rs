@@ -187,7 +187,10 @@ pub trait Registers {
 enum Pending {
     Goto,
     Space,
-    Find { forward: bool, till: bool },
+    Find {
+        forward: bool,
+        till: bool,
+    },
     Replace,
     /// `m`, then: `m` `s` `r` `d` `a` `i`.
     Match,
@@ -195,7 +198,9 @@ enum Pending {
     SurroundDelete,
     SurroundReplace,
     SurroundReplaceWith(char),
-    Object { around: bool },
+    Object {
+        around: bool,
+    },
 }
 
 #[derive(Debug)]

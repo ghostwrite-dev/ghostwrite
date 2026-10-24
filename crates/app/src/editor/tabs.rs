@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use ghostwrite_core::modal::Target;
 use ghostwrite_core::Range;
+use ghostwrite_core::modal::Target;
 use ghostwrite_lsp::Diagnostic;
 use gpui::{Pixels, px};
 

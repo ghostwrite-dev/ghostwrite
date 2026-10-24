@@ -6,25 +6,7 @@ use gpui::{App, KeyBinding, Menu, MenuItem, actions};
 
 actions!(
     ghostwrite,
-    [
-        Quit,
-        Open,
-        OpenFolder,
-        ShowProjects,
-        Save,
-        SaveAs,
-        CloseTab,
-        NewTab,
-        NextTab,
-        PrevTab,
-        ToggleTree,
-        Undo,
-        Redo,
-        Copy,
-        Cut,
-        Paste,
-        SelectAll,
-    ]
+    [Quit, Open, OpenFolder, ShowProjects, Save, SaveAs, CloseTab, NewTab, NextTab, PrevTab, ToggleTree, Undo, Redo, Copy, Cut, Paste, SelectAll,]
 );
 
 pub fn install(cx: &mut App) {
@@ -75,7 +57,12 @@ pub fn install(cx: &mut App) {
         },
         Menu {
             name: "View".into(),
-            items: vec![MenuItem::action("Toggle File Tree", ToggleTree), MenuItem::separator(), MenuItem::action("Next Tab", NextTab), MenuItem::action("Previous Tab", PrevTab)],
+            items: vec![
+                MenuItem::action("Toggle File Tree", ToggleTree),
+                MenuItem::separator(),
+                MenuItem::action("Next Tab", NextTab),
+                MenuItem::action("Previous Tab", PrevTab),
+            ],
         },
     ]);
 }

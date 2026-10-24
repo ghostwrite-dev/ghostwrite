@@ -495,7 +495,10 @@ fn a_change_edits_other_existing_files(cx: &mut TestAppContext) {
     t.ask("add a verbose flag");
     assert_eq!(t.active().as_deref(), Some("src/lib.rs"), "the first step is in another file");
     t.keys("tab");
-    assert_eq!(t.read(|e| e.project.tabs.text_of(&e.project.root.join("src/lib.rs")).map(str::to_string)).as_deref(), Some("pub fn run(verbose: bool) {}\npub fn run() {}\n"));
+    assert_eq!(
+        t.read(|e| e.project.tabs.text_of(&e.project.root.join("src/lib.rs")).map(str::to_string)).as_deref(),
+        Some("pub fn run(verbose: bool) {}\npub fn run() {}\n")
+    );
     assert_eq!(t.active().as_deref(), Some("doc.txt"), "back for the next step");
     t.keys("tab");
     assert_eq!(t.text(), "fn main() { run(true); }\n");
@@ -593,8 +596,11 @@ fn the_tree_marks_where_the_story_is_waiting(cx: &mut TestAppContext) {
     std::fs::write(t.dir.join("src/lib.rs"), "pub fn run() {}\n").unwrap();
     let waiting = |t: &mut Setup| {
         let dir = t.dir.clone();
-        let mut files: Vec<(String, super::story::Waiting)> =
-            t.read(|e| e.story.as_ref().map(|s| s.files(&e.project)).unwrap_or_default()).into_iter().map(|(p, w)| (p.strip_prefix(&dir).unwrap().display().to_string(), w)).collect();
+        let mut files: Vec<(String, super::story::Waiting)> = t
+            .read(|e| e.story.as_ref().map(|s| s.files(&e.project)).unwrap_or_default())
+            .into_iter()
+            .map(|(p, w)| (p.strip_prefix(&dir).unwrap().display().to_string(), w))
+            .collect();
         files.sort();
         files
     };

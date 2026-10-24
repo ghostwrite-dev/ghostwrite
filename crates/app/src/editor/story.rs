@@ -290,7 +290,8 @@ impl StoryState {
         let path = located.as_ref().and_then(|l| l.path.clone()).or_else(|| project.tabs.by_id(self.doc)?.doc.path.clone());
         let file = path.as_deref().map_or("the file".into(), |p| project.display(p));
         // The file asked about is in the request anyway; another is shown as it is.
-        let other = located.and_then(|l| l.path).map(|p| project.tabs.text_of(&p).map(str::to_string).or_else(|| std::fs::read_to_string(&p).ok()).unwrap_or_default());
+        let other =
+            located.and_then(|l| l.path).map(|p| project.tabs.text_of(&p).map(str::to_string).or_else(|| std::fs::read_to_string(&p).ok()).unwrap_or_default());
         if let Some(story) = self.story.as_mut() {
             story.step_misplaced(&file, other.as_deref());
         }

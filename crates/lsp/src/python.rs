@@ -41,9 +41,14 @@ pub fn interpreter(root: &Path) -> Option<PathBuf> {
     static UV: OnceLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> = OnceLock::new();
     static SYSTEM: OnceLock<Option<PathBuf>> = OnceLock::new();
     let absolute = |out: Option<String>| out.map(|s| s.trim().to_string()).filter(|p| p.starts_with('/')).map(PathBuf::from);
-    let uv = UV.get_or_init(Mutex::default).lock().unwrap().entry(root.to_path_buf()).or_insert_with(|| absolute(login_shell("uv python find 2>/dev/null", Some(root)))).clone();
-    uv.or_else(|| env(root).map(|venv| venv.join("bin/python")))
-        .or_else(|| SYSTEM.get_or_init(|| absolute(login_shell("command -v python3", None))).clone())
+    let uv = UV
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .entry(root.to_path_buf())
+        .or_insert_with(|| absolute(login_shell("uv python find 2>/dev/null", Some(root))))
+        .clone();
+    uv.or_else(|| env(root).map(|venv| venv.join("bin/python"))).or_else(|| SYSTEM.get_or_init(|| absolute(login_shell("command -v python3", None))).clone())
 }
 
 /// The environment variables a server for `root` starts with: the project's

@@ -127,9 +127,8 @@ static LANGUAGES: [Language; 15] = [
 ];
 
 fn configure(name: &str, language: tree_sitter::Language, query: &str) -> Option<HighlightConfiguration> {
-    let mut config = HighlightConfiguration::new(language, name, query, "", "")
-        .inspect_err(|e| eprintln!("the {name} highlight query doesn't load: {e}"))
-        .ok()?;
+    let mut config =
+        HighlightConfiguration::new(language, name, query, "", "").inspect_err(|e| eprintln!("the {name} highlight query doesn't load: {e}")).ok()?;
     config.configure(SCOPES);
     Some(config)
 }

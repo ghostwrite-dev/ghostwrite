@@ -1,0 +1,3 @@
+# The code is written wide: a line holds a whole thought.
+max_width = 160
+use_small_heuristics = "Max"

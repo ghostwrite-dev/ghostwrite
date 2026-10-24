@@ -86,11 +86,8 @@ fn effort() -> String {
 /// block (thinking included) goes back unchanged on the next round.
 fn run_api(key: &str, req: &Request, listener: &mut dyn Listener, cancel: &AtomicBool) -> Result<(), String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(300))).build().into();
-    let mut messages: Vec<Value> = req
-        .messages()
-        .into_iter()
-        .map(|(role, text)| json!({ "role": if role == Role::User { "user" } else { "assistant" }, "content": text }))
-        .collect();
+    let mut messages: Vec<Value> =
+        req.messages().into_iter().map(|(role, text)| json!({ "role": if role == Role::User { "user" } else { "assistant" }, "content": text })).collect();
     for _ in 0..MAX_TOOL_ROUNDS {
         let mut body = json!({
             "model": settings().model,
@@ -382,7 +379,13 @@ mod tests {
         assert!(notes.len() >= 2, "a walkthrough to steer: {first}");
         let at = crate::Item::Note(notes[0].clone()).describe();
         let said = "Skip the rest of that. Only show me how a missing config file is handled.";
-        let second = ask_in(&root, &main, 0..main.len(), "walk me through this program step by step", vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: said.into(), correction: false }]);
+        let second = ask_in(
+            &root,
+            &main,
+            0..main.len(),
+            "walk me through this program step by step",
+            vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: said.into(), correction: false }],
+        );
         let (_, rest) = protocol::split_rest(&second);
         assert!(rest.is_some(), "the walkthrough is revised with <rest>: {second}");
     }
@@ -396,9 +399,24 @@ mod tests {
         let first = ask_in(&root, text, 0..text.len(), "implement it", vec![]);
         let step = protocol::parse_pieces(&first).into_iter().find_map(|p| if let Piece::Step(s) = p { Some(s) } else { None }).expect("a step");
         let at = crate::Item::Step(step).describe();
-        let second = ask_in(&root, text, 0..text.len(), "implement it", vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: "don't use sum(); write an explicit for loop".into(), correction: false }]);
+        let second = ask_in(
+            &root,
+            text,
+            0..text.len(),
+            "implement it",
+            vec![crate::FollowUp {
+                reply: first,
+                decided: vec![],
+                at: Some(at),
+                said: "don't use sum(); write an explicit for loop".into(),
+                correction: false,
+            }],
+        );
         let (_, rest) = protocol::split_rest(&second);
-        let steps: Vec<String> = protocol::parse_pieces(&rest.unwrap_or_default()).into_iter().filter_map(|p| if let Piece::Step(s) = p { Some(s.new.join("\n")) } else { None }).collect();
+        let steps: Vec<String> = protocol::parse_pieces(&rest.unwrap_or_default())
+            .into_iter()
+            .filter_map(|p| if let Piece::Step(s) = p { Some(s.new.join("\n")) } else { None })
+            .collect();
         assert!(steps.iter().any(|s| s.contains("for ")), "the corrected steps come back in <rest>: {second}");
     }
 
@@ -420,7 +438,13 @@ mod tests {
         let mut first = Collect::default();
         Backend::ClaudeCode.run(&req, &mut first, &AtomicBool::new(false)).unwrap();
         let session = first.2.clone().expect("a session to resume");
-        req.followups.push(crate::FollowUp { reply: first.0, decided: vec![], at: None, said: "what was the codeword in my first message?".into(), correction: false });
+        req.followups.push(crate::FollowUp {
+            reply: first.0,
+            decided: vec![],
+            at: None,
+            said: "what was the codeword in my first message?".into(),
+            correction: false,
+        });
         req.session = Some(session);
         assert!(!req.latest().contains("PELICAN"), "only the newest turn is sent");
         let mut second = Collect::default();

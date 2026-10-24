@@ -163,7 +163,9 @@ impl Modal {
                 let swapped: String = b
                     .slice(target.bytes())
                     .chars()
-                    .flat_map(|ch| -> Vec<char> { if ch.is_uppercase() { ch.to_lowercase().collect() } else { ch.to_uppercase().collect() } })
+                    .flat_map(|ch| -> Vec<char> {
+                        if ch.is_uppercase() { ch.to_lowercase().collect() } else { ch.to_uppercase().collect() }
+                    })
                     .collect();
                 let after = same_shape(sel, target.from(), swapped.len());
                 self.edit(t, target.bytes(), &swapped, after, self.mode);

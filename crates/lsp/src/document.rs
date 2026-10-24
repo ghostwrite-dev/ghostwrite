@@ -42,10 +42,8 @@ impl Document {
 
     pub fn changed(&mut self, text: &str) {
         self.version += 1;
-        self.client.notify(
-            "textDocument/didChange",
-            json!({ "textDocument": { "uri": self.uri, "version": self.version }, "contentChanges": [{ "text": text }] }),
-        );
+        self.client
+            .notify("textDocument/didChange", json!({ "textDocument": { "uri": self.uri, "version": self.version }, "contentChanges": [{ "text": text }] }));
     }
 
     pub fn saved(&self) {

@@ -281,7 +281,10 @@ mod tests {
             said: "keep the old name".into(),
             correction: false,
         };
-        let req = Request { followups: vec![followup.clone(), FollowUp { decided: vec![], at: None, said: "and add docs".into(), ..followup.clone() }], ..request(None) };
+        let req = Request {
+            followups: vec![followup.clone(), FollowUp { decided: vec![], at: None, said: "and add docs".into(), ..followup.clone() }],
+            ..request(None)
+        };
         let turns = req.messages();
         let roles: Vec<Role> = turns.iter().map(|(r, _)| *r).collect();
         assert_eq!(roles, [Role::User, Role::Assistant, Role::User, Role::Assistant, Role::User]);
@@ -302,7 +305,14 @@ mod tests {
         store::redirect_for_tests();
         let root = ghostwrite_project::scratch_dir("context");
         store::save_memory(&root, "The user likes early returns.");
-        Interaction::new("main.rs".into(), "add logging".into(), vec!["use tracing".into()], "applied 2 of 2 steps".into(), "proposed 2 change(s) in main.rs, 2 applied".into()).log(&root);
+        Interaction::new(
+            "main.rs".into(),
+            "add logging".into(),
+            vec!["use tracing".into()],
+            "applied 2 of 2 steps".into(),
+            "proposed 2 change(s) in main.rs, 2 applied".into(),
+        )
+        .log(&root);
         let surroundings = Surroundings {
             open_files: vec!["lib.rs".into(), "main.rs".into()],
             diagnostics: vec!["line 2: error: unused".into()],
@@ -310,7 +320,12 @@ mod tests {
         };
         let prompt = Request { surroundings, ..request(Some(root.clone())) }.prompt();
         assert!(prompt.contains("<memory>\nThe user likes early returns.\n</memory>"), "{prompt}");
-        assert!(prompt.contains("just now in main.rs: \"add logging\" (applied 2 of 2 steps)\n  then: \"use tracing\"\n  you said: proposed 2 change(s) in main.rs, 2 applied"), "{prompt}");
+        assert!(
+            prompt.contains(
+                "just now in main.rs: \"add logging\" (applied 2 of 2 steps)\n  then: \"use tracing\"\n  you said: proposed 2 change(s) in main.rs, 2 applied"
+            ),
+            "{prompt}"
+        );
         assert!(prompt.contains("Open in the editor: lib.rs, main.rs") && prompt.contains("Diagnostics near the marked lines:\n- line 2: error: unused"));
         assert!(prompt.contains("<output>\n$ cargo check (✗ exit 101)\nerror: oops\n</output>"), "{prompt}");
         assert!(prompt.contains("File: lib.rs (rust)"));

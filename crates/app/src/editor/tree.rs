@@ -3,12 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
-use ghostwrite_core::modal::TreeCommand;
 use ghostwrite_core::Mode;
+use ghostwrite_core::modal::TreeCommand;
 use ghostwrite_project::{fs, store};
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, PromptLevel, ScrollStrategy, SharedString, Window, div,
-    prelude::*, px, uniform_list,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, PromptLevel, ScrollStrategy, SharedString, Window, div, prelude::*, px,
+    uniform_list,
 };
 
 use super::story::Waiting;
@@ -23,11 +23,22 @@ const INDENT: f32 = 14.;
 enum Line {
     Row(usize),
     /// A proposed new file or folder, where it would go.
-    Ghost { depth: usize, name: String },
+    Ghost {
+        depth: usize,
+        name: String,
+    },
     /// Under a proposal: what Claude said about it, the keys, or the prompt to ask.
-    Note { depth: usize, text: String },
-    Keys { depth: usize, text: String },
-    Ask { depth: usize },
+    Note {
+        depth: usize,
+        text: String,
+    },
+    Keys {
+        depth: usize,
+        text: String,
+    },
+    Ask {
+        depth: usize,
+    },
 }
 
 /// What shows under a proposal in the tree (the story decides).
@@ -342,20 +353,13 @@ impl Editor {
             .children(naming)
             .child(list)
             // The edge drags to resize.
-            .child(
-                div()
-                    .id("tree-edge")
-                    .absolute()
-                    .top_0()
-                    .right(px(-3.))
-                    .w(px(6.))
-                    .h_full()
-                    .cursor_col_resize()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        this.resizing_tree = true;
-                        cx.stop_propagation();
-                    })),
-            )
+            .child(div().id("tree-edge").absolute().top_0().right(px(-3.)).w(px(6.)).h_full().cursor_col_resize().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.resizing_tree = true;
+                    cx.stop_propagation();
+                }),
+            ))
             .into_any_element()
     }
 
