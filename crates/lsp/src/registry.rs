@@ -1,7 +1,7 @@
 //! The servers Ghostwrite knows, and the ones running for a project.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use futures::channel::mpsc;
@@ -9,26 +9,22 @@ use futures::channel::mpsc;
 use crate::client::{Client, Event, Launch};
 use crate::python;
 
-/// A language server Ghostwrite knows how to start, and what it serves.
+/// A language server Ghostwrite knows how to start. Which languages each
+/// serves is in `ghostwrite_core`'s language table, by `name`.
 pub struct Spec {
     pub name: &'static str,
     command: &'static [&'static str],
-    /// File extension → LSP language id.
-    languages: &'static [(&'static str, &'static str)],
 }
 
 const SPECS: &[Spec] = &[
-    Spec { name: "rust-analyzer", command: &["rust-analyzer"], languages: &[("rs", "rust")] },
-    Spec { name: "basedpyright", command: &["basedpyright-langserver", "--stdio"], languages: &[("py", "python")] },
-    Spec { name: "pyright", command: &["pyright-langserver", "--stdio"], languages: &[("py", "python")] },
-    Spec { name: "pylsp", command: &["pylsp"], languages: &[("py", "python")] },
-    Spec {
-        name: "typescript-language-server",
-        command: &["typescript-language-server", "--stdio"],
-        languages: &[("ts", "typescript"), ("tsx", "typescriptreact"), ("js", "javascript"), ("jsx", "javascriptreact")],
-    },
-    Spec { name: "gopls", command: &["gopls"], languages: &[("go", "go")] },
-    Spec { name: "clangd", command: &["clangd"], languages: &[("c", "c"), ("h", "c"), ("cc", "cpp"), ("cpp", "cpp"), ("hpp", "cpp"), ("cxx", "cpp")] },
+    Spec { name: "rust-analyzer", command: &["rust-analyzer"] },
+    Spec { name: "basedpyright", command: &["basedpyright-langserver", "--stdio"] },
+    Spec { name: "pyright", command: &["pyright-langserver", "--stdio"] },
+    Spec { name: "pylsp", command: &["pylsp"] },
+    Spec { name: "typescript-language-server", command: &["typescript-language-server", "--stdio"] },
+    Spec { name: "gopls", command: &["gopls"] },
+    Spec { name: "clangd", command: &["clangd"] },
+    Spec { name: "tinymist", command: &["tinymist"] },
 ];
 
 /// Where each server's binary is, looked up once.
@@ -40,13 +36,9 @@ fn installed() -> &'static HashMap<&'static str, PathBuf> {
     })
 }
 
-/// The installed server for a file, and the file's language id.
-fn spec_for(path: &Path) -> Option<(&'static Spec, &'static str)> {
-    let ext = path.extension()?.to_str()?;
-    SPECS.iter().find_map(|spec| {
-        let language = spec.languages.iter().find(|(e, _)| *e == ext)?.1;
-        installed().contains_key(spec.name).then_some((spec, language))
-    })
+/// The first of `servers` that's installed.
+fn first_installed(servers: &[&str]) -> Option<&'static Spec> {
+    servers.iter().find_map(|name| SPECS.iter().find(|spec| spec.name == *name && installed().contains_key(spec.name)))
 }
 
 /// The servers of one project, started on first use.
@@ -67,14 +59,14 @@ impl Registry {
         Self { enabled: false, ..Self::new(root, mpsc::unbounded().0) }
     }
 
-    /// The server for `path` (starting it if needed), and the file's language id.
-    pub fn for_path(&mut self, path: &Path) -> Option<(Arc<Client>, &'static str)> {
+    /// The first installed of `servers` (a language's, most preferred
+    /// first), starting it if needed.
+    pub fn start(&mut self, servers: &[&str]) -> Option<Arc<Client>> {
         if !self.enabled {
             return None;
         }
-        let (spec, language) = spec_for(path)?;
-        let client = self
-            .clients
+        let spec = first_installed(servers)?;
+        self.clients
             .entry(spec.name)
             .or_insert_with(|| {
                 let root = self.root.clone();
@@ -88,7 +80,20 @@ impl Registry {
                 };
                 Client::start(launch, self.events.clone()).inspect_err(|e| eprintln!("couldn't start {}: {e}", spec.name)).ok()
             })
-            .clone()?;
-        Some((client, language))
+            .clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_language_server_is_known() {
+        for language in &ghostwrite_core::language::LANGUAGES {
+            for server in language.servers {
+                assert!(SPECS.iter().any(|s| s.name == *server), "{} names {server}", language.name);
+            }
+        }
     }
 }

@@ -3,9 +3,12 @@
 //! interactions and what Claude said in them, the project's files, the
 //! editor around the request, the last `:sh` command and its output,
 //! uncommitted changes), then the file with the lines marked and the
-//! request. Each follow-up turn says what the user accepted and skipped,
-//! where they are, and what they said (or, when Ghostwrite couldn't use
-//! Claude's reply, why).
+//! request. Each reply is one item; each turn after it says what the user
+//! did with it and what they said, if anything (or, when Ghostwrite couldn't
+//! use the reply, why), and asks for the next item. The newest turn also
+//! shows the file asked about and the other files the story is in, as they
+//! are now. Every file is shown the same way, its lines numbered
+//! ([`contents`]), so the lines Claude quotes say where they are.
 //!
 //! [`Request::messages`] gives the turns for a backend that holds a
 //! conversation; [`Request::prompt`] flattens them into one message; and
@@ -19,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ghostwrite_project::{files, store};
 use serde_json::{Value, json};
 
+use crate::lines;
 use crate::story::FollowUp;
 
 /// Files listed in the prompt.
@@ -48,11 +52,26 @@ pub struct Request {
     pub instruction: String,
     /// The conversation since: each of Claude's replies and what the user did and said next.
     pub followups: Vec<FollowUp>,
+    /// The other files the story is in, as the editor has them (or as a
+    /// request sent ahead assumes they'll be).
+    pub others: Vec<Shown>,
     /// The project, which paths are relative to.
     pub root: Option<PathBuf>,
     pub surroundings: Surroundings,
     /// A Claude Code session that already holds the story's earlier turns.
     pub session: Option<String>,
+    /// Resume `session` as a new one, leaving it as it was (a request sent ahead of time).
+    pub fork: bool,
+}
+
+/// A file shown to Claude besides the one asked about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shown {
+    /// Relative to the project.
+    pub path: String,
+    pub text: String,
+    /// The lines the story was last at in it, which a large file is shown around.
+    pub focus: Range<usize>,
 }
 
 /// Who says a turn.
@@ -62,10 +81,10 @@ pub enum Role {
     Assistant,
 }
 
-/// A reminder with each follow-up (the system prompt has the rules).
-const FOLLOW_UP_GUIDE: &str = "Steps the user accepted are already in the files. Reply as for any follow-up: what \
-answers them now, then <rest> with the whole new plan from here if what they said changes what comes next \
-(corrections included).";
+/// A reminder with each turn (the system prompt has the rules).
+const FOLLOW_UP_GUIDE: &str = "What the user accepted is in the files as shown here, which are the editor's copies: the \
+files on disk may not have it yet, so go by what's shown, and quote lines with the numbers shown here. Reply with the \
+next item, in the format (in whichever file needs it next), or <done> if there's nothing more.";
 
 impl Request {
     /// The file's name as Claude sees it: relative to the project.
@@ -106,47 +125,46 @@ impl Request {
             out.push_str(&project_context(root));
         }
         out.push_str(&self.surroundings_block());
-        out.push_str(&format!("File: {} ({})\n\n<file>\n{}\n</file>\n\n", self.file_name(), self.language, self.file_window(true)));
+        out.push_str(&format!("File: {} ({})\n\n{}\n", self.file_name(), self.language, self.asked_contents(true)));
         out.push_str(&format!("Request: {}", self.instruction.trim()));
         out
     }
 
-    /// A follow-up turn: what the user decided, where they are, what they
-    /// said. The newest also has the marked file as it is now, and the guide.
+    /// A turn after a reply: what the user decided, and what they said. The
+    /// newest also has the files as they are now, and the guide.
     fn follow_up_message(&self, followup: &FollowUp, latest: bool) -> String {
         let mut out = String::new();
         if !followup.decided.is_empty() {
             let decided: Vec<String> = followup.decided.iter().map(|d| format!("- {}", d.trim())).collect();
-            out.push_str(&format!("Since your reply, the user has decided:\n{}\n\n", decided.join("\n")));
-        }
-        if let Some(at) = &followup.at {
-            out.push_str(&format!("They're at this part of your reply:\n<at>\n{}\n</at>\n\n", at.trim()));
+            out.push_str(&format!("The user decided:\n{}\n\n", decided.join("\n")));
         }
         if let Some(command) = &followup.command {
             out.push_str(&format!("Since your reply, the user ran a command (`:sh`):\n<output>\n{}\n</output>\n\n", command.trim_end()));
         }
         if followup.correction {
             out.push_str(&format!("Ghostwrite couldn't use your reply: {}", followup.said.trim()));
+        } else if followup.said.trim().is_empty() {
+            out.push_str("Next item, please.");
         } else {
             out.push_str(&format!("The user says: {}", followup.said.trim()));
         }
         if latest {
-            out.push_str(&format!("\n\n{} as it is now:\n<file>\n{}\n</file>\n\n{FOLLOW_UP_GUIDE}", self.file_name(), self.file_window(false)));
+            out.push_str(&format!("\n\nThe files as they are now:\n\n{}\n", self.asked_contents(false)));
+            // The other files share half as much room as the one asked about.
+            let room = crate::settings().context_bytes / 2 / self.others.len().max(1);
+            for other in &self.others {
+                out.push_str(&format!("{}\n", contents(&other.path, &other.text, other.focus.clone(), room, false)));
+            }
+            out.push_str(FOLLOW_UP_GUIDE);
         }
         out
     }
 
-    /// The file around the marked lines (marked with `<cursor>` if `marked`).
-    fn file_window(&self, marked: bool) -> String {
-        let (text, range) = (&self.text, self.range.start.min(self.text.len())..self.range.end.min(self.text.len()));
-        // The file around the lines is context; very large files get a window.
-        let half = crate::settings().context_bytes / 2;
-        let start = text.floor_char_boundary(range.start.saturating_sub(half));
-        let end = text.floor_char_boundary((range.end + half).min(text.len()));
-        if !marked {
-            return text[start..end].to_string();
-        }
-        format!("{}<cursor>{}</cursor>{}", &text[start..range.start], &text[range.clone()], &text[range.end..end])
+    /// The file asked about, around the lines pointed at (marked, if `marked`).
+    fn asked_contents(&self, marked: bool) -> String {
+        let at = |byte: usize| self.text[..byte.min(self.text.len())].matches('\n').count();
+        let (start, end) = (self.range.start, self.range.end.max(self.range.start + 1));
+        contents(&self.file_name(), &self.text, at(start)..at(end - 1) + 1, crate::settings().context_bytes, marked)
     }
 
     /// The editor around the request: open files, diagnostics, uncommitted changes.
@@ -167,6 +185,13 @@ impl Request {
         }
         out
     }
+}
+
+/// A file as Claude is shown it: its lines numbered, around the lines
+/// `focus` if it's more than `bytes` long, and those lines marked with
+/// `<cursor>` if `marked`.
+pub fn contents(path: &str, text: &str, focus: Range<usize>, bytes: usize, marked: bool) -> String {
+    format!("<contents path=\"{path}\">\n{}</contents>\n", lines::window(text, focus, bytes, marked))
 }
 
 /// Claude's notes, the recent interactions, and the file list.
@@ -263,46 +288,60 @@ mod tests {
             instruction: "rename to c".into(),
             followups: vec![],
             root,
+            others: vec![],
             surroundings: Surroundings::default(),
             session: None,
+            fork: false,
         }
     }
 
     #[test]
     fn the_first_message_marks_the_lines() {
         let prompt = request(None).prompt();
-        assert!(prompt.contains("<file>\nfn a() {}\n<cursor>fn b() {}\n</cursor>\n</file>"), "{prompt}");
+        assert!(prompt.contains("<contents path=\"untitled\">\n1│fn a() {}\n<cursor>\n2│fn b() {}\n</cursor>\n</contents>"), "{prompt}");
         assert!(prompt.ends_with("Request: rename to c"));
     }
 
     #[test]
     fn a_story_is_a_conversation() {
         let followup = FollowUp {
-            reply: "<step>…</step>".into(),
-            decided: vec!["accepted: a step".into()],
-            at: Some("a step".into()),
+            reply: "<file>…</new>".into(),
+            decided: vec!["accepted: an edit".into()],
             said: "keep the old name".into(),
             correction: false,
             command: None,
         };
-        let req = Request {
-            followups: vec![followup.clone(), FollowUp { decided: vec![], at: None, said: "and add docs".into(), ..followup.clone() }],
-            ..request(None)
-        };
+        let req = Request { followups: vec![followup.clone(), FollowUp { decided: vec![], said: String::new(), ..followup.clone() }], ..request(None) };
         let turns = req.messages();
         let roles: Vec<Role> = turns.iter().map(|(r, _)| *r).collect();
         assert_eq!(roles, [Role::User, Role::Assistant, Role::User, Role::Assistant, Role::User]);
-        assert_eq!(turns[1].1, "<step>…</step>");
-        assert!(turns[2].1.starts_with("Since your reply, the user has decided:\n- accepted: a step\n\nThey're at this part of your reply:\n<at>\na step\n</at>\n\nThe user says: keep the old name"), "{}", turns[2].1);
-        assert!(!turns[2].1.contains("<rest>"), "the guide is in the newest turn only");
-        assert!(turns[4].1.contains("The user says: and add docs") && turns[4].1.contains("untitled as it is now") && turns[4].1.contains("<rest>"));
+        assert_eq!(turns[1].1, "<file>…</new>");
+        assert!(turns[2].1.starts_with("The user decided:\n- accepted: an edit\n\nThe user says: keep the old name"), "{}", turns[2].1);
+        assert!(!turns[2].1.contains("<done>"), "the guide is in the newest turn only");
+        assert!(
+            turns[4].1.contains("Next item, please.")
+                && turns[4].1.contains("as they are now:\n\n<contents path=\"untitled\">\n1│fn a() {}\n2│")
+                && turns[4].1.contains("<done>"),
+            "{}",
+            turns[4].1
+        );
         assert_eq!(req.latest(), turns[4].1, "resuming a session sends only that");
         let flat = req.prompt();
-        assert!(flat.contains("Your reply:\n<earlier>\n<step>…</step>\n</earlier>") && flat.ends_with(&turns[4].1));
-        let fix = FollowUp { said: "its <old> lines aren't in lib.rs".into(), correction: true, command: Some("$ make (✗ exit 2)\nboom".into()), ..followup };
+        assert!(flat.contains("Your reply:\n<earlier>\n<file>…</new>\n</earlier>") && flat.ends_with(&turns[4].1));
+        let fix = FollowUp { said: "its <at> lines aren't in lib.rs".into(), correction: true, command: Some("$ make (✗ exit 2)\nboom".into()), ..followup };
         let turns = Request { followups: vec![fix], ..request(None) }.messages();
-        assert!(turns[2].1.contains("Ghostwrite couldn't use your reply: its <old> lines aren't in lib.rs"), "{}", turns[2].1);
+        assert!(turns[2].1.contains("Ghostwrite couldn't use your reply: its <at> lines aren't in lib.rs"), "{}", turns[2].1);
         assert!(turns[2].1.contains("the user ran a command (`:sh`):\n<output>\n$ make (✗ exit 2)\nboom\n</output>"), "{}", turns[2].1);
+    }
+
+    #[test]
+    fn the_newest_turn_shows_the_other_files_in_the_story() {
+        let other = Shown { path: "util.rs".into(), text: "pub fn one() {}\npub fn two() {}\n".into(), focus: 1..2 };
+        let followup = FollowUp { reply: "<file>…</new>".into(), decided: vec![], said: String::new(), correction: false, command: None };
+        let req = Request { followups: vec![followup.clone(), followup], others: vec![other], ..request(None) };
+        let turns = req.messages();
+        assert!(turns[4].1.contains("<contents path=\"util.rs\">\n1│pub fn one() {}\n2│pub fn two() {}\n</contents>"), "{}", turns[4].1);
+        assert!(!turns[2].1.contains("util.rs"), "only in the newest turn");
     }
 
     #[test]

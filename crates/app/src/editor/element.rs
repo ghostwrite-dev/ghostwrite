@@ -1,6 +1,6 @@
 //! Drawing a document: the gutter, highlighted lines, selections, helix's
-//! block cursor (a bar in insert mode), diagnostics, the marks a story or
-//! tour puts on lines, and a [`Block`] folded out between two lines that
+//! block cursor (a bar in insert mode), diagnostics, the marks a story puts
+//! on lines, and a [`Block`] folded out between two lines that
 //! pushes the code below it down. Also scrolling, and clicks into the text.
 //!
 //! Prepaint runs in passes: copy what's needed out of the editor
@@ -77,7 +77,6 @@ struct Snapshot {
     selection: Range,
     autoscroll: Option<Autoscroll>,
     scroll_top: Pixels,
-    scroll_left: Pixels,
     /// Where the cursor is drawn: the block's char, or the insert bar's gap.
     cursor: usize,
     cursor_line: usize,
@@ -92,7 +91,6 @@ impl Snapshot {
             selection: tab.view.selection,
             autoscroll: tab.view.autoscroll.clone(),
             scroll_top: tab.view.scroll_top,
-            scroll_left: tab.view.scroll_left,
             cursor,
             cursor_line: tab.doc.buffer.line_of(cursor),
         }
@@ -105,6 +103,8 @@ struct Metrics {
     size: Pixels,
     line_height: Pixels,
     char_width: Pixels,
+    /// Between the line numbers and the text.
+    gap: Pixels,
 }
 
 impl Metrics {
@@ -113,7 +113,7 @@ impl Metrics {
         let size = theme.mono_size;
         let font_id = window.text_system().resolve_font(&font);
         let char_width = window.text_system().advance(font_id, size, 'm').map_or(size * 0.6, |a| a.width);
-        Self { font, size, line_height: (size * 1.5).round(), char_width }
+        Self { font, size, line_height: (size * 1.5).round(), char_width, gap: px(8.) * theme.zoom }
     }
 
     fn run(&self, len: usize, color: Hsla) -> TextRun {
@@ -124,19 +124,31 @@ impl Metrics {
 /// Where lines are, top to bottom, with the block pushing those below it down.
 struct Geometry {
     line_height: Pixels,
+    /// Rows above each line (wrapped lines take several), and the total last.
+    rows: Vec<usize>,
     block: Option<(usize, Pixels)>,
 }
 
 impl Geometry {
     fn top(&self, line: usize) -> Pixels {
         let pushed = self.block.filter(|(at, _)| line > *at).map_or(px(0.), |(_, height)| height);
-        self.line_height * line as f32 + pushed
+        self.line_height * self.rows[line] as f32 + pushed
     }
 
     /// The bottom of `line`, including the block if it hangs from it.
     fn bottom(&self, line: usize) -> Pixels {
         let hanging = self.block.filter(|(at, _)| line == *at).map_or(px(0.), |(_, height)| height);
-        self.top(line) + self.line_height + hanging
+        self.top(line) + self.line_height * (self.rows[line + 1] - self.rows[line]) as f32 + hanging
+    }
+
+    /// The first line whose bottom is below `y`.
+    fn first_below(&self, y: Pixels, count: usize) -> usize {
+        let (mut lo, mut hi) = (0, count);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.bottom(mid) <= y { lo = mid + 1 } else { hi = mid }
+        }
+        lo
     }
 
     fn block_height(&self) -> Pixels {
@@ -168,11 +180,13 @@ impl Geometry {
     }
 }
 
-/// A line as laid out on screen.
+/// A row of a line as laid out on screen; long lines wrap into several.
 #[derive(Clone)]
 struct LaidLine {
     start: usize,
     end: usize,
+    /// Whether this row ends its line.
+    last: bool,
     y: Pixels,
     shaped: ShapedLine,
     /// Byte in the line → byte in what's shown (tabs are expanded), if they differ.
@@ -180,6 +194,11 @@ struct LaidLine {
 }
 
 impl LaidLine {
+    /// Whether `at` is on this row: a row's end is the next row's start, unless it ends the line.
+    fn holds(&self, at: usize) -> bool {
+        self.start <= at && (at < self.end || (self.last && at == self.end))
+    }
+
     fn shown(&self, at: usize) -> usize {
         let local = at.clamp(self.start, self.end) - self.start;
         self.map.as_ref().map_or(local, |m| m[local])
@@ -258,14 +277,27 @@ impl Element for CodeView {
             Snapshot::take(editor.project.tabs.active().expect("a code view shows the active tab"), editor.modal.mode)
         };
         let gutter_width = metrics.char_width * (snap.line_count.to_string().len().max(3) + 2) as f32;
-        let text_bounds = Bounds::from_corners(point(bounds.left() + gutter_width + px(8.), bounds.top()), bounds.bottom_right());
+        let text_bounds = Bounds::from_corners(point(bounds.left() + gutter_width + metrics.gap, bounds.top()), bounds.bottom_right());
         let gutter_bounds = Bounds::from_corners(bounds.origin, point(text_bounds.left(), bounds.bottom()));
 
         let sizes = BlockSizes { line_height: metrics.line_height, char_width: metrics.char_width, width: text_bounds.size.width };
-        let geometry = Geometry { line_height: metrics.line_height, block: self.lay_out_block(sizes, window, cx) };
+        let fits = ((f32::from(text_bounds.size.width) / f32::from(metrics.char_width)).floor() as usize).saturating_sub(1).max(1);
+        let cols = fits.min(crate::config::get().wrap_column);
+        let offsets = {
+            let doc = &self.editor.read(cx).project.tabs.active().expect("checked above").doc;
+            let text = doc.text();
+            let mut offsets = vec![0];
+            for line in 0..snap.line_count {
+                let count = wrap_rows(&text[doc.buffer.line_start(line)..doc.buffer.line_end(line)], cols).len();
+                offsets.push(offsets[line] + count);
+            }
+            offsets
+        };
+        let geometry = Geometry { line_height: metrics.line_height, rows: offsets, block: self.lay_out_block(sizes, window, cx) };
         let scroll_top = geometry.scroll(&snap, bounds.size.height);
-        let (lines, gutter) = self.shape_lines(&snap, &metrics, &geometry, &theme, bounds, gutter_bounds, scroll_top, window, cx);
-        let scroll_left = scroll_sideways(&snap, &lines, &metrics, text_bounds);
+        let (lines, gutter) = self.shape_lines(&snap, &metrics, &geometry, &theme, bounds, gutter_bounds, scroll_top, cols, window, cx);
+        // Lines wrap, so there's no scrolling sideways.
+        let scroll_left = px(0.);
         let (quads, cursor_bounds, cursor_glyph) = {
             let text = self.editor.read(cx).project.tabs.active().expect("checked above").doc.text();
             let mut quads = self.backgrounds(&snap, &lines, text, &theme, text_bounds, scroll_left, metrics.line_height, focused);
@@ -274,7 +306,8 @@ impl Element for CodeView {
         };
 
         if let Some((line, element)) = &mut self.built {
-            let y = bounds.top() + geometry.top(*line) + metrics.line_height - scroll_top;
+            let rows = geometry.rows[*line + 1] - geometry.rows[*line];
+            let y = bounds.top() + geometry.top(*line) + metrics.line_height * rows as f32 - scroll_top;
             element.prepaint_at(point(text_bounds.left(), y), window, cx);
         }
 
@@ -350,13 +383,14 @@ impl CodeView {
         bounds: Bounds<Pixels>,
         gutter_bounds: Bounds<Pixels>,
         scroll_top: Pixels,
+        cols: usize,
         window: &mut Window,
         cx: &App,
     ) -> (Vec<LaidLine>, Vec<Glyph>) {
         let editor = self.editor.read(cx);
         let doc = &editor.project.tabs.active().expect("a code view shows the active tab").doc;
         let text = doc.text();
-        let first = ((f32::from(scroll_top - geometry.block_height()) / f32::from(metrics.line_height)).floor().max(0.)) as usize;
+        let first = geometry.first_below(scroll_top, snap.line_count);
         let mut lines = vec![];
         let mut gutter = vec![];
         for line in first..snap.line_count {
@@ -364,14 +398,16 @@ impl CodeView {
             if y > bounds.bottom() {
                 break;
             }
-            if y + metrics.line_height < bounds.top() {
-                continue;
-            }
             let (start, end) = (doc.buffer.line_start(line), doc.buffer.line_end(line));
-            let (shown, map) = expand_tabs(&text[start..end]);
-            let runs = line_runs(start..end, &map, doc.cached_highlights(), &self.decorations, &doc.diagnostics, theme, &metrics.font);
-            let shaped = window.text_system().shape_line(SharedString::from(shown), metrics.size, &runs, None);
-            lines.push(LaidLine { start, end, y, shaped, map });
+            let rows = wrap_rows(&text[start..end], cols);
+            let last = rows.len() - 1;
+            for (i, row) in rows.into_iter().enumerate() {
+                let (from, to) = (start + row.start, start + row.end);
+                let (shown, map) = expand_tabs(&text[from..to]);
+                let runs = line_runs(from..to, &map, doc.cached_highlights(), &self.decorations, &doc.diagnostics, theme, &metrics.font);
+                let shaped = window.text_system().shape_line(SharedString::from(shown), metrics.size, &runs, None);
+                lines.push(LaidLine { start: from, end: to, last: i == last, y: y + metrics.line_height * i as f32, shaped, map });
+            }
             // The line number, right-aligned; colored by a diagnostic on the line.
             let worst = doc.diagnostics.iter().filter(|d| doc.buffer.line_of(d.range.start) == line).map(|d| d.severity).min();
             let color = match worst {
@@ -382,7 +418,7 @@ impl CodeView {
             };
             let number: SharedString = (line + 1).to_string().into();
             let shaped_number = window.text_system().shape_line(number.clone(), metrics.size, &[metrics.run(number.len(), color)], None);
-            let x = gutter_bounds.right() - px(8.) - shaped_number.width - metrics.char_width;
+            let x = gutter_bounds.right() - metrics.gap - shaped_number.width - metrics.char_width;
             gutter.push((shaped_number, point(x, y)));
         }
         (lines, gutter)
@@ -404,7 +440,10 @@ impl CodeView {
         let origin_x = text_bounds.left() - scroll_left;
         let mut quads = vec![];
         let span = |range: &Bytes<usize>, color: Hsla, quads: &mut Vec<PaintQuad>| {
-            for laid in lines.iter().filter(|l| range.start <= l.end && range.end >= l.start && !(range.end == l.start && l.start != l.end)) {
+            for laid in lines
+                .iter()
+                .filter(|l| range.start <= l.end && (l.last || range.start < l.end) && range.end >= l.start && !(range.end == l.start && l.start != l.end))
+            {
                 let from = origin_x + laid.x(range.start.max(laid.start));
                 // Past the line's end: the rest of the row is marked too.
                 let to = if range.end > laid.end { text_bounds.right() } else { origin_x + laid.x(range.end) };
@@ -413,7 +452,7 @@ impl CodeView {
                 }
             }
         };
-        if focused && let Some(laid) = lines.iter().find(|l| l.start <= snap.cursor && snap.cursor <= l.end) {
+        if focused && let Some(laid) = lines.iter().find(|l| l.holds(snap.cursor)) {
             quads.push(fill(Bounds::from_corners(point(text_bounds.left(), laid.y), point(text_bounds.right(), laid.y + line_height)), theme.active_line));
         }
         for deco in &self.decorations {
@@ -468,22 +507,6 @@ impl CodeView {
     }
 }
 
-/// Keep the cursor in view sideways when asked to show it.
-fn scroll_sideways(snap: &Snapshot, lines: &[LaidLine], metrics: &Metrics, text_bounds: Bounds<Pixels>) -> Pixels {
-    let Some(laid) = lines.iter().find(|l| l.start <= snap.cursor && snap.cursor <= l.end).filter(|_| snap.autoscroll.is_some()) else {
-        return snap.scroll_left;
-    };
-    let x = laid.x(snap.cursor);
-    let room = text_bounds.size.width - metrics.char_width * 4.;
-    if x < snap.scroll_left {
-        (x - metrics.char_width * 4.).max(px(0.))
-    } else if x > snap.scroll_left + room {
-        x - room
-    } else {
-        snap.scroll_left
-    }
-}
-
 /// The cursor: a filled cell with its char redrawn on top, or a bar in
 /// insert mode. Returns where it is (for popups and input methods) and the
 /// redrawn char; its fill goes into `quads`.
@@ -499,7 +522,7 @@ fn cursor(
     quads: &mut Vec<PaintQuad>,
     window: &mut Window,
 ) -> (Option<Bounds<Pixels>>, Option<Glyph>) {
-    let Some(laid) = lines.iter().find(|l| l.start <= snap.cursor && snap.cursor <= l.end) else { return (None, None) };
+    let Some(laid) = lines.iter().find(|l| l.holds(snap.cursor)) else { return (None, None) };
     let x = origin_x + laid.x(snap.cursor);
     let next = ghostwrite_core::next_char(text, snap.cursor).min(laid.end);
     let width = if next > snap.cursor { (origin_x + laid.x(next) - x).max(metrics.char_width * 0.5) } else { metrics.char_width };
@@ -523,6 +546,22 @@ fn cursor(
         (shaped, cell.origin)
     });
     (Some(cell), glyph)
+}
+
+/// `text` cut into rows of at most `cols` columns, tabs counted from each row's start.
+fn wrap_rows(text: &str, cols: usize) -> Vec<Bytes<usize>> {
+    let tab_width = crate::config::get().tab_width;
+    let width = |c: char, column: usize| if c == '\t' { tab_width - column % tab_width } else { 1 };
+    let (mut rows, mut from, mut column) = (vec![], 0, 0);
+    for (i, c) in text.char_indices() {
+        if column > 0 && column + width(c, column) > cols {
+            rows.push(from..i);
+            (from, column) = (i, 0);
+        }
+        column += width(c, column);
+    }
+    rows.push(from..text.len());
+    rows
 }
 
 /// `text` with tabs expanded, and where each byte lands in it.
@@ -638,7 +677,6 @@ impl Editor {
     fn scroll_by(&mut self, delta: Point<Pixels>, cx: &mut gpui::Context<Self>) {
         let Some(tab) = self.tab_mut() else { return };
         tab.view.scroll_top = (tab.view.scroll_top - delta.y).max(px(0.));
-        tab.view.scroll_left = (tab.view.scroll_left - delta.x).max(px(0.));
         cx.notify();
     }
 }
@@ -658,7 +696,7 @@ mod tests {
 
     #[test]
     fn the_block_pushes_lines_below_it_down() {
-        let g = Geometry { line_height: px(20.), block: Some((2, px(50.))) };
+        let g = Geometry { line_height: px(20.), rows: (0..=5).collect(), block: Some((2, px(50.))) };
         assert_eq!(g.top(2), px(40.));
         assert_eq!(g.bottom(2), px(110.), "the block hangs from its line");
         assert_eq!(g.top(3), px(110.));

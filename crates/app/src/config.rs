@@ -8,6 +8,10 @@ pub struct Config {
     /// Files bigger than this aren't opened, so a stray log or binary can't hang the editor.
     pub max_file_size: u64,
     pub tab_width: usize,
+    /// The code text's size, in points, before zooming.
+    pub font_size: f32,
+    /// Lines wrap at this many columns, or sooner if the window is narrower.
+    pub wrap_column: usize,
     /// Lines kept between the cursor and the edge when scrolling to it.
     pub margin_lines: f32,
     pub model: String,
@@ -23,6 +27,8 @@ impl Default for Config {
         Self {
             max_file_size: 20 * 1024 * 1024,
             tab_width: 4,
+            font_size: 13.,
+            wrap_column: 100,
             margin_lines: 3.,
             model: "claude-opus-5-5".into(),
             context_bytes: 200_000,
@@ -53,6 +59,12 @@ fn load() -> Config {
     let usize_of = |key: &str| json.get(key).and_then(|v| v.as_u64()).map(|n| n as usize);
     if let Some(n) = usize_of("tab_width").filter(|&n| n > 0) {
         config.tab_width = n;
+    }
+    if let Some(n) = usize_of("wrap_column").filter(|&n| n > 0) {
+        config.wrap_column = n;
+    }
+    if let Some(n) = json.get("font_size").and_then(|v| v.as_f64()).filter(|&n| (6. ..=48.).contains(&n)) {
+        config.font_size = n as f32;
     }
     if let Some(n) = json.get("margin_lines").and_then(|v| v.as_f64()) {
         config.margin_lines = n as f32;

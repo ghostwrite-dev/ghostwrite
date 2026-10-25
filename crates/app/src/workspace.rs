@@ -123,7 +123,9 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Zooming sizes everything that's in rems.
+        window.set_rem_size(crate::theme::theme(cx).rem_size());
         let content = match &self.screen {
             Screen::Projects(page) => page.clone().into_any_element(),
             Screen::Project(editor) => editor.clone().into_any_element(),

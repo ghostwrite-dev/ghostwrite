@@ -1,16 +1,14 @@
-//! The editor on screen: the file tree beside the tabs and the code, a tour
-//! panel and the `:` line under them, and helix's status line at the bottom.
+//! The editor on screen: the file tree beside the tabs and the code, the `:`
+//! line under them, and helix's status line at the bottom.
 //! Also the menu actions, which act on the active document.
 
 use ghostwrite_core::{Mode, Range};
-use gpui::{
-    AnyElement, ClipboardItem, Context, FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, SharedString, Window, div, prelude::*, px,
-};
+use gpui::{AnyElement, ClipboardItem, Context, FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, SharedString, Window, div, prelude::*};
 
 use super::element::CodeView;
 use super::{Autoscroll, Editor, PromptKind, Tab};
 use crate::actions::*;
-use crate::theme::theme;
+use crate::theme::{pt, theme};
 
 /// The `?` cheatsheet: every key, grouped like helix's keymap.
 const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
@@ -56,18 +54,17 @@ const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
         "Language server",
         &[
             ("space k", "docs for what's under the cursor"),
-            ("space d", "tour this file's diagnostics"),
+            ("space d", "go through this file's diagnostics"),
             ("space /", "search the project (:grep)"),
             ("typing", "completion menu (enter picks)"),
         ],
     ),
     (
-        "AI mode  space i",
+        "AI mode  a",
         &[
-            ("space i", "ask about the line or selection"),
+            ("a", "ask about the line or selection"),
             ("tab", "accept step · next note"),
-            ("backspace", "skip"),
-            ("enter", "redirect, or ask about it"),
+            ("a, enter", "redirect, or ask about it"),
             ("esc", "stop, back where you were"),
             ("motions", "look around; no editing"),
         ],
@@ -79,7 +76,7 @@ const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
             (":n :bn :bp :bc", "new, next, previous, close tab"),
             (":rl  :rm  :42", "reload, trash file, go to line"),
             (":sh ‹cmd›  :stop", "run in the background; Claude sees it"),
-            (":output", "tour its errors or output"),
+            (":output", "go through its errors or output"),
             (":tree  :project  :qa", "file tree, projects, quit"),
             ("↑ ↓  tab", "history, complete"),
         ],
@@ -98,7 +95,7 @@ impl Editor {
             div()
                 .flex()
                 .gap_3()
-                .child(div().w(px(96.)).text_right().font_family(theme.mono_font.clone()).text_color(theme.foreground).child(keys))
+                .child(div().w(pt(96.)).text_right().font_family(theme.mono_font.clone()).text_color(theme.foreground).child(keys))
                 .child(div().text_color(theme.muted_foreground).child(what))
         };
         div()
@@ -123,7 +120,7 @@ impl Editor {
             .id("tabs")
             .flex_none()
             .flex()
-            .h(px(30.))
+            .h(pt(30.))
             .overflow_x_scroll()
             .bg(theme.tab_bar)
             .border_b_1()
@@ -172,7 +169,7 @@ impl Editor {
                 .flex_none()
                 .flex()
                 .items_center()
-                .h(px(26.))
+                .h((theme.mono_size * 2.).round())
                 .px_3()
                 .font_family(theme.mono_font.clone())
                 .text_size(theme.mono_size)
@@ -208,7 +205,7 @@ impl Editor {
             .items_center()
             .justify_between()
             .gap_4()
-            .h(px(24.))
+            .h(pt(24.))
             .px_3()
             .border_t_1()
             .border_color(theme.border)
@@ -233,7 +230,6 @@ impl Editor {
                                 Mode::Select => theme.cursor_select,
                                 Mode::Tree => theme.warning,
                                 Mode::Ai => theme.info,
-                                Mode::Tour => theme.hint,
                             })
                             .child(mode.label()),
                     )
@@ -256,7 +252,7 @@ impl Editor {
                         .flex()
                         .gap_3()
                         .text_xs()
-                        .child(div().w(px(132.)).flex_none().font_family(theme.mono_font.clone()).text_color(theme.foreground).child(k.to_string()))
+                        .child(div().w(pt(132.)).flex_none().font_family(theme.mono_font.clone()).text_color(theme.foreground).child(k.to_string()))
                         .child(div().text_color(theme.muted_foreground).child(what.to_string()))
                 }))
         };
@@ -353,13 +349,15 @@ impl gpui::Render for Editor {
         if let Some(tab) = self.tab_mut() {
             tab.doc.refresh_highlights();
         }
+        if self.story.as_ref().is_some_and(|s| s.thinking()) {
+            window.request_animation_frame();
+        }
         let body = match self.tab() {
             Some(tab) => {
-                let (mut decorations, block) = match &self.story {
+                let (decorations, block) = match &self.story {
                     Some(story) => story.overlay(&self.project, tab, self.ask_field(), &theme),
                     None => (vec![], None),
                 };
-                decorations.extend(self.tour.as_ref().map(|t| t.decorations(&tab.doc, &theme)).unwrap_or_default());
                 div().flex_1().min_h_0().child(CodeView::new(cx.entity(), self.focus.clone(), decorations, block)).into_any_element()
             }
             None => self.render_empty(cx),
@@ -403,17 +401,12 @@ impl gpui::Render for Editor {
             .text_color(theme.foreground)
             .font_family(theme.ui_font.clone())
             .child(
-                div().flex_1().min_h_0().flex().children(tree).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .children(tabs)
-                        .child(body)
-                        .children(self.tour.as_ref().and_then(|t| t.panel(&theme)))
-                        .children(self.render_command_line(cx)),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .children(tree)
+                    .child(div().flex_1().min_w_0().flex().flex_col().children(tabs).child(body).children(self.render_command_line(cx))),
             )
             .child(self.render_status(cx))
             .children(self.cheatsheet.then(|| self.render_cheatsheet(cx)))

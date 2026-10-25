@@ -1,6 +1,6 @@
 //! The project being edited, as a model: its folder, the open files, the
 //! file tree, its language servers, and what the status line says. The
-//! features (stories, tours, completion) work on this; the editor around it
+//! features (stories, completion) work on this; the editor around it
 //! adds keys, focus, prompts and drawing, and decides when to switch tabs.
 
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use ghostwrite_project::store::Session;
 use ghostwrite_project::tree::{Listing, Row, Tree};
 use gpui::SharedString;
 
-use super::{Autoscroll, Document, Tab, Tabs};
+use super::{Autoscroll, Document, Tab, Tabs, document};
 
 pub struct Project {
     pub root: PathBuf,
@@ -105,10 +105,7 @@ impl Project {
 
     /// A new tab for `text` (not switched to); returns its index.
     pub fn add(&mut self, path: Option<PathBuf>, text: String) -> usize {
-        let lsp = path.as_deref().and_then(|p| {
-            let (client, language) = self.servers.for_path(p)?;
-            Some(ghostwrite_lsp::Document::open(client, language, p, &text))
-        });
+        let lsp = path.as_deref().and_then(|p| document::server_for(&mut self.servers, p, &text));
         self.tabs.add(|id| Document::new(id, path, text, lsp))
     }
 
@@ -156,8 +153,14 @@ impl Project {
     /// Write tab `ix` to `path`, saying so.
     pub fn write(&mut self, ix: usize, path: PathBuf) {
         let Some(tab) = self.tabs.get_mut(ix) else { return };
-        let message = match tab.doc.save(path.clone()) {
-            Ok(()) => format!("saved {}", ghostwrite_project::display(&path, &self.root)),
+        let message = match tab.doc.save(&path) {
+            Ok(()) => {
+                let message = format!("saved {}", ghostwrite_project::display(&path, &self.root));
+                if tab.doc.path.as_ref() != Some(&path) {
+                    tab.doc.moved(path, &mut self.servers);
+                }
+                message
+            }
             Err(e) => format!("couldn't save {}: {e}", path.display()),
         };
         self.say(message);
@@ -185,7 +188,7 @@ impl Project {
         for tab in self.tabs.iter_mut() {
             let Some(rest) = tab.doc.path.as_deref().and_then(|p| p.strip_prefix(from).ok()) else { continue };
             let moved = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
-            tab.doc.moved(moved);
+            tab.doc.moved(moved, &mut self.servers);
         }
         self.tree.renamed(from, to);
     }

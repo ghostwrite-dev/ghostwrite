@@ -8,14 +8,14 @@
 
 use ghostwrite_ai::placement;
 use ghostwrite_ai::protocol::{self, Note};
-use ghostwrite_ai::{Item, Story};
+use ghostwrite_ai::{Item, Story, lines};
 use gpui::{AnyElement, Entity, Hsla, div, prelude::*, px};
 
 use super::element::{Block, BlockSizes, Decoration};
 use super::story::{Located, StoryState};
 use super::tree::Annex;
 use super::{Project, Tab};
-use crate::theme::Theme;
+use crate::theme::{Theme, pt};
 use crate::ui::text_field::TextField;
 
 /// A row of the block.
@@ -43,19 +43,19 @@ impl StoryState {
         let story = self.story.as_ref()?;
         let id = story.current()?;
         let item = story.item(id)?;
-        let about = story.asked_about(id).and_then(|a| story.item(a)).filter(Item::is_file_op);
-        let (note, keys) = match (&item, &about) {
-            (Item::Note(note), Some(_)) => (Some(note.text.clone()), "⇥ next · ⏎ ask".to_string()),
-            (Item::Create(_), _) => (None, "⇥ create · ⌫ skip · ⏎ ask or redirect".into()),
-            (Item::Remove(_), _) => (None, "⇥ remove · ⌫ keep · ⏎ ask or redirect".into()),
-            (Item::Rename { .. }, _) => (None, "⇥ rename · ⌫ keep · ⏎ ask or redirect".into()),
-            (Item::Step(step), _) if self.proposal(project, id, &item).is_some() => {
-                let first = step.new.first().map_or(String::new(), |l| format!(": {}", l.trim()));
-                (Some(format!("starts with{first}")), "⇥ create it and write · ⌫ skip · ⏎ redirect".into())
+        let (note, keys) = match &item {
+            Item::Step(step) if self.proposal(project, id, &item).is_some() => {
+                let first = step.new.first().map_or(String::new(), |l| format!(" It starts with: {}", l.trim()));
+                (Some(format!("{}{first}", step.say)), "⇥ create it and write · ⏎ redirect".to_string())
             }
             _ => return None,
         };
         Some(Annex { note, keys, asking })
+    }
+
+    /// Whether Claude is working and nothing is shown yet, so the dots animate.
+    pub(super) fn thinking(&self) -> bool {
+        self.story.as_ref().is_some_and(|s| s.error.is_none() && s.current().is_none())
     }
 
     /// What the story draws in `tab`: marks on its lines, and the block that
@@ -99,7 +99,7 @@ impl StoryState {
             Item::Step(step) => {
                 let Some(view) = placement::view(doc.text(), step, located.near.clone()) else {
                     let line = located.near.end.saturating_sub(1).min(doc.buffer.last_line());
-                    let rows = vec![Row::Hint(format!("{file}can't place this one · ⌫ skip"), theme.danger)];
+                    let rows = vec![Row::Hint(format!("{file}can't place this one · ⏎ redirect"), theme.danger)];
                     return (vec![], Some(block(line, BlockSpec { indent: 0, rows, prompt: prompt("⏎ send · esc") }, theme)));
                 };
                 let removed = view.change.removed.clone();
@@ -110,18 +110,19 @@ impl StoryState {
                     color: Some(theme.muted_foreground),
                 });
                 let lead = view.change.added.first().map_or(0, |l| l.len() - l.trim_start().len());
-                let mut rows: Vec<Row> = view.change.added.iter().map(|l| Row::Code(l.replace('\t', "    "))).collect();
-                rows.extend(keys(if step.complete { "⇥ accept · ⌫ skip · ⏎ redirect" } else { "…" }));
+                // Why, then the change.
+                let mut rows: Vec<Row> = (!step.say.is_empty()).then(|| Row::Prose(step.say.clone())).into_iter().collect();
+                rows.extend(view.change.added.iter().map(|l| Row::Code(l.replace('\t', "    "))));
+                rows.extend(keys(if step.complete { "⇥ accept · ⏎ redirect" } else { "…" }));
                 (struck.into_iter().collect(), Some(block(view.anchor, BlockSpec { indent: lead, rows, prompt: prompt("⏎ send · esc") }, theme)))
             }
-            Item::Note(Note { at, text, .. }) => {
-                let Some(lines) = protocol::locate(doc.text(), at, located.near.clone()) else { return (vec![], None) };
+            Item::Note(Note { at, text, line, .. }) => {
+                let Some(lines) = lines::find(doc.text(), at, located.near.clone(), line.is_some()).map(|f| f.lines) else { return (vec![], None) };
                 let marked = Decoration::background(doc.buffer.lines_range(lines.clone()), theme.info.opacity(0.12));
                 let mut rows = vec![Row::Prose(text.clone())];
                 rows.extend(keys("⇥ next · ⏎ ask"));
                 (vec![marked], Some(block(lines.end - 1, BlockSpec { indent: indent_of(lines.end - 1), rows, prompt: prompt("⏎ send · esc") }, theme)))
             }
-            _ => (vec![], None),
         }
     }
 }
@@ -132,10 +133,16 @@ fn waiting_hint(story: Option<&Story>) -> String {
         None => "⏎ ask · esc".to_string(),
         Some(s) => match (&s.error, &s.looking) {
             (Some(e), _) => format!("{e} · esc"),
-            (None, Some(what)) => format!("{what}…"),
-            (None, None) => "…".into(),
+            (None, Some(what)) => format!("{what}{}", dots()),
+            (None, None) => format!("thinking{}", dots()),
         },
     }
+}
+
+/// `.`, `..`, `...` in turn, so waiting shows it's alive.
+fn dots() -> &'static str {
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    [".", "..", "..."][(ms / 400 % 3) as usize]
 }
 
 /// `  2/5` (and `+` while more is coming).
@@ -150,7 +157,8 @@ fn block(line: usize, spec: BlockSpec, theme: &Theme) -> Block {
 }
 
 fn build(spec: BlockSpec, theme: &Theme, sizes: BlockSizes) -> AnyElement {
-    let columns = |indent: usize| (((f32::from(sizes.width) - 48.) / f32::from(sizes.char_width.max(px(1.)))) as usize).saturating_sub(indent).max(24);
+    let columns =
+        |indent: usize| (((f32::from(sizes.width) - 48. * theme.zoom) / f32::from(sizes.char_width.max(px(1.)))) as usize).saturating_sub(indent).max(24);
     let indent = sizes.char_width * spec.indent as f32;
     let line = |text: String, color: Hsla| {
         div().h(sizes.line_height).flex().items_center().whitespace_nowrap().text_color(color).child(if text.is_empty() { " ".to_string() } else { text })
@@ -161,7 +169,8 @@ fn build(spec: BlockSpec, theme: &Theme, sizes: BlockSizes) -> AnyElement {
             // Code carries its own indentation.
             Row::Code(code) => rows.extend(protocol::wrap_code(&code, columns(0)).into_iter().map(|l| line(l, theme.muted_foreground).into_any_element())),
             Row::Prose(text) => {
-                rows.extend(protocol::wrap(&text, columns(spec.indent)).into_iter().map(|l| line(l, theme.foreground).pl(indent).into_any_element()))
+                let note = div().ml(indent).pl_2().border_l_2().border_color(theme.info).bg(theme.info.opacity(0.10)).flex().flex_col();
+                rows.push(note.children(protocol::wrap(&text, columns(spec.indent + 2)).into_iter().map(|l| line(l, theme.foreground))).into_any_element())
             }
             Row::Hint(hint, color) => rows.push(
                 div()
@@ -193,7 +202,7 @@ fn build(spec: BlockSpec, theme: &Theme, sizes: BlockSizes) -> AnyElement {
     }
     div()
         .w(sizes.width)
-        .pr(px(16.))
+        .pr(pt(16.))
         .flex()
         .flex_col()
         .font_family(theme.mono_font.clone())

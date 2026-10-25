@@ -1,14 +1,12 @@
 //! `:sh <command>`: run it in the project, in the background. Editing goes
 //! on as usual; the status line says it started and how it ended. Claude is
 //! told the last command and its output with every request, and `:output`
-//! tours its errors (or pages) once it's done.
+//! goes through its errors (or pages) once it's done.
 
 use std::collections::VecDeque;
-use std::path::Path;
 
 use futures::StreamExt as _;
 use ghostwrite_project::shell::{Run, exit_label, locations};
-use ghostwrite_project::tour::Tour;
 use gpui::{AppContext as _, Context, Task};
 
 use super::Editor;
@@ -72,10 +70,10 @@ impl Shell {
         format!("$ {} ({state})\n{output}", self.command)
     }
 
-    /// The finished command's output, to tour.
-    pub(super) fn tour(&self, root: &Path) -> Result<Tour, String> {
+    /// The finished command: what it was, its output, and its exit code (`None`: stopped).
+    pub(super) fn finished(&self) -> Result<(String, Vec<String>, Option<i32>), String> {
         let Some(exit) = self.exit else { return Err(format!("`{}` is still running (:stop stops it)", self.command)) };
-        Tour::command(self.command.clone(), self.output.iter().cloned().collect(), exit, root).ok_or_else(|| format!("`{}` had no output", self.command))
+        Ok((self.command.clone(), self.output.iter().cloned().collect(), exit))
     }
 }
 

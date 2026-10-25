@@ -80,6 +80,9 @@ impl Modal {
         match key {
             Key::Char(':') => return Outcome::Effect(Effect::CommandLine),
             Key::Char('?') => return Outcome::Effect(Effect::Cheatsheet),
+            // `a` asks Claude, unless something is already being reviewed.
+            Key::Char('a') if self.mode.reviewing() => {}
+            Key::Char('a') => return Outcome::Effect(Effect::Assist),
             Key::Char('g') => self.pending = Some(Pending::Goto),
             Key::Char(' ') => self.pending = Some(Pending::Space),
             Key::Char('r') => self.pending = Some(Pending::Replace),
@@ -96,7 +99,6 @@ impl Modal {
             Key::Char('v') if !self.mode.reviewing() => self.mode = if self.mode == Mode::Select { Mode::Normal } else { Mode::Select },
             Key::Escape => self.mode = Mode::Normal,
             Key::Char('i') => self.enter_insert(target.from(), t),
-            Key::Char('a') => self.enter_insert(target.to(), t),
             Key::Char('I') => {
                 let at = b.first_non_blank_at(sel.from());
                 self.enter_insert(at, t);
@@ -261,13 +263,11 @@ impl Modal {
             }
             // Starting something else waits until the review is done; but a
             // tour can be paused to ask Claude something.
-            (Pending::Space, 'i') if self.mode == Mode::Ai => return Outcome::Handled,
             (Pending::Space, 'e' | 'k' | 'd' | '/') if self.mode.reviewing() => return Outcome::Handled,
             (Pending::Space, 'e') => {
                 self.to_tree();
                 return Outcome::Effect(Effect::FocusTree);
             }
-            (Pending::Space, 'i') => return Outcome::Effect(Effect::Assist),
             (Pending::Space, 'k') => return Outcome::Effect(Effect::Hover),
             (Pending::Space, 'd') => return Outcome::Effect(Effect::Diagnostics),
             (Pending::Space, '/') => return Outcome::Effect(Effect::Search),

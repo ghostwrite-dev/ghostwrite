@@ -7,18 +7,19 @@ use ghostwrite_core::Mode;
 use ghostwrite_core::modal::TreeCommand;
 use ghostwrite_project::{fs, store};
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, PromptLevel, ScrollStrategy, SharedString, UniformListScrollHandle,
-    Window, div, prelude::*, px, uniform_list,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, PromptLevel, ScrollStrategy, SharedString, UniformListScrollHandle, Window,
+    div, prelude::*, uniform_list,
 };
 
 use super::story::Waiting;
 use super::{Editor, PromptKind};
-use crate::theme::theme;
+use crate::theme::{pt, theme};
 
-/// The tree's side of the window: shown or not, how wide, and where it's scrolled.
+/// The tree's side of the window: shown or not, how wide (in points at
+/// 100%, so it zooms with its text), and where it's scrolled.
 pub(super) struct TreePane {
     pub(super) shown: bool,
-    width: Pixels,
+    width: f32,
     scroll: UniformListScrollHandle,
     /// Dragging its edge.
     resizing: bool,
@@ -26,7 +27,7 @@ pub(super) struct TreePane {
 
 impl TreePane {
     pub(super) fn new() -> Self {
-        Self { shown: true, width: px(store::tree_width().unwrap_or(240.)), scroll: UniformListScrollHandle::new(), resizing: false }
+        Self { shown: true, width: store::tree_width().unwrap_or(240.), scroll: UniformListScrollHandle::new(), resizing: false }
     }
 }
 
@@ -177,7 +178,7 @@ impl Editor {
         let rows = self.project.tree.rows();
         let ghost = self.project.tree.ghost();
         let proposed = self.project.tree.proposal().and_then(|p| p.row_path());
-        let cols = |depth: usize| ((f32::from(self.tree_pane.width) - (8. + INDENT * depth as f32 + 16.) - 8.) / 7.).max(20.) as usize;
+        let cols = |depth: usize| ((self.tree_pane.width - (8. + INDENT * depth as f32 + 16.) - 8.) / 7.).max(20.) as usize;
         let under = |depth: usize| -> Vec<Line> {
             let Some(annex) = annex else { return vec![] };
             if annex.asking {
@@ -276,8 +277,8 @@ impl Editor {
                 range
                     .filter_map(|i| {
                         let line = lines.get(i)?.clone();
-                        let pad = |depth: usize| px(8. + INDENT * depth as f32 + 16.);
-                        let base = div().id(i).h(px(ROW_HEIGHT)).w_full().flex().items_center().whitespace_nowrap().overflow_hidden();
+                        let pad = |depth: usize| pt(8. + INDENT * depth as f32 + 16.);
+                        let base = div().id(i).h(pt(ROW_HEIGHT)).w_full().flex().items_center().whitespace_nowrap().overflow_hidden();
                         Some(match line {
                             Line::Keys { depth, text } => base.pl(pad(depth)).text_xs().text_color(theme.muted_foreground).child(text),
                             Line::Note { depth, text } => base.pl(pad(depth)).text_sm().child(text),
@@ -290,12 +291,12 @@ impl Editor {
                                 .children(ask_field.clone().map(|f| div().flex_1().min_w_0().overflow_hidden().child(f)))
                                 .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child("⏎ send · esc")),
                             Line::Ghost { depth, name } => base
-                                .pl(px(8. + INDENT * depth as f32))
+                                .pl(pt(8. + INDENT * depth as f32))
                                 .gap_1()
                                 .text_sm()
                                 .bg(theme.warning.opacity(0.12))
                                 .text_color(theme.muted_foreground)
-                                .child(div().w(px(12.)).flex_none().text_color(theme.warning).child("+"))
+                                .child(div().w(pt(12.)).flex_none().text_color(theme.warning).child("+"))
                                 .child(div().italic().child(name)),
                             Line::Row(ix) => {
                                 let (path, name, depth, is_dir) = rows[ix].clone();
@@ -310,7 +311,7 @@ impl Editor {
                                     _ => None,
                                 };
                                 let is_active = active.as_ref() == Some(&path);
-                                base.pl(px(8. + INDENT * depth as f32))
+                                base.pl(pt(8. + INDENT * depth as f32))
                                     .pr_2()
                                     .gap_1()
                                     .text_sm()
@@ -320,7 +321,7 @@ impl Editor {
                                         (false, true) => d.bg(theme.muted),
                                         (false, false) => d.hover(|s| s.bg(theme.muted)),
                                     })
-                                    .child(div().w(px(12.)).flex_none().text_color(theme.muted_foreground).child(arrow))
+                                    .child(div().w(pt(12.)).flex_none().text_color(theme.muted_foreground).child(arrow))
                                     .map(|d| match (doomed, renamed_to) {
                                         (true, _) => d.bg(theme.danger.opacity(0.15)).child(div().line_through().text_color(theme.danger).child(name)),
                                         (false, Some(to)) => d
@@ -345,7 +346,7 @@ impl Editor {
         div()
             .relative()
             .flex_none()
-            .w(self.tree_pane.width)
+            .w(pt(self.tree_pane.width))
             .h_full()
             .flex()
             .flex_col()
@@ -368,7 +369,7 @@ impl Editor {
             .children(naming)
             .child(list)
             // The edge drags to resize.
-            .child(div().id("tree-edge").absolute().top_0().right(px(-3.)).w(px(6.)).h_full().cursor_col_resize().on_mouse_down(
+            .child(div().id("tree-edge").absolute().top_0().right(pt(-3.)).w(pt(6.)).h_full().cursor_col_resize().on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                     this.tree_pane.resizing = true;
@@ -381,14 +382,14 @@ impl Editor {
     /// While dragging the tree's edge.
     pub(super) fn drag_tree_edge(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if self.tree_pane.resizing {
-            self.tree_pane.width = event.position.x.clamp(px(140.), px(640.));
+            self.tree_pane.width = (f32::from(event.position.x) / theme(cx).zoom).clamp(140., 640.);
             cx.notify();
         }
     }
 
     pub(super) fn end_tree_drag(&mut self) {
         if std::mem::take(&mut self.tree_pane.resizing) {
-            store::save_tree_width(f32::from(self.tree_pane.width));
+            store::save_tree_width(self.tree_pane.width);
         }
     }
 }

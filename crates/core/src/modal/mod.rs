@@ -40,10 +40,8 @@ pub enum Mode {
     Select,
     /// The file tree has the keyboard.
     Tree,
-    /// Reviewing a Claude story.
+    /// Reviewing a story.
     Ai,
-    /// Touring places: a command's errors, diagnostics, search matches.
-    Tour,
 }
 
 impl Mode {
@@ -54,13 +52,12 @@ impl Mode {
             Mode::Select => "SEL",
             Mode::Tree => "TRE",
             Mode::Ai => "AI",
-            Mode::Tour => "TOUR",
         }
     }
 
-    /// AI and tour mode: look around, decide with the review keys, don't edit.
+    /// AI mode: look around, decide with the review keys, don't edit.
     pub fn reviewing(self) -> bool {
-        matches!(self, Mode::Ai | Mode::Tour)
+        self == Mode::Ai
     }
 }
 
@@ -97,7 +94,7 @@ pub enum Effect {
     FocusTree,
     /// `:`
     CommandLine,
-    /// `space i`: ask Claude about the selection or current line, or to change it.
+    /// `a`: ask Claude about the selection or current line, or to change it.
     Assist,
     /// `?`
     Cheatsheet,
@@ -130,15 +127,11 @@ pub enum TreeCommand {
     Delete,
 }
 
-/// What a key does while a story or tour is under review.
+/// What a key does while a story is under review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Review {
-    /// Tab: accept, read on, or go to the next stop.
+    /// Tab: accept, or read on.
     Next,
-    /// Shift+Tab: the previous stop (a story only goes forward).
-    Back,
-    /// Backspace: skip this one.
-    Skip,
     /// Enter: ask about it, or redirect.
     Ask,
     /// Esc: stop.
@@ -332,13 +325,11 @@ impl Modal {
     }
 }
 
-/// What a key does in AI and tour mode, if it's a review key.
+/// What a key does in AI mode, if it's a review key.
 fn review_of(key: Key) -> Option<Review> {
     Some(match key {
         Key::Tab => Review::Next,
-        Key::BackTab => Review::Back,
-        Key::Backspace => Review::Skip,
-        Key::Enter => Review::Ask,
+        Key::Enter | Key::Char('a') => Review::Ask,
         Key::Escape => Review::Stop,
         _ => return None,
     })

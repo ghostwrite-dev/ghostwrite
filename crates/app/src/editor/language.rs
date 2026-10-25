@@ -4,10 +4,10 @@
 
 use ghostwrite_core::{Key, MenuKey, Mode, Range};
 use ghostwrite_lsp::{Completion, convert};
-use gpui::{AnyElement, Bounds, Context, Pixels, Window, anchored, deferred, div, point, prelude::*, px};
+use gpui::{AnyElement, Bounds, Context, Pixels, Window, anchored, deferred, div, point, prelude::*};
 
 use super::{Autoscroll, DocId, Editor, Project};
-use crate::theme::Theme;
+use crate::theme::{Theme, pt};
 
 const MENU_ROWS: usize = 10;
 
@@ -47,12 +47,12 @@ impl CompletionMenu {
                 .justify_between()
                 .when(i == self.selected, |d| d.bg(theme.accent).text_color(theme.accent_foreground))
                 .child(div().whitespace_nowrap().child(item.label.clone()))
-                .children(item.detail.clone().map(|d| div().max_w(px(260.)).overflow_hidden().whitespace_nowrap().text_color(theme.muted_foreground).child(d)))
+                .children(item.detail.clone().map(|d| div().max_w(pt(260.)).overflow_hidden().whitespace_nowrap().text_color(theme.muted_foreground).child(d)))
         });
         deferred(
             anchored().position(point(cursor.left(), cursor.bottom())).child(
                 div()
-                    .min_w(px(180.))
+                    .min_w(pt(180.))
                     .py_1()
                     .rounded_md()
                     .border_1()

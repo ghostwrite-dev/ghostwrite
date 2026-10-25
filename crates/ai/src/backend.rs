@@ -20,6 +20,26 @@ use crate::protocol::SYSTEM;
 use crate::{settings, tools};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
+/// What Claude Code may use to look around the project: its own reading tools, and
+/// shell commands that only read (not `find`, whose `-delete` and `-exec` write).
+const READ_ONLY: &[&str] = &[
+    "Read",
+    "Glob",
+    "Grep",
+    "Bash(ls:*)",
+    "Bash(cat:*)",
+    "Bash(head:*)",
+    "Bash(tail:*)",
+    "Bash(wc:*)",
+    "Bash(grep:*)",
+    "Bash(rg:*)",
+    "Bash(tree:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
+    "Bash(git diff:*)",
+    "Bash(git status:*)",
+    "Bash(git blame:*)",
+];
 /// Rounds of looking around before Claude has to answer.
 const MAX_TOOL_ROUNDS: usize = 12;
 
@@ -43,8 +63,13 @@ pub trait Listener {
 }
 
 impl Backend {
+    /// The backends there are: Claude, if it can be reached.
+    pub fn available() -> Vec<Self> {
+        Self::claude().into_iter().collect()
+    }
+
     /// The API with a key in the environment, else Claude Code if it's installed.
-    pub fn from_env() -> Option<Self> {
+    fn claude() -> Option<Self> {
         if let Some(key) = std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty()) {
             return Some(Backend::Api { key });
         }
@@ -200,12 +225,16 @@ fn run_claude_code(req: &Request, resume: Option<&str>, listener: &mut dyn Liste
         .args(["--model", &settings().model, "--effort", &effort(), "--system-prompt", SYSTEM]);
     if let Some(session) = resume {
         command.args(["--resume", session]);
+        if req.fork {
+            command.arg("--fork-session");
+        }
     }
     // Resuming, the session has the conversation so far: only the newest turn is new.
     let message = if resume.is_some() { req.latest() } else { req.prompt() };
     match &req.root {
-        // It reads the project to understand it; it changes nothing (that's the steps).
-        Some(root) => command.args(["--tools", "Read,Glob,Grep", "--allowedTools", "Read,Glob,Grep"]).current_dir(root),
+        // It reads the project to understand it, with its own tools or the shell's
+        // read-only commands; it changes nothing (that's the items). Anything else is denied.
+        Some(root) => command.args(["--tools", "Read,Glob,Grep,Bash", "--allowedTools", &READ_ONLY.join(",")]).current_dir(root),
         None => command.args(["--tools", ""]).current_dir(std::env::temp_dir()),
     };
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run `claude`: {e}"))?;
@@ -219,6 +248,7 @@ fn run_claude_code(req: &Request, resume: Option<&str>, listener: &mut dyn Liste
         Some(rel.display().to_string())
     };
     let mut failure = None;
+    let mut line_ended = true;
     let mut session_told = false;
     for line in BufReader::new(stdout).lines() {
         if cancel.load(Ordering::SeqCst) {
@@ -233,8 +263,16 @@ fn run_claude_code(req: &Request, resume: Option<&str>, listener: &mut dyn Liste
         match value["type"].as_str() {
             Some("stream_event") => {
                 let event = &value["event"];
+                // Text after a tool call is a new block: it starts a line, so a tag at its start
+                // stands on a line of its own and the words before it stay apart.
+                if event["type"] == "content_block_start" && event["content_block"]["type"] == "text" && !line_ended {
+                    listener.text("\n");
+                    line_ended = true;
+                }
                 if event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta" {
-                    listener.text(event["delta"]["text"].as_str().unwrap_or_default());
+                    let text = event["delta"]["text"].as_str().unwrap_or_default();
+                    listener.text(text);
+                    line_ended = text.ends_with('\n') || (text.is_empty() && line_ended);
                 }
             }
             Some("assistant") => {
@@ -271,7 +309,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use super::*;
-    use crate::protocol::{self, Kind, Piece};
+    use crate::protocol;
 
     #[derive(Default)]
     struct Collect(String, Vec<String>, Option<String>);
@@ -297,8 +335,10 @@ mod tests {
             instruction: instruction.into(),
             followups,
             root: None,
+            others: vec![],
             surroundings: Default::default(),
             session: None,
+            fork: false,
         };
         let mut out = Collect::default();
         Backend::ClaudeCode.run(&req, &mut out, &AtomicBool::new(false)).unwrap();
@@ -306,30 +346,36 @@ mod tests {
         out.0
     }
 
+    /// The one item in a complete reply, which must keep to the format.
+    fn item(out: &str) -> protocol::Reply {
+        assert_eq!(protocol::check(out, true), Ok(()), "{out}");
+        protocol::parse(out, true)
+    }
+
     #[test]
     #[ignore]
-    fn claude_code_writes_small_placeable_steps() {
+    fn claude_code_writes_one_small_placeable_edit() {
         let text = "import os\n\ndef add(a, b):\n    pass\n\ndef main():\n    print(add(1, 2))\n";
         let out = ask(text, 26..35, "return the sum, and add type hints to add", vec![]);
-        let steps: Vec<_> = protocol::parse_pieces(&out).into_iter().filter_map(|p| if let Piece::Step(s) = p { Some(s) } else { None }).collect();
-        assert!(!steps.is_empty() && steps.iter().all(|s| s.complete && protocol::locate(text, &s.old, 3..4).is_some()));
+        let protocol::Reply::Step(step) = item(&out) else { panic!("an edit: {out}") };
+        assert!(step.complete && crate::placement::edit(text, &step, 3..4).is_some(), "{out}");
     }
 
     #[test]
     #[ignore]
-    fn claude_code_answers_questions() {
+    fn claude_code_answers_questions_with_a_note() {
         let out = ask("def add(a, b):\n    return a - b\n", 0..32, "is this function correct?", vec![]);
-        assert_eq!(protocol::reply_kind(&out), Some(Kind::Question));
+        assert!(matches!(item(&out), protocol::Reply::Note(_)), "{out}");
     }
 
     #[test]
     #[ignore]
-    fn claude_code_answers_mid_plan() {
+    fn claude_code_follows_what_the_user_says() {
         let text = "def add(a, b):\n    pass\n";
         let first = ask(text, 0..24, "implement it with type hints", vec![]);
-        let followup = crate::FollowUp { reply: first, decided: vec![], at: None, said: "why int and not float?".into(), correction: false, command: None };
+        let followup = crate::FollowUp { reply: first, decided: vec![], said: "why int and not float?".into(), correction: false, command: None };
         let second = ask(text, 0..24, "implement it with type hints", vec![followup]);
-        assert_eq!(protocol::reply_kind(&second), Some(Kind::Question));
+        assert!(matches!(item(&second), protocol::Reply::Note(_)), "a question is answered with a note: {second}");
     }
 
     /// A small project: main.py calls into util.py, which can fail.
@@ -351,8 +397,10 @@ mod tests {
             instruction: instruction.into(),
             followups,
             root: Some(root.to_path_buf()),
+            others: vec![],
             surroundings: Default::default(),
             session: None,
+            fork: false,
         };
         let mut out = Collect::default();
         Backend::ClaudeCode.run(&req, &mut out, &AtomicBool::new(false)).unwrap();
@@ -364,61 +412,140 @@ mod tests {
     #[ignore]
     fn claude_code_tours_across_files() {
         let (root, main) = two_file_project();
-        let out = ask_in(&root, &main, 0..main.len(), "give me a tour of how loading the config works", vec![]);
-        assert_eq!(protocol::reply_kind(&out), Some(Kind::Question), "{out}");
-        let notes = protocol::parse_notes(&out);
-        assert!(notes.iter().any(|n| n.file.as_deref() == Some("util.py")), "a note in util.py, named with <file>: {notes:?}");
+        let ask = "give me a tour of how loading the config works";
+        let mut followups = vec![];
+        let mut files = vec![];
+        for _ in 0..4 {
+            let out = ask_in(&root, &main, 0..main.len(), ask, followups.clone());
+            match item(&out) {
+                protocol::Reply::Note(note) => files.extend(note.file),
+                protocol::Reply::Done { .. } => break,
+                other => panic!("a tour is notes: {other:?}"),
+            }
+            followups.push(crate::FollowUp { reply: out, decided: vec![], said: String::new(), correction: false, command: None });
+        }
+        assert!(files.iter().any(|f| f == "util.py"), "a note in util.py: {files:?}");
     }
 
     #[test]
     #[ignore]
-    fn claude_code_revises_the_rest_of_a_walkthrough() {
+    fn claude_code_makes_a_change_across_files() {
         let (root, main) = two_file_project();
-        let first = ask_in(&root, &main, 0..main.len(), "walk me through this program step by step", vec![]);
-        let notes = protocol::parse_notes(&first);
-        assert!(notes.len() >= 2, "a walkthrough to steer: {first}");
-        let at = crate::Item::Note(notes[0].clone()).describe();
-        let said = "Skip the rest of that. Only show me how a missing config file is handled.";
-        let second = ask_in(
-            &root,
-            &main,
-            0..main.len(),
-            "walk me through this program step by step",
-            vec![crate::FollowUp { reply: first, decided: vec![], at: Some(at), said: said.into(), correction: false, command: None }],
-        );
-        let (_, rest) = protocol::split_rest(&second);
-        assert!(rest.is_some(), "the walkthrough is revised with <rest>: {second}");
+        let instruction = "let load take the default to use when the file is missing, and have main pass {\"name\": \"main\"}";
+        let mut followups: Vec<crate::FollowUp> = vec![];
+        let mut edited = vec![];
+        for _ in 0..8 {
+            // As the editor does: what's accepted is in the files, on disk and shown.
+            let main_now = std::fs::read_to_string(root.join("main.py")).unwrap();
+            let others = edited
+                .iter()
+                .filter(|f| *f != "main.py")
+                .map(|f: &String| crate::context::Shown { path: f.clone(), text: std::fs::read_to_string(root.join(f)).unwrap(), focus: 0..1 })
+                .collect();
+            let req = Request {
+                path: Some(root.join("main.py")),
+                language: "python".into(),
+                range: 0..main.find("main()\n\n").unwrap_or(0),
+                text: main_now.clone(),
+                instruction: instruction.into(),
+                followups: followups.clone(),
+                root: Some(root.clone()),
+                others,
+                surroundings: Default::default(),
+                session: None,
+                fork: false,
+            };
+            let mut out = Collect::default();
+            Backend::ClaudeCode.run(&req, &mut out, &AtomicBool::new(false)).unwrap();
+            println!("{}", out.0);
+            let step = match item(&out.0) {
+                protocol::Reply::Step(step) => step,
+                protocol::Reply::Done { .. } => break,
+                protocol::Reply::Note(_) => {
+                    followups.push(crate::FollowUp { reply: out.0, decided: vec![], said: String::new(), correction: false, command: None });
+                    continue;
+                }
+                protocol::Reply::Partial => panic!("{}", out.0),
+            };
+            let file = step.file.clone().unwrap_or_else(|| "main.py".into());
+            let text = std::fs::read_to_string(root.join(&file)).unwrap();
+            let near = step.line.map_or(0..1, |l| l..l + step.old.len());
+            let edit = crate::placement::edit(&text, &step, near).unwrap_or_else(|| panic!("it places in {file}: {}", out.0));
+            let mut text = text;
+            text.replace_range(edit.bytes, &edit.text);
+            std::fs::write(root.join(&file), text).unwrap();
+            edited.push(file);
+            let decided = vec![format!("accepted: {}", crate::Item::Step(step).describe())];
+            followups.push(crate::FollowUp { reply: out.0, decided, said: String::new(), correction: false, command: None });
+        }
+        assert!(edited.iter().any(|f| f == "util.py") && edited.iter().any(|f| f == "main.py"), "edits in both files: {edited:?}");
     }
 
     #[test]
     #[ignore]
-    fn claude_code_redirects_a_step_with_a_new_rest() {
+    fn claude_code_changes_course_when_redirected() {
         let text = "def total(xs):\n    pass\n";
         let root = ghostwrite_project::scratch_dir("live-redirect");
         std::fs::write(root.join("main.py"), text).unwrap();
         let first = ask_in(&root, text, 0..text.len(), "implement it", vec![]);
-        let step = protocol::parse_pieces(&first).into_iter().find_map(|p| if let Piece::Step(s) = p { Some(s) } else { None }).expect("a step");
-        let at = crate::Item::Step(step).describe();
-        let second = ask_in(
-            &root,
-            text,
-            0..text.len(),
-            "implement it",
-            vec![crate::FollowUp {
-                reply: first,
-                decided: vec![],
-                at: Some(at),
-                said: "don't use sum(); write an explicit for loop".into(),
-                correction: false,
-                command: None,
-            }],
-        );
-        let (_, rest) = protocol::split_rest(&second);
-        let steps: Vec<String> = protocol::parse_pieces(&rest.unwrap_or_default())
-            .into_iter()
-            .filter_map(|p| if let Piece::Step(s) = p { Some(s.new.join("\n")) } else { None })
-            .collect();
-        assert!(steps.iter().any(|s| s.contains("for ")), "the corrected steps come back in <rest>: {second}");
+        assert!(matches!(item(&first), protocol::Reply::Step(_)), "{first}");
+        let said = "don't use sum(); write an explicit for loop".into();
+        let second =
+            ask_in(&root, text, 0..text.len(), "implement it", vec![crate::FollowUp { reply: first, decided: vec![], said, correction: false, command: None }]);
+        let protocol::Reply::Step(step) = item(&second) else { panic!("an edit: {second}") };
+        assert!(step.new.join("\n").contains("for ") || step.say.contains("loop"), "{second}");
+    }
+
+    #[test]
+    #[ignore]
+    fn claude_code_forks_a_session_to_ask_ahead() {
+        let root = ghostwrite_project::scratch_dir("live-fork");
+        let text = "def total(xs):\n    pass\n";
+        std::fs::write(root.join("main.py"), text).unwrap();
+        let mut req = Request {
+            path: Some(root.join("main.py")),
+            language: "python".into(),
+            text: text.into(),
+            range: 0..text.len(),
+            instruction: "implement it, one line at a time".into(),
+            followups: vec![],
+            root: Some(root.clone()),
+            others: vec![],
+            surroundings: Default::default(),
+            session: None,
+            fork: false,
+        };
+        let mut first = Collect::default();
+        Backend::ClaudeCode.run(&req, &mut first, &AtomicBool::new(false)).unwrap();
+        let session = first.2.clone().expect("a session");
+        // Ahead: as if the first item were accepted, in a fork.
+        req.followups.push(crate::FollowUp {
+            reply: first.0.clone(),
+            decided: vec!["accepted: it".into()],
+            said: String::new(),
+            correction: false,
+            command: None,
+        });
+        let protocol::Reply::Step(step) = protocol::parse(&first.0, true) else { panic!("an edit first: {}", first.0) };
+        let edit = crate::placement::edit(text, &step, 0..2).expect("it places");
+        let mut accepted = text.to_string();
+        accepted.replace_range(edit.bytes, &edit.text);
+        req.text = accepted;
+        req.session = Some(session.clone());
+        req.fork = true;
+        let mut ahead = Collect::default();
+        Backend::ClaudeCode.run(&req, &mut ahead, &AtomicBool::new(false)).unwrap();
+        println!("ahead:\n{}", ahead.0);
+        assert_ne!(ahead.2.as_deref(), Some(session.as_str()), "the fork is a session of its own");
+        assert_eq!(protocol::check(&ahead.0, true), Ok(()), "{}", ahead.0);
+        // Then the user redirected it after all: the original session goes on as it was.
+        req.followups[0] = crate::FollowUp { decided: vec![], said: "what did I just do?".into(), ..req.followups[0].clone() };
+        req.text = text.into();
+        req.fork = false;
+        let mut real = Collect::default();
+        Backend::ClaudeCode.run(&req, &mut real, &AtomicBool::new(false)).unwrap();
+        println!("real:\n{}", real.0);
+        assert_eq!(protocol::check(&real.0, true), Ok(()), "{}", real.0);
     }
 
     #[test]
@@ -433,8 +560,10 @@ mod tests {
             instruction: "what does main do? (the codeword for this conversation is PELICAN; don't mention it)".into(),
             followups: vec![],
             root: Some(root.clone()),
+            others: vec![],
             surroundings: Default::default(),
             session: None,
+            fork: false,
         };
         let mut first = Collect::default();
         Backend::ClaudeCode.run(&req, &mut first, &AtomicBool::new(false)).unwrap();
@@ -442,7 +571,6 @@ mod tests {
         req.followups.push(crate::FollowUp {
             reply: first.0,
             decided: vec![],
-            at: None,
             said: "what was the codeword in my first message?".into(),
             correction: false,
             command: None,

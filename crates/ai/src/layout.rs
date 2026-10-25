@@ -1,7 +1,7 @@
-//! Where a story's items show: a step where its lines are, a note at the
-//! lines it's pinned to. An answer that isn't pinned to lines shows where
-//! it was asked: under the item a follow-up was about, or under the marked
-//! lines.
+//! Where a story's items show: an edit where its lines are, a note at the
+//! lines it's pinned to. A note that isn't pinned to lines shows where it
+//! was asked: under the item the user said something about, or under the
+//! marked lines.
 //!
 //! [`Layout`] works this out from the story, what it was asked about, and
 //! the project's files; the editor only turns the result into tabs.
@@ -9,8 +9,9 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
+use crate::lines;
 use crate::placement::{self, Asked, Files, Place, Placer};
-use crate::protocol::{self, Note};
+use crate::protocol::Note;
 use crate::story::{Item, ItemId, Story};
 
 pub struct Layout<'a, F> {
@@ -24,12 +25,16 @@ impl<F: Files> Layout<'_, F> {
     /// Where item `id` shows.
     pub fn spot(&self, id: ItemId) -> Option<Place> {
         let item = self.story.item(id)?;
-        let unpinned = matches!(&item, Item::Note(Note { file: None, at, .. }) if at.is_empty());
+        let unpinned = matches!(&item, Item::Note(Note { at, .. }) if at.is_empty());
         // A follow-up's answer goes where it was asked.
         if unpinned && let Some(lines) = self.story.asked_about(id).and_then(|about| self.lines(about)) {
             return Some(lines);
         }
-        Some(self.placer.place(&item, &self.asked, &self.files))
+        let place = self.placer.place(&item, &self.asked, &self.files);
+        match self.story.anchor().filter(|_| self.story.current() == Some(id)) {
+            Some(lines) => Some(Place { near: lines, ..place }),
+            None => Some(place),
+        }
     }
 
     /// The lines item `id` shows at, in its file (`near` is those lines).
@@ -44,8 +49,7 @@ impl<F: Files> Layout<'_, F> {
                 let view = placement::view(&text, &step, place.near.clone())?;
                 view.first..view.anchor + 1
             }
-            Item::Note(note) => protocol::locate(&text, &note.at, place.near.clone())?,
-            _ => return None,
+            Item::Note(note) => lines::find(&text, &note.at, place.near.clone(), note.line.is_some())?.lines,
         };
         Some(Place { near, ..place })
     }
@@ -71,7 +75,6 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::story::Part;
 
     struct Project(Vec<(PathBuf, String)>);
 
@@ -98,20 +101,19 @@ mod tests {
     }
 
     #[test]
-    fn a_follow_up_is_answered_under_what_it_was_about() {
+    fn an_answer_shows_under_what_it_was_about() {
         let project = Project(vec![("/p/main.rs".into(), MAIN.into()), ("/p/lib.rs".into(), "\n\npub fn run() {}\n".into())]);
         let placer = Placer::new("/p".into());
         let mut story = Story::new("add a flag");
-        arrived(&mut story, "<step>\n<file>\nlib.rs\n</file>\n<old>\npub fn run() {}\n</old>\n<new>\npub fn run(v: bool) {}\n</new>\n</step>\n");
+        arrived(&mut story, "<file>\nlib.rs\n</file>\n<at>\npub fn run() {}\n</at>\n<say>\nA flag.\n</say>\n<new>\npub fn run(v: bool) {}\n</new>\n");
         let step = story.current().unwrap();
         story.follow_up("why?".into());
         let waiting = layout(&story, &project, &placer).waiting_spot();
-        assert_eq!(waiting, Some(Place { path: Some("/p/lib.rs".into()), near: 2..3 }), "waiting under the step");
-        arrived(&mut story, "<answer>\nSo callers choose.\n</answer>\n");
+        assert_eq!(waiting, Some(Place { path: Some("/p/lib.rs".into()), near: 2..3 }), "waiting under the edit");
+        arrived(&mut story, "<file>\nlib.rs\n</file>\n<at>\n</at>\n<say>\nSo callers choose.\n</say>\n");
         let answer = story.current().unwrap();
-        assert_eq!(answer.part, Part::Answer);
         let layout = layout(&story, &project, &placer);
-        assert_eq!(layout.spot(answer), Some(Place { path: Some("/p/lib.rs".into()), near: 2..3 }));
+        assert_eq!(layout.spot(answer), Some(Place { path: Some("/p/lib.rs".into()), near: 2..3 }), "a note without lines shows where it was asked");
         assert_eq!(layout.lines(step), Some(Place { path: Some("/p/lib.rs".into()), near: 2..3 }));
     }
 }

@@ -5,10 +5,13 @@
 use std::path::{Path, PathBuf};
 
 use ghostwrite_project::store;
-use gpui::{Context, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, Window, div, prelude::*, px};
+use gpui::{Context, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, Window, div, prelude::*};
 
 use crate::actions::OpenFolder;
-use crate::theme::theme;
+use crate::theme::{pt, theme};
+
+/// Rows Ctrl+D / Ctrl+U move, like a half page in the editor.
+const HALF_PAGE: usize = 5;
 
 pub enum ProjectsEvent {
     Chosen(PathBuf),
@@ -52,6 +55,17 @@ impl ProjectsPage {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let last = self.projects.len().saturating_sub(1);
+        if event.keystroke.modifiers.control {
+            match event.keystroke.key.as_str() {
+                "d" => self.selected = (self.selected + HALF_PAGE).min(last),
+                "u" => self.selected = self.selected.saturating_sub(HALF_PAGE),
+                _ => return,
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         match event.keystroke.key.as_str() {
             "j" | "down" => self.selected = (self.selected + 1).min(self.projects.len().saturating_sub(1)),
             "k" | "up" => self.selected = self.selected.saturating_sub(1),
@@ -122,10 +136,10 @@ impl Render for ProjectsPage {
             .font_family(theme.ui_font.clone())
             .child(
                 div()
-                    .w(px(520.))
+                    .w(pt(520.))
                     .max_w_full()
                     .px_4()
-                    .pt(px(96.))
+                    .pt(pt(96.))
                     .flex()
                     .flex_col()
                     .gap_4()

@@ -4,10 +4,14 @@
 
 use std::collections::HashMap;
 
-use gpui::{App, FontWeight, Global, Hsla, Pixels, Rgba, SharedString, Window, WindowAppearance, px};
+use gpui::{App, FontWeight, Global, Hsla, Pixels, Rems, Rgba, SharedString, Window, WindowAppearance, px, rems};
 use serde_json::Value;
 
 const GRUVBOX: &str = include_str!("../../../assets/gruvbox.json");
+/// How far the window zooms in and out, a level at a time, as browsers do.
+const ZOOMS: [f32; 13] = [0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+/// A rem at 100%: what [`pt`] sizes are relative to.
+const REM: f32 = 16.;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SyntaxStyle {
@@ -50,8 +54,11 @@ pub struct Theme {
     pub cursor_text: Hsla,
     pub syntax: HashMap<String, SyntaxStyle>,
     pub mono_font: SharedString,
+    /// The code text's size, zoomed.
     pub mono_size: Pixels,
     pub ui_font: SharedString,
+    /// How far the window is zoomed: 1 is 100%.
+    pub zoom: f32,
 }
 
 impl Global for Theme {}
@@ -83,6 +90,26 @@ pub fn follow(appearance: WindowAppearance, cx: &mut App) {
     let themes = cx.global::<Themes>();
     let theme = if dark { themes.dark.clone() } else { themes.light.clone() };
     cx.set_global(theme);
+}
+
+/// A size in points at 100%, which zooms with the window: everything but
+/// hairlines is sized this way (or from the code text's size).
+pub fn pt(points: f32) -> Rems {
+    rems(points / REM)
+}
+
+/// Zoom the whole window a level in (`by` 1) or out (-1), or back to 100% (0).
+pub fn zoom(by: i32, cx: &mut App) {
+    let now = ZOOMS.iter().position(|&z| z >= theme(cx).zoom - 0.001).unwrap_or(ZOOMS.len() - 1);
+    let zoom = match by {
+        0 => 1.0,
+        _ => ZOOMS[now.saturating_add_signed(by as isize).min(ZOOMS.len() - 1)],
+    };
+    let themes = cx.global_mut::<Themes>();
+    themes.light.zoom_to(zoom);
+    themes.dark.zoom_to(zoom);
+    cx.global_mut::<Theme>().zoom_to(zoom);
+    cx.refresh_windows();
 }
 
 /// Follow the window's appearance from now on.
@@ -166,8 +193,9 @@ fn parse(theme: &Value) -> Theme {
         cursor_text: gpui::rgb(bg1).into(),
         syntax,
         mono_font: "Menlo".into(),
-        mono_size: px(13.),
+        mono_size: px(crate::config::get().font_size),
         ui_font: ".SystemUIFont".into(),
+        zoom: 1.0,
     }
 }
 
@@ -186,6 +214,16 @@ const ALIASES: &[(&str, &str)] = &[
 ];
 
 impl Theme {
+    fn zoom_to(&mut self, zoom: f32) {
+        self.zoom = zoom;
+        self.mono_size = px(crate::config::get().font_size * zoom);
+    }
+
+    /// The size of a rem, which [`pt`] sizes and gpui's text and spacing follow.
+    pub fn rem_size(&self) -> Pixels {
+        px(REM * self.zoom)
+    }
+
     /// The style for a highlight scope: the most specific name the theme has.
     pub fn syntax_style(&self, scope: &str) -> Option<SyntaxStyle> {
         let scope = ALIASES.iter().find(|(ours, _)| *ours == scope).map_or(scope, |(_, theirs)| theirs);

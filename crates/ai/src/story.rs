@@ -1,82 +1,70 @@
-//! A story: one request to Claude and its replies, reviewed as a single list
-//! you Tab through. Edit steps are accepted or skipped; notes (answers,
-//! walkthroughs) are read.
+//! A story: one request and the conversation it starts, reviewed one item at
+//! a time. Every reply is exactly one item (a note, an edit, or a new file),
+//! or `<done>`. Once you've accepted the current item (or read it), the story
+//! asks for the next one. There's no skipping: what you say instead goes with
+//! that request, and the next item follows it.
+//! There's no plan to keep in step: the model only ever answers "what's next?".
 //!
-//! Whatever you say mid-review is a follow-up; Claude decides what it is (a
-//! question, a comment, a redirect) and what it changes. Its reply comes in
-//! two parts: what answers you, shown right where you are, and, when what you
-//! said changes what should come next, a revised `<rest>` that replaces the
-//! item you were at (unless it's a note you've read) and everything after.
-//! Without one, the rest stays. While the reply is on its way the review
-//! waits where you are.
+//! While you review an item, the next ones are already being asked for:
+//! up to [`PREFETCH`] ahead, each assuming you accept the ones before it.
+//! Accept, and the next is there (or streaming); say something, and the ones
+//! asked ahead are dropped and the next is asked for as usual.
 //!
-//! A reply Ghostwrite can't use (a step whose lines aren't in its file, or
-//! nothing in the reply format) goes back to Claude the same way, as a
-//! correction, until it's right or [`MAX_REVISIONS`] tries in a row fail.
+//! A reply Ghostwrite can't use (one that breaks the format, an edit whose
+//! lines aren't in its file, a file that doesn't exist) goes back to the model
+//! the same way, as a correction, until it's right or [`MAX_REVISIONS`] tries
+//! in a row fail.
 //!
-//! This is the bookkeeping only. Applying an accepted step to a buffer, or
+//! This is the bookkeeping only. Applying an accepted edit to a buffer, or
 //! creating a file, is the editor's job; it tells the story afterwards with
-//! [`Story::decide`].
+//! [`Story::accept`] (or [`Story::follow_up`] when the user says something).
 
 use std::collections::HashMap;
+use std::ops::Range;
 
-use crate::protocol::{self, Kind, Note, Piece, Step};
+use crate::protocol::{self, Note, Reply, Step};
 
-/// Corrections Claude gets in a row before a step is left for the user to skip.
+/// Corrections the model gets in a row before an item is left for the user to redirect.
 pub const MAX_REVISIONS: usize = 3;
+/// Items asked for ahead of the one under review.
+pub const PREFETCH: usize = 10;
 
-/// Which part of a reply an item is in.
+/// An item to review: the reply it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Part {
-    /// What answers a follow-up, shown where it was asked.
-    Answer,
-    /// The plan: a first reply, or a follow-up's revised rest.
-    Plan,
-}
-
-/// An item to review: which reply, which part of it, and where in that part.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ItemId {
-    pub reply: usize,
-    pub part: Part,
-    pub index: usize,
-}
+pub struct ItemId(pub usize);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
     Step(Step),
     Note(Note),
-    /// A new file, or a folder if it ends in `/`.
-    Create(String),
-    /// A file or folder to move to the Trash.
-    Remove(String),
-    /// A file or folder to move.
-    Rename {
-        from: String,
-        to: String,
-    },
 }
 
 impl Item {
-    /// Decided in the file tree rather than in a buffer.
-    pub fn is_file_op(&self) -> bool {
-        matches!(self, Item::Create(_) | Item::Remove(_) | Item::Rename { .. })
+    /// The lines it quotes from its file: a note's `<at>`, a step's old lines.
+    pub fn quoted(&self) -> &[String] {
+        match self {
+            Item::Note(note) => &note.at,
+            Item::Step(step) => &step.old,
+        }
     }
 
-    /// The item as Claude wrote it, to tell it where the user is.
+    /// Where its quoted lines start, as their numbers (or the editor) said.
+    pub fn line(&self) -> Option<usize> {
+        match self {
+            Item::Note(note) => note.line,
+            Item::Step(step) => step.line,
+        }
+    }
+
+    /// The item as the model wrote it, to remind it what the user decided.
     pub fn describe(&self) -> String {
         match self {
-            Item::Note(note) => {
-                let at = if note.at.is_empty() { String::new() } else { format!("(about: {})\n", note.at.join("\n")) };
-                format!("a note: {at}{}", note.text)
-            }
+            Item::Note(note) => format!("a note: {}", note.text),
+            Item::Step(step) if step.create => format!("creating {}", step.file.as_deref().unwrap_or("a file")),
             Item::Step(step) => {
                 let file = step.file.as_ref().map_or(String::new(), |f| format!(" in {f}"));
-                format!("a step{file}, replacing\n{}\nwith\n{}", step.old.join("\n"), step.new.join("\n"))
+                format!("an edit{file}, replacing\n{}\nwith\n{}", step.old.join("\n"), step.new.join("\n"))
             }
-            Item::Create(path) => format!("creating {path}"),
-            Item::Remove(path) => format!("removing {path}"),
-            Item::Rename { from, to } => format!("renaming {from} to {to}"),
         }
     }
 }
@@ -85,105 +73,144 @@ impl Item {
 pub enum Verdict {
     Pending,
     Accepted,
-    Rejected,
+    /// The user said something instead, or Ghostwrite corrected it.
+    Redirected,
 }
 
 /// Where the review is after a change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Settled {
     At(ItemId),
+    /// The next item has been asked for: send the request.
+    Ask,
     /// Nothing to review until more of the reply arrives (or after an error).
     Waiting,
     Finished,
 }
 
-/// One turn of the conversation: Claude's latest reply, what the user did
-/// with it, and what they said next.
+/// One turn of the conversation: the model's reply, what the user did with
+/// it, and what they said next (nothing: they want the next item).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FollowUp {
-    /// Claude's reply just before this.
+    /// The model's reply just before this.
     pub reply: String,
-    /// What the user accepted and skipped since (`accepted: …`, `skipped: …`).
+    /// What the user accepted since (`accepted: …`).
     pub decided: Vec<String>,
-    /// The item they were at, as Claude wrote it.
-    pub at: Option<String>,
     pub said: String,
-    /// Ghostwrite, not the user, is speaking: Claude's reply couldn't be used.
+    /// Ghostwrite, not the user, is speaking: the reply couldn't be used.
     pub correction: bool,
     /// A `:sh` command the user ran since that reply, with its output.
     pub command: Option<String>,
 }
 
+/// A reply asked for ahead of time, assuming everything before it is accepted.
 #[derive(Debug)]
-struct Reply {
+struct Ahead {
+    id: u64,
     text: String,
-    /// Where in the list it was asked: its answer goes here.
-    at: usize,
-    /// The item it was asked about.
+    done: bool,
+    /// The lines its edit goes at, placed once in the files it was written against.
+    anchor: Option<Range<usize>>,
+}
+
+/// A request to send ahead of time: the conversation as it would be if the
+/// user accepts what's before it, and those items (to apply to the file it
+/// shows, as accepting would).
+#[derive(Debug)]
+pub struct Prefetch {
+    pub id: u64,
+    /// The prefetch it builds on, whose conversation it continues.
+    pub after: Option<u64>,
+    pub followups: Vec<FollowUp>,
+    pub accepted: Vec<Item>,
+}
+
+#[derive(Debug)]
+struct Turn {
+    text: String,
+    /// The item the user said something about, which this reply answers.
     about: Option<ItemId>,
-    /// It answers a correction: all of it is the new plan from there.
-    correction: bool,
+    /// An item given rather than written (docs shown with `space k`).
+    given: Option<Item>,
 }
 
 #[derive(Debug)]
 pub struct Story {
     pub instruction: String,
     history: Vec<FollowUp>,
-    /// Decisions since the last follow-up, for the next one.
-    decided: Vec<String>,
-    replies: Vec<Reply>,
+    /// Reply `k` answers the request with the first `k` follow-ups.
+    replies: Vec<Turn>,
     verdicts: HashMap<ItemId, Verdict>,
+    /// Decisions since the last request, for the next one.
+    decided: Vec<String>,
     current: Option<ItemId>,
-    /// The reply Claude is writing.
+    /// The reply being written.
     writing: Option<usize>,
+    /// Whether the next item is asked for once this one is decided.
+    open: bool,
     pub error: Option<String>,
-    /// What Claude is looking at in the project right now.
+    /// What the model is looking at in the project right now.
     pub looking: Option<String>,
     /// Corrections sent since the user last decided something.
     revisions: usize,
-}
-
-/// The items in some reply text: notes for an answer, pieces for a change.
-fn items_in(text: &str) -> Vec<Item> {
-    match protocol::reply_kind(text) {
-        Some(Kind::Question) => protocol::parse_notes(text).into_iter().map(Item::Note).collect(),
-        Some(Kind::Edit) => protocol::parse_pieces(text)
-            .into_iter()
-            .map(|p| match p {
-                Piece::Step(s) => Item::Step(s),
-                Piece::Create(path) => Item::Create(path),
-                Piece::Remove(path) => Item::Remove(path),
-                Piece::Rename { from, to } => Item::Rename { from, to },
-            })
-            .collect(),
-        None => vec![],
-    }
+    /// Replies asked for ahead, in order.
+    ahead: Vec<Ahead>,
+    next_ahead: u64,
+    /// The reply asked ahead that's now the one being written, still streaming.
+    adopted: Option<u64>,
+    /// One asked ahead that just became the next reply, for the editor to take its session.
+    just_adopted: Option<u64>,
+    /// Where the current reply's edit goes, if it was asked ahead and placed when it arrived.
+    anchor: Option<Range<usize>>,
+    /// Items the editor gave that are still to come (the stops of a search, say).
+    queued: std::collections::VecDeque<Item>,
 }
 
 impl Story {
-    /// A request on its way: the plan will arrive in the first reply.
+    /// A request on its way: the first item will arrive in the first reply.
     pub fn new(instruction: impl Into<String>) -> Self {
         Self {
             instruction: instruction.into(),
             history: vec![],
-            decided: vec![],
-            replies: vec![Reply { text: String::new(), at: 0, about: None, correction: false }],
+            replies: vec![Turn { text: String::new(), about: None, given: None }],
             verdicts: HashMap::new(),
+            decided: vec![],
             current: None,
             writing: Some(0),
+            open: true,
             error: None,
             looking: None,
             revisions: 0,
+            ahead: vec![],
+            next_ahead: 0,
+            adopted: None,
+            just_adopted: None,
+            anchor: None,
+            queued: std::collections::VecDeque::new(),
         }
     }
 
-    /// A story that starts with an answer already there (docs from `space k`).
-    pub fn answered(instruction: impl Into<String>, answer: &str) -> Self {
+    /// A story of items the editor gives (a file's diagnostics, a search's
+    /// matches, docs from `space k`), shown one at a time like any others. It
+    /// ends after the last one, unless the user says something: then the model
+    /// takes over from there, and the rest are dropped. `None` if there are none.
+    pub fn given(instruction: impl Into<String>, items: Vec<Item>) -> Option<Self> {
+        let mut queued: std::collections::VecDeque<Item> = items.into();
+        let first = queued.pop_front()?;
         let mut story = Self::new(instruction);
-        story.replies[0].text = format!("<answer>\n{answer}\n</answer>");
+        story.replies[0] = Turn { text: render(&first), about: None, given: Some(first) };
+        story.queued = queued;
         story.writing = None;
+        story.open = false;
         story.settle();
-        story
+        Some(story)
+    }
+
+    /// A story that starts with a note already there (docs from `space k`),
+    /// and ends with it unless the user asks about it.
+    pub fn answered(instruction: impl Into<String>, answer: &str) -> Self {
+        let note = Note { file: None, at: vec![], text: answer.trim().to_string(), line: None };
+        Self::given(instruction, vec![Item::Note(note)]).expect("one item")
     }
 
     pub fn followups(&self) -> &[FollowUp] {
@@ -198,97 +225,105 @@ impl Story {
         self.writing.is_some()
     }
 
-    /// Reply `k`'s two parts: what answers now, and the plan (all of a first reply).
-    fn parts(&self, k: usize) -> (Vec<Item>, Option<Vec<Item>>) {
-        let text = &self.replies[k].text;
-        if k == 0 {
-            return (vec![], Some(items_in(text)));
+    /// What reply `k` is, as far as it has arrived.
+    fn reply(&self, k: usize) -> Reply {
+        let turn = &self.replies[k];
+        match &turn.given {
+            Some(Item::Note(note)) => Reply::Note(note.clone()),
+            Some(Item::Step(step)) => Reply::Step(step.clone()),
+            None => protocol::parse(&turn.text, self.writing != Some(k)),
         }
-        let (now, rest) = protocol::split_rest(text);
-        match rest {
-            // Asked for only a <rest> and given the steps without one: they still replace.
-            None if self.replies[k].correction => (vec![], Some(items_in(text))),
-            rest => (items_in(&now), rest.map(|r| items_in(&r))),
-        }
-    }
-
-    /// Everything to review, in order. Each follow-up's answer goes where it
-    /// was asked; its rest (if it has one) replaces what came after.
-    pub fn items(&self) -> Vec<(ItemId, Item)> {
-        let mut order: Vec<(ItemId, Item)> = vec![];
-        for (k, reply) in self.replies.iter().enumerate() {
-            let (now, rest) = self.parts(k);
-            let ids = |part, items: Vec<Item>| items.into_iter().enumerate().map(move |(index, item)| (ItemId { reply: k, part, index }, item));
-            let after = order.split_off(reply.at.min(order.len()));
-            order.extend(ids(Part::Answer, now));
-            match rest {
-                Some(rest) => order.extend(ids(Part::Plan, rest)),
-                None => order.extend(after),
-            }
-        }
-        order
     }
 
     pub fn item(&self, id: ItemId) -> Option<Item> {
-        self.items().into_iter().find(|(i, _)| *i == id).map(|(_, item)| item)
+        match self.reply(id.0) {
+            Reply::Note(note) => Some(Item::Note(note)),
+            Reply::Step(step) => Some(Item::Step(step)),
+            Reply::Partial | Reply::Done { .. } => None,
+        }
+    }
+
+    /// Every item so far, in order.
+    pub fn items(&self) -> Vec<(ItemId, Item)> {
+        (0..self.replies.len()).filter_map(|k| Some((ItemId(k), self.item(ItemId(k))?))).collect()
     }
 
     pub fn current_item(&self) -> Option<Item> {
         self.item(self.current?)
     }
 
-    /// The current item's place in the list (zero-based) and the list's length.
+    /// The current item's place among the items (zero-based), and how many
+    /// there are so far, counting those the editor gave that are still to come
+    /// and those asked ahead that have arrived as items.
     pub fn progress(&self) -> Option<(usize, usize)> {
         let items = self.items();
-        Some((items.iter().position(|(id, _)| Some(*id) == self.current)?, items.len()))
+        let ahead = self.ahead.iter().filter(|a| matches!(protocol::parse(&a.text, a.done), Reply::Step(_) | Reply::Note(_))).count();
+        Some((items.iter().position(|(id, _)| Some(*id) == self.current)?, items.len() + self.queued.len() + ahead))
     }
 
-    /// The item a reply was asked about, if it was.
+    /// The item a reply answers what the user said about, if it does.
     pub fn asked_about(&self, id: ItemId) -> Option<ItemId> {
-        self.replies.get(id.reply)?.about
+        self.replies.get(id.0)?.about
     }
 
-    /// What the reply being written was asked about, while a follow-up is on its way.
+    /// What the reply being written answers, while it's on its way.
     pub fn writing_about(&self) -> Option<ItemId> {
-        self.writing.filter(|&k| k > 0).and_then(|k| self.replies[k].about)
+        self.writing.and_then(|k| self.replies[k].about)
     }
 
     pub fn verdict(&self, id: ItemId) -> Verdict {
         self.verdicts.get(&id).copied().unwrap_or(Verdict::Pending)
     }
 
-    /// The user says something about the current item (or the reply so far).
-    /// The answer streams into a new reply, which may revise what comes after.
+    /// The user says something about the current item (or while waiting).
+    /// The next item, in a new reply, follows what they said.
     pub fn follow_up(&mut self, said: String) {
         self.revisions = 0;
         self.follow(said, false);
     }
 
-    /// Whether Claude may still be asked to correct its reply.
+    /// Whether the model may still be asked to correct its reply.
     pub fn can_revise(&self) -> bool {
         self.revisions < MAX_REVISIONS
     }
 
-    /// The current step's `<old>` lines aren't in its file (`file`, whose
-    /// text is `text` unless it's the file asked about, which Claude is
-    /// shown anyway): Claude rewrites it and what follows.
-    pub fn step_misplaced(&mut self, file: &str, text: Option<&str>) {
-        self.revise(protocol::misplaced_step(file, text));
+    /// The current item's `<at>` lines (`quoted`, looked for near the lines
+    /// `near`) aren't in its file (`file`, whose text is `text`): the model
+    /// writes it again.
+    pub fn misplaced(&mut self, file: &str, text: &str, quoted: &[String], near: Range<usize>) {
+        self.revise(protocol::misplaced(file, text, quoted, near));
     }
 
-    /// The latest reply is complete but there's nothing in it to review:
-    /// Claude writes it again, in the format.
-    pub fn reply_unusable(&mut self) {
-        self.revise(protocol::NOTHING_TO_REVIEW.into());
+    /// The current item names a file that isn't in the project.
+    pub fn file_missing(&mut self, file: &str) {
+        self.revise(protocol::missing_file(file));
     }
 
-    /// Whether the last reply, now complete, has nothing to review and isn't
-    /// an intended empty revision (`<rest></rest>`) or just notes for later.
+    /// The reply being written breaks the format (`why`), or the finished one
+    /// has nothing to review: the model writes it again, in the format.
+    pub fn reply_unusable(&mut self, why: Option<&str>) {
+        let said = match why {
+            Some(why) => format!("your reply breaks the format: {why}. {}", protocol::NOTHING_TO_REVIEW),
+            None => protocol::NOTHING_TO_REVIEW.into(),
+        };
+        self.revise(said);
+    }
+
+    /// Whether the reply so far breaks the format, and how; once it's
+    /// complete, also whether it ended where an item can.
+    pub fn format_problem(&self) -> Option<String> {
+        let k = self.replies.len() - 1;
+        let turn = &self.replies[k];
+        if turn.given.is_some() || self.error.is_some() {
+            return None;
+        }
+        protocol::check(&turn.text, self.writing != Some(k)).err()
+    }
+
+    /// Whether the last reply, now complete, has nothing to review.
     pub fn is_unusable(&self) -> bool {
-        let Some(reply) = self.replies.last().filter(|_| self.writing.is_none() && self.error.is_none()) else { return false };
-        let text = &reply.text;
-        let kept = protocol::split_rest(text).1.is_some() || protocol::memory_update(text).is_some();
-        !text.trim().is_empty() && !kept && protocol::reply_kind(text).is_none()
+        let k = self.replies.len() - 1;
+        self.writing.is_none() && self.error.is_none() && self.reply(k) == Reply::Partial
     }
 
     fn revise(&mut self, said: String) {
@@ -297,26 +332,35 @@ impl Story {
     }
 
     fn follow(&mut self, said: String, correction: bool) {
-        let items = self.items();
-        let here = self.current.and_then(|c| items.iter().position(|(id, _)| *id == c));
-        let item = here.map(|i| &items[i].1);
-        // The answer goes where the user is. A note there has been read
-        // (it's behind them); anything still to decide comes after the answer.
-        let read = matches!(item, Some(Item::Note(_)));
-        let at = here.map_or(items.len(), |i| i + usize::from(read));
-        if let (true, Some(id)) = (read, self.current) {
-            self.verdicts.insert(id, Verdict::Accepted);
+        let k = self.replies.len() - 1;
+        let item = self.item(ItemId(k));
+        // A note is read once it's been asked about; anything else undecided is set aside.
+        if self.verdict(ItemId(k)) == Verdict::Pending && item.is_some() {
+            let read = !correction && matches!(item, Some(Item::Note(_)));
+            self.verdicts.insert(ItemId(k), if read { Verdict::Accepted } else { Verdict::Redirected });
         }
-        let reply = self.replies.last().map(|r| r.text.clone()).unwrap_or_default();
-        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), at: item.map(Item::describe), said, correction, command: None });
-        self.replies.push(Reply { text: String::new(), at, about: self.current, correction });
+        let about = (!correction && item.is_some()).then_some(ItemId(k));
+        self.ask(said, correction, about);
+    }
+
+    /// The next turn: what was decided and said, and a reply on its way.
+    /// What was asked ahead assumed otherwise, so it's dropped.
+    fn ask(&mut self, said: String, correction: bool, about: Option<ItemId>) {
+        self.ahead.clear();
+        self.adopted = None;
+        self.anchor = None;
+        self.queued.clear();
+        let reply = self.replies.last().map(|t| t.text.clone()).unwrap_or_default();
+        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), said, correction, command: None });
+        self.replies.push(Turn { text: String::new(), about, given: None });
         self.error = None;
         self.current = None;
+        self.open = true;
         self.writing = Some(self.replies.len() - 1);
     }
 
-    /// The user ran `command` (with its output) since Claude's last reply:
-    /// the newest follow-up says so.
+    /// The user ran `command` (with its output) since the last reply: the
+    /// newest turn says so.
     pub fn ran(&mut self, command: String) {
         if let Some(followup) = self.history.last_mut() {
             followup.command = Some(command);
@@ -340,19 +384,18 @@ impl Story {
         self.error = Some(error);
     }
 
-    /// The current item was accepted (and applied) or skipped.
-    pub fn decide(&mut self, verdict: Verdict) {
+    /// The current item was accepted (and applied), or read.
+    pub fn accept(&mut self) {
         let Some(id) = self.current.take() else { return };
         self.revisions = 0;
-        // Reading a note isn't a decision worth telling Claude about.
+        // Reading a note isn't worth telling the model about.
         if let Some(item) = self.item(id).filter(|i| !matches!(i, Item::Note(_))) {
-            let what = if verdict == Verdict::Accepted { "accepted" } else { "skipped" };
-            self.decided.push(format!("{what}: {}", item.describe()));
+            self.decided.push(format!("accepted: {}", item.describe()));
         }
-        self.verdicts.insert(id, verdict);
+        self.verdicts.insert(id, Verdict::Accepted);
     }
 
-    /// What Claude said, in brief, for the log of interactions: its notes
+    /// What the model said, in brief, for the log of interactions: its notes
     /// (cut short), or the changes it proposed and how many were applied.
     pub fn recap(&self) -> String {
         const MAX: usize = 600;
@@ -360,12 +403,7 @@ impl Story {
         let notes: Vec<String> = items.iter().filter_map(|(_, i)| if let Item::Note(n) = i { Some(n.text.replace('\n', " ")) } else { None }).collect();
         let mut files: Vec<String> = items
             .iter()
-            .filter_map(|(_, i)| match i {
-                Item::Step(s) => Some(s.file.clone().unwrap_or_else(|| "the file asked about".into())),
-                Item::Create(p) | Item::Remove(p) => Some(p.clone()),
-                Item::Rename { from, .. } => Some(from.clone()),
-                Item::Note(_) => None,
-            })
+            .filter_map(|(_, i)| if let Item::Step(s) = i { Some(s.file.clone().unwrap_or_else(|| "the file asked about".into())) } else { None })
             .collect();
         files.dedup();
         let mut recap = notes.join(" / ");
@@ -380,24 +418,167 @@ impl Story {
         recap
     }
 
-    /// Move on to the next item to review, or finish when nothing is left.
-    /// While a follow-up's reply is on its way, only what it brings is up
-    /// next: it may change everything after it, so the review waits for it.
+    /// Where the review is now. An edit shows as soon as its new lines start
+    /// streaming, a note once its reply is complete. Once the current item is
+    /// decided, the next one is asked for ([`Settled::Ask`]: send the request);
+    /// `<done>` (or a given note, decided) finishes the story.
     pub fn settle(&mut self) -> Settled {
-        let items = self.items();
-        let answering = self.writing.filter(|&k| k > 0 && !protocol::rest_settled(&self.replies[k].text));
-        let pending = |id: ItemId| self.verdict(id) == Verdict::Pending && answering.is_none_or(|k| id.reply == k);
-        if self.current.is_none_or(|c| !items.iter().any(|(id, _)| *id == c) || !pending(c)) {
-            self.current = items.iter().map(|(id, _)| *id).find(|&id| pending(id));
+        if let Some(id) = self.current.filter(|id| self.verdict(*id) == Verdict::Pending) {
+            return Settled::At(id);
         }
-        match self.current {
-            Some(id) => Settled::At(id),
-            None if self.writing.is_none() && self.error.is_none() => Settled::Finished,
-            None => Settled::Waiting,
+        self.current = None;
+        let k = self.replies.len() - 1;
+        let id = ItemId(k);
+        match self.reply(k) {
+            Reply::Step(_) | Reply::Note(_) if self.verdict(id) == Verdict::Pending => {
+                self.current = Some(id);
+                Settled::At(id)
+            }
+            _ if self.writing.is_some() || self.error.is_some() => Settled::Waiting,
+            Reply::Step(_) | Reply::Note(_) if !self.queued.is_empty() => {
+                self.reveal();
+                self.settle()
+            }
+            Reply::Step(_) | Reply::Note(_) if self.open && self.verdict(id) == Verdict::Accepted && !self.ahead.is_empty() => {
+                self.adopt();
+                self.settle()
+            }
+            Reply::Step(_) | Reply::Note(_) if self.open => {
+                self.ask(String::new(), false, None);
+                Settled::Ask
+            }
+            _ => Settled::Finished,
         }
     }
 
-    /// Changes accepted, of changes proposed (in what's still the plan).
+    /// The next item the editor gave becomes the next reply, as if the model had written it.
+    fn reveal(&mut self) {
+        let Some(item) = self.queued.pop_front() else { return };
+        let reply = self.replies.last().map(|t| t.text.clone()).unwrap_or_default();
+        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), said: String::new(), correction: false, command: None });
+        self.replies.push(Turn { text: render(&item), about: None, given: Some(item) });
+    }
+
+    /// The first reply asked ahead becomes the next one: it assumed just what happened.
+    fn adopt(&mut self) {
+        let next = self.ahead.remove(0);
+        let rest = std::mem::take(&mut self.ahead);
+        self.ask(String::new(), false, None);
+        self.ahead = rest;
+        self.anchor = next.anchor;
+        let k = self.replies.len() - 1;
+        self.replies[k].text = next.text;
+        if next.done {
+            self.writing = None;
+        } else {
+            self.adopted = Some(next.id);
+        }
+        self.just_adopted = Some(next.id);
+    }
+
+    /// The reply asked ahead that just became the next one, once.
+    pub fn take_adopted(&mut self) -> Option<u64> {
+        self.just_adopted.take()
+    }
+
+    /// Where the current item's edit goes, if it was placed when it arrived ahead.
+    pub fn anchor(&self) -> Option<Range<usize>> {
+        self.anchor.clone()
+    }
+
+    /// The next request to send ahead of time, if it's time for one: the
+    /// current item is complete, nothing else is on its way, and fewer than
+    /// [`PREFETCH`] are asked ahead, the last of them an item (not `<done>`).
+    pub fn prefetch(&mut self) -> Option<Prefetch> {
+        let current = self.current?;
+        let item = self.item(current)?;
+        let ready = self.open && self.error.is_none() && self.writing.is_none() && !matches!(&item, Item::Step(s) if !s.complete);
+        let last_is_item = self.ahead.last().is_none_or(|a| a.done && matches!(protocol::parse(&a.text, true), Reply::Step(_) | Reply::Note(_)));
+        if !ready || self.ahead.len() >= PREFETCH || !last_is_item {
+            return None;
+        }
+        let mut followups = self.history.clone();
+        let mut accepted = vec![];
+        let mut decided = self.decided.clone();
+        let mut reply = self.replies[current.0].text.clone();
+        let mut next = Some(item);
+        for a in self.ahead.iter().map(Some).chain([None]) {
+            if let Some(item) = next.take() {
+                if let Item::Step(_) = &item {
+                    decided.push(format!("accepted: {}", item.describe()));
+                }
+                followups.push(FollowUp {
+                    reply: std::mem::take(&mut reply),
+                    decided: std::mem::take(&mut decided),
+                    said: String::new(),
+                    correction: false,
+                    command: None,
+                });
+                accepted.push(item);
+            }
+            if let Some(a) = a {
+                reply = a.text.clone();
+                next = match protocol::parse(&a.text, true) {
+                    Reply::Step(step) => Some(Item::Step(step)),
+                    Reply::Note(note) => Some(Item::Note(note)),
+                    _ => None,
+                };
+            }
+        }
+        let id = self.next_ahead;
+        self.next_ahead += 1;
+        let after = self.ahead.last().map(|a| a.id);
+        self.ahead.push(Ahead { id, text: String::new(), done: false, anchor: None });
+        Some(Prefetch { id, after, followups, accepted })
+    }
+
+    /// Whether a request sent ahead (`id`) is still wanted.
+    pub fn wants(&self, id: u64) -> bool {
+        self.adopted == Some(id) || self.ahead.iter().any(|a| a.id == id)
+    }
+
+    /// More of a reply asked ahead (or, once it's the next reply, of that).
+    pub fn ahead_text(&mut self, id: u64, chunk: &str) {
+        if self.adopted == Some(id) {
+            self.push_text(chunk);
+        } else if let Some(a) = self.ahead.iter_mut().find(|a| a.id == id) {
+            a.text.push_str(chunk);
+        }
+    }
+
+    /// A reply asked ahead is complete, or failed (and what was asked after it with it).
+    pub fn ahead_finished(&mut self, id: u64, error: Option<String>) {
+        if self.adopted == Some(id) {
+            self.adopted = None;
+            match error {
+                Some(e) => self.failed(e),
+                None => self.finished_writing(),
+            }
+        } else if let Some(i) = self.ahead.iter().position(|a| a.id == id) {
+            match error {
+                Some(_) => self.ahead.truncate(i),
+                None => self.ahead[i].done = true,
+            }
+        }
+    }
+
+    /// The item in a reply asked ahead (`id`), once it's complete.
+    pub fn ahead_item(&self, id: u64) -> Option<Item> {
+        match protocol::parse(&self.ahead.iter().find(|a| a.id == id && a.done)?.text, true) {
+            Reply::Step(step) => Some(Item::Step(step)),
+            Reply::Note(note) => Some(Item::Note(note)),
+            _ => None,
+        }
+    }
+
+    /// A reply asked ahead (`id`) placed at `lines` of its file, in the files it was written against.
+    pub fn anchor_ahead(&mut self, id: u64, lines: Range<usize>) {
+        if let Some(a) = self.ahead.iter_mut().find(|a| a.id == id) {
+            a.anchor = Some(lines);
+        }
+    }
+
+    /// Changes accepted, of changes proposed.
     pub fn summary(&self) -> (usize, usize) {
         let changes: Vec<ItemId> = self.items().into_iter().filter(|(_, i)| !matches!(i, Item::Note(_))).map(|(id, _)| id).collect();
         (changes.iter().filter(|id| self.verdict(**id) == Verdict::Accepted).count(), changes.len())
@@ -412,12 +593,12 @@ impl Story {
         }
     }
 
-    /// Claude's rewritten notes, if a reply ended with them.
+    /// The model's rewritten notes, if it ended with them.
     pub fn memory_update(&self) -> Option<String> {
-        self.replies.iter().rev().find_map(|r| protocol::memory_update(&r.text))
+        (0..self.replies.len()).rev().find_map(|k| if let Reply::Done { memory } = self.reply(k) { memory } else { None })
     }
 
-    /// The request and every reply, kept for when a step won't place.
+    /// The request and every reply, kept for when an edit won't place.
     pub fn transcript(&self) -> String {
         let mut out = format!("request: {}\n", self.instruction);
         for reply in &self.replies {
@@ -431,16 +612,22 @@ impl Story {
     }
 }
 
+/// A given item in the reply format, for the conversation the model sees if it takes over.
+fn render(item: &Item) -> String {
+    match item {
+        Item::Note(note) => note.render(),
+        Item::Step(step) => format!("<say>\n{}\n</say>\n<new>\n{}\n</new>\n", step.say, step.new.join("\n")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const TWO_STEPS: &str = "<step>\n<old>\n    pass\n</old>\n<new>\n    return a + b\n</new>\n</step>\n<step>\n<old>\ndef add(a, b):\n</old>\n<new>\ndef add(a: int, b: int) -> int:\n</new>\n</step>\n";
-    const TOUR: &str = "<answer>\n<note>\nFirst.\n</note>\n<note>\nSecond.\n</note>\n<note>\nThird.\n</note>\n</answer>\n";
-
-    fn plan(index: usize) -> ItemId {
-        ItemId { reply: 0, part: Part::Plan, index }
-    }
+    const FIX: &str = "<file>\ncalc.py\n</file>\n<at>\n    pass\n</at>\n<say>\nReturn the sum.\n</say>\n<new>\n    return a + b\n</new>\n";
+    const HINTS: &str = "<file>\ncalc.py\n</file>\n<at>\ndef add(a, b):\n</at>\n<say>\nType hints.\n</say>\n<new>\ndef add(a: int, b: int) -> int:\n</new>\n";
+    const NOTE: &str = "<file>\ncalc.py\n</file>\n<at>\ndef add(a, b):\n</at>\n<say>\nBoth are ints here.\n</say>\n";
+    const DONE: &str = "<done>\n</done>\n";
 
     fn arrived(story: &mut Story, reply: &str) -> Settled {
         story.push_text(reply);
@@ -448,156 +635,138 @@ mod tests {
         story.settle()
     }
 
-    fn texts(story: &Story) -> Vec<String> {
-        story
-            .items()
-            .into_iter()
-            .map(|(_, item)| match item {
-                Item::Note(n) => n.text,
-                Item::Step(s) => s.new.join(" "),
-                other => other.describe(),
-            })
-            .collect()
-    }
-
     #[test]
-    fn steps_are_decided_in_order_and_the_last_finishes() {
+    fn each_decision_asks_for_the_next_item() {
         let mut story = Story::new("implement it");
         assert_eq!(story.settle(), Settled::Waiting);
-        assert_eq!(arrived(&mut story, TWO_STEPS), Settled::At(plan(0)));
-        story.decide(Verdict::Accepted);
-        assert_eq!(story.settle(), Settled::At(plan(1)));
-        story.decide(Verdict::Rejected);
-        assert_eq!(story.settle(), Settled::Finished);
+        assert_eq!(arrived(&mut story, FIX), Settled::At(ItemId(0)));
+        story.accept();
+        assert_eq!(story.settle(), Settled::Ask, "the next item is asked for");
+        assert_eq!(story.followups().len(), 1);
+        assert!(story.followups()[0].decided[0].starts_with("accepted: an edit in calc.py"), "the model is told what happened");
+        assert_eq!(story.followups()[0].said, "", "and nothing else");
+        assert_eq!(arrived(&mut story, HINTS), Settled::At(ItemId(1)));
+        story.follow_up("no hints".into());
+        assert_eq!(arrived(&mut story, DONE), Settled::Finished);
         assert_eq!(story.outcome(), "applied 1 of 2 steps");
     }
 
     #[test]
-    fn steps_show_up_while_streaming() {
+    fn an_edit_shows_while_its_new_lines_stream() {
         let mut story = Story::new("implement it");
-        story.push_text(&TWO_STEPS[..40]);
-        assert_eq!(story.settle(), Settled::At(plan(0)));
+        story.push_text(&FIX[..FIX.len() - 12]);
+        assert_eq!(story.settle(), Settled::At(ItemId(0)));
         assert!(matches!(story.current_item(), Some(Item::Step(s)) if !s.complete));
     }
 
     #[test]
-    fn a_question_mid_plan_is_answered_before_the_next_step() {
+    fn what_the_user_says_goes_with_the_next_request() {
         let mut story = Story::new("implement it");
-        arrived(&mut story, TWO_STEPS);
-        story.decide(Verdict::Accepted);
-        story.settle();
-        story.follow_up("why int?".into());
-        assert_eq!(story.writing_about(), Some(plan(1)), "the answer is on its way to where it was asked");
-        assert!(story.followups()[0].at.as_deref().is_some_and(|at| at.contains(") -> int:")), "Claude is told where the user is");
-        assert_eq!(story.followups()[0].decided.len(), 1, "and what they accepted");
-        assert!(story.followups()[0].decided[0].starts_with("accepted: a step"));
-        assert_eq!(story.followups()[0].reply, TWO_STEPS, "and the latest reply, whole");
-        let answer = ItemId { reply: 1, part: Part::Answer, index: 0 };
-        assert_eq!(arrived(&mut story, "<answer>\n<note>\nBecause both are ints.\n</note>\n</answer>\n"), Settled::At(answer));
-        assert_eq!(story.asked_about(answer), Some(plan(1)));
-        story.decide(Verdict::Accepted);
-        assert_eq!(story.settle(), Settled::At(plan(1)), "back to the plan, unchanged");
+        arrived(&mut story, FIX);
+        story.follow_up("why not float?".into());
+        assert_eq!(story.verdict(ItemId(0)), Verdict::Redirected, "the edit is set aside");
+        assert_eq!(story.writing_about(), Some(ItemId(0)), "the answer comes where it was asked");
+        assert_eq!(story.followups()[0].said, "why not float?");
+        assert_eq!(arrived(&mut story, NOTE), Settled::At(ItemId(1)));
+        assert_eq!(story.asked_about(ItemId(1)), Some(ItemId(0)));
+        story.accept();
+        assert_eq!(story.settle(), Settled::Ask, "after the answer, the next item");
     }
 
     #[test]
-    fn the_review_waits_for_the_answer() {
-        let mut story = Story::new("walk me through this");
-        arrived(&mut story, TOUR);
-        story.follow_up("is there a size limit?".into());
-        assert_eq!(story.settle(), Settled::Waiting, "not on to the next note while Claude answers");
-        story.push_text("<answer>\nYes, 1 MB.\n");
-        story.settle();
-        assert!(matches!(story.current_item(), Some(Item::Note(n)) if n.text == "Yes, 1 MB."), "the answer, as it streams");
-        story.decide(Verdict::Accepted);
-        assert_eq!(story.settle(), Settled::Waiting, "the rest may still change");
-        story.push_text("</answer>\n");
+    fn a_reply_that_isnt_an_item_is_corrected() {
+        let mut story = Story::new("implement it");
+        story.push_text("Sure! Here you go:\n```\n");
+        assert_eq!(story.format_problem(), None, "a word before the item is let through while it streams");
         story.finished_writing();
-        assert!(matches!(story.settle(), Settled::At(id) if id == plan(1)), "then on with the walkthrough");
-
-        // Notes after the answer can't change the rest: no need to wait for them.
-        let mut story = Story::new("walk me through this");
-        arrived(&mut story, TOUR);
-        story.follow_up("ok".into());
-        story.push_text("<answer>\nGood.\n</answer>\n");
-        story.settle();
-        story.decide(Verdict::Accepted);
-        assert_eq!(story.settle(), Settled::Waiting);
-        story.push_text("<memory>\nLikes brevity.");
-        assert!(matches!(story.settle(), Settled::At(id) if id == plan(1)), "on while Claude writes its notes");
+        assert!(story.format_problem().is_some());
+        assert!(story.is_unusable());
+        story.reply_unusable(story.format_problem().as_deref());
+        assert!(story.followups()[0].correction);
+        assert_eq!(arrived(&mut story, FIX), Settled::At(ItemId(1)));
     }
 
     #[test]
-    fn a_redirected_step_is_replaced_by_the_rest() {
-        let mut story = Story::new("implement it");
-        arrived(&mut story, TWO_STEPS);
-        story.follow_up("use sum()".into());
-        let corrected = "<rest>\n<step>\n<old>\n    pass\n</old>\n<new>\n    return sum((a, b))\n</new>\n</step>\n</rest>\n";
-        arrived(&mut story, corrected);
-        assert_eq!(texts(&story), ["    return sum((a, b))"], "the old steps are gone");
-        story.decide(Verdict::Accepted);
+    fn given_items_are_shown_one_at_a_time_and_end_the_story() {
+        let note =
+            |line: usize| Item::Note(Note { file: Some("a.py".into()), at: vec![format!("line {line}")], text: format!("stop {line}"), line: Some(line) });
+        assert!(Story::given("nothing", vec![]).is_none());
+        let mut story = Story::given("the matches", vec![note(1), note(5), note(9)]).unwrap();
+        assert_eq!(story.current(), Some(ItemId(0)));
+        story.accept();
+        assert_eq!(story.settle(), Settled::At(ItemId(1)), "the next one, without asking the model");
+        story.accept();
+        story.settle();
+        story.accept();
+        assert_eq!(story.settle(), Settled::Finished, "after the last");
+        assert!(story.followups().iter().all(|f| f.said.is_empty() && !f.correction));
+    }
+
+    #[test]
+    fn asking_about_a_given_item_hands_over_to_the_model() {
+        let note =
+            |line: usize| Item::Note(Note { file: Some("a.py".into()), at: vec![format!("line {line}")], text: format!("stop {line}"), line: Some(line) });
+        let mut story = Story::given("the matches", vec![note(1), note(5), note(9)]).unwrap();
+        story.follow_up("why is this one here?".into());
+        assert!(story.is_writing(), "the model answers");
+        assert!(story.followups()[0].reply.contains("<say>\nstop 1\n</say>"), "and sees the stop as if it had shown it");
+        assert_eq!(arrived(&mut story, NOTE), Settled::At(ItemId(1)));
+        story.accept();
+        assert_eq!(story.settle(), Settled::Ask, "it carries on; the other stops are dropped");
+    }
+
+    #[test]
+    fn a_given_note_ends_the_story_unless_asked_about() {
+        let mut story = Story::answered("explain", "Adds two numbers.");
+        assert_eq!(story.current(), Some(ItemId(0)));
+        story.accept();
         assert_eq!(story.settle(), Settled::Finished);
-        assert_eq!(story.summary(), (1, 1));
+        let mut story = Story::answered("explain", "Adds two numbers.");
+        story.follow_up("and if they overflow?".into());
+        assert_eq!(arrived(&mut story, NOTE), Settled::At(ItemId(1)));
     }
 
     #[test]
-    fn a_comment_mid_walkthrough_revises_the_rest() {
-        let mut story = Story::new("walk me through this");
-        arrived(&mut story, TOUR);
-        story.decide(Verdict::Accepted);
-        story.settle();
-        // At "Second": the user steers the walkthrough.
-        story.follow_up("skip the setup, show me the error handling".into());
-        let reply = "<answer>\n<note>\nSure, focusing on errors.\n</note>\n</answer>\n<rest>\n<answer>\n<note>\nErrors start here.\n</note>\n<note>\nAnd end here.\n</note>\n</answer>\n</rest>\n";
-        arrived(&mut story, reply);
-        assert_eq!(texts(&story), ["First.", "Second.", "Sure, focusing on errors.", "Errors start here.", "And end here."], "Third is gone");
-        assert!(matches!(story.current_item(), Some(Item::Note(n)) if n.text.starts_with("Sure")));
-    }
-
-    #[test]
-    fn a_question_without_a_new_rest_keeps_the_rest() {
-        let mut story = Story::new("walk me through this");
-        arrived(&mut story, TOUR);
-        story.follow_up("what's First about?".into());
-        arrived(&mut story, "<answer>\nSetup.\n</answer>\n");
-        assert_eq!(texts(&story), ["First.", "Setup.", "Second.", "Third."]);
-    }
-
-    #[test]
-    fn an_edit_asked_mid_walkthrough_comes_next_and_the_walkthrough_goes_on() {
-        let mut story = Story::new("walk me through this");
-        arrived(&mut story, TOUR);
-        story.follow_up("implement it".into());
-        arrived(&mut story, "<step>\n<old>\n    pass\n</old>\n<new>\n    return 1\n</new>\n</step>\n");
-        assert_eq!(texts(&story), ["First.", "    return 1", "Second.", "Third."]);
-    }
-
-    #[test]
-    fn a_revised_plan_can_change_steps_after_a_question() {
+    fn items_are_asked_for_ahead_assuming_each_is_accepted() {
         let mut story = Story::new("implement it");
-        arrived(&mut story, TWO_STEPS);
-        story.decide(Verdict::Accepted);
-        story.settle();
-        story.follow_up("actually keep it untyped".into());
-        arrived(&mut story, "<answer>\nOK, no types.\n</answer>\n<rest>\n</rest>\n");
-        assert_eq!(texts(&story), ["    return a + b", "OK, no types."], "the typing step is dropped");
-        assert_eq!(story.summary(), (1, 1));
+        assert!(story.prefetch().is_none(), "nothing to build on yet");
+        arrived(&mut story, FIX);
+        let first = story.prefetch().expect("the next item, ahead");
+        assert_eq!(first.after, None);
+        assert!(first.followups[0].decided[0].starts_with("accepted: an edit"), "as if the edit were accepted");
+        assert!(story.prefetch().is_none(), "one at a time: the next builds on this one");
+        story.ahead_text(first.id, HINTS);
+        story.ahead_finished(first.id, None);
+        let second = story.prefetch().expect("and the one after");
+        assert_eq!((second.after, second.followups.len(), second.accepted.len()), (Some(first.id), 2, 2));
+        story.accept();
+        assert_eq!(story.settle(), Settled::At(ItemId(1)), "accepting brings the next item at once");
+        assert_eq!(story.take_adopted(), Some(first.id));
+        assert!(story.wants(second.id), "what was asked after it is still wanted");
+        story.ahead_text(second.id, NOTE);
+        story.follow_up("no hints".into());
+        assert!(story.is_writing(), "a redirect: the next is asked for anew");
+        assert!(!story.wants(second.id), "and what was asked ahead is dropped");
     }
 
     #[test]
-    fn errors_wait_and_memory_is_picked_up() {
-        let mut story = Story::new("x");
-        story.failed("offline".into());
-        assert_eq!(story.settle(), Settled::Waiting, "an error stays on screen");
-        let mut story = Story::answered("docs", "It adds.");
-        assert_eq!(story.settle(), Settled::At(plan(0)));
-        story.follow_up("remember that I like doctests".into());
-        arrived(&mut story, "<answer>\nNoted.\n</answer>\n<memory>\nLikes doctests.\n</memory>\n");
-        assert_eq!(story.memory_update().as_deref(), Some("Likes doctests."));
-        assert_eq!(story.outcome(), "answered");
-        assert_eq!(story.recap(), "It adds. / Noted.");
+    fn an_item_asked_ahead_can_still_be_streaming_when_it_is_needed() {
         let mut story = Story::new("implement it");
-        arrived(&mut story, TWO_STEPS);
-        story.decide(Verdict::Accepted);
-        assert_eq!(story.recap(), "proposed 2 change(s) in the file asked about, 1 applied");
+        arrived(&mut story, FIX);
+        let next = story.prefetch().unwrap();
+        story.ahead_text(next.id, &HINTS[..HINTS.len() - 12]);
+        story.accept();
+        assert_eq!(story.settle(), Settled::At(ItemId(1)), "it shows as it streams");
+        story.ahead_text(next.id, &HINTS[HINTS.len() - 12..]);
+        story.ahead_finished(next.id, None);
+        assert!(!story.is_writing());
+        assert!(matches!(story.current_item(), Some(Item::Step(s)) if s.complete));
+    }
+
+    #[test]
+    fn done_may_update_the_notes() {
+        let mut story = Story::new("implement it");
+        arrived(&mut story, "<done>\n<memory>\nPrefers tabs.\n</memory>\n</done>\n");
+        assert_eq!(story.memory_update().as_deref(), Some("Prefers tabs."));
     }
 }

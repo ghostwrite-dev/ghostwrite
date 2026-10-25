@@ -5,18 +5,20 @@
 //! file operations (a change); nothing changes until you accept a step. The
 //! [`Story`] is that exchange as you review it, follow-ups included.
 //!
-//! - [`protocol`]: the reply format, parsed as it streams, and placing steps.
+//! - [`protocol`]: the reply format, parsed as it streams.
 //! - [`context`]: what Claude is told: the file, the project, recent
 //!   interactions, and its own notes from earlier sessions.
 //! - [`backend`]: the Messages API or Claude Code, streaming.
 //! - [`tools`]: read-only project tools for the API backend.
 //! - [`story`]: the review state machine.
+//! - [`lines`]: files shown with numbered lines, and finding the lines an item quotes.
 //! - [`placement`]: which file and lines an item applies to, and the edit a step makes.
 //! - [`layout`]: where each item shows in the code.
 
 pub mod backend;
 pub mod context;
 pub mod layout;
+pub mod lines;
 pub mod placement;
 pub mod protocol;
 pub mod story;
@@ -25,7 +27,7 @@ pub mod tools;
 pub use backend::Backend;
 pub use context::{Interaction, Request, Role, Surroundings};
 pub use layout::Layout;
-pub use story::{FollowUp, Item, ItemId, Part, Settled, Story, Verdict};
+pub use story::{FollowUp, Item, ItemId, Settled, Story, Verdict};
 
 /// Settings the app reads from its config and hands over at launch.
 pub struct Settings {

@@ -1,13 +1,13 @@
 //! The project on disk: what's in it ([`files`]), changing it ([`fs`]),
-//! running commands in it ([`shell`]) and touring their output ([`tour`]),
+//! running commands in it ([`shell`]) and the places their output points at ([`stops`]),
 //! the file tree ([`tree`]), noticing changes made by other programs
 //! ([`watch`]), and what Ghostwrite remembers between launches ([`store`]).
 
 pub mod files;
 pub mod fs;
 pub mod shell;
+pub mod stops;
 pub mod store;
-pub mod tour;
 pub mod tree;
 pub mod watch;
 

@@ -6,7 +6,28 @@ use gpui::{App, KeyBinding, Menu, MenuItem, actions};
 
 actions!(
     ghostwrite,
-    [Quit, Open, OpenFolder, ShowProjects, Save, SaveAs, CloseTab, NewTab, NextTab, PrevTab, ToggleTree, Undo, Redo, Copy, Cut, Paste, SelectAll,]
+    [
+        Quit,
+        Open,
+        OpenFolder,
+        ShowProjects,
+        Save,
+        SaveAs,
+        CloseTab,
+        NewTab,
+        NextTab,
+        PrevTab,
+        ToggleTree,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
+        Undo,
+        Redo,
+        Copy,
+        Cut,
+        Paste,
+        SelectAll,
+    ]
 );
 
 pub fn install(cx: &mut App) {
@@ -14,6 +35,10 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-o", Open, Some("Editor")),
         KeyBinding::new("cmd-shift-o", OpenFolder, None),
+        KeyBinding::new("cmd-=", ZoomIn, None),
+        KeyBinding::new("cmd-+", ZoomIn, None),
+        KeyBinding::new("cmd--", ZoomOut, None),
+        KeyBinding::new("cmd-0", ResetZoom, None),
         KeyBinding::new("cmd-s", Save, Some("Editor")),
         KeyBinding::new("cmd-shift-s", SaveAs, Some("Editor")),
         KeyBinding::new("cmd-w", CloseTab, Some("Editor")),
@@ -27,6 +52,9 @@ pub fn install(cx: &mut App) {
     ]);
     crate::ui::text_field::bind_keys(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &ZoomIn, cx| crate::theme::zoom(1, cx));
+    cx.on_action(|_: &ZoomOut, cx| crate::theme::zoom(-1, cx));
+    cx.on_action(|_: &ResetZoom, cx| crate::theme::zoom(0, cx));
     cx.set_menus(vec![
         Menu { name: "Ghostwrite".into(), items: vec![MenuItem::action("Quit Ghostwrite", Quit)] },
         Menu {
@@ -59,6 +87,10 @@ pub fn install(cx: &mut App) {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Toggle File Tree", ToggleTree),
+                MenuItem::separator(),
+                MenuItem::action("Zoom In", ZoomIn),
+                MenuItem::action("Zoom Out", ZoomOut),
+                MenuItem::action("Actual Size", ResetZoom),
                 MenuItem::separator(),
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Previous Tab", PrevTab),

@@ -50,13 +50,6 @@ impl Document {
         self.client.notify("textDocument/didSave", json!({ "textDocument": { "uri": self.uri } }));
     }
 
-    /// The file was renamed: reopen it under its new name.
-    pub fn moved(&mut self, path: &Path, text: &str) {
-        self.close();
-        self.uri = uri(path);
-        self.did_open(text);
-    }
-
     /// Ask about `offset` in `text` (`textDocument/hover`, `…/definition`, `…/completion`).
     pub fn ask(&self, method: &str, text: &str, offset: usize) -> Answer {
         self.client.request(method, json!({ "textDocument": { "uri": self.uri }, "position": position(text, offset) }))

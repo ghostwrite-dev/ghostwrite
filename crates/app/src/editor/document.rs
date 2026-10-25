@@ -5,12 +5,20 @@
 use std::path::{Path, PathBuf};
 
 use ghostwrite_core::Buffer;
+use ghostwrite_core::Language;
 use ghostwrite_core::indent::IndentUnit;
-use ghostwrite_core::syntax::{Language, Span};
+use ghostwrite_core::syntax::Span;
 use ghostwrite_lsp::Diagnostic;
 use gpui::SharedString;
 
 pub type DocId = usize;
+
+/// `path` opened on its language's server, if one is installed.
+pub fn server_for(servers: &mut ghostwrite_lsp::Registry, path: &Path, text: &str) -> Option<ghostwrite_lsp::Document> {
+    let language = Language::for_path(path)?;
+    let client = servers.start(language.servers)?;
+    Some(ghostwrite_lsp::Document::open(client, language.id(), path, text))
+}
 
 pub struct Document {
     pub id: DocId,
@@ -92,27 +100,26 @@ impl Document {
         }
     }
 
-    /// Write to `path` (a new path renames the document).
-    pub fn save(&mut self, path: PathBuf) -> std::io::Result<()> {
-        std::fs::write(&path, self.buffer.text())?;
-        if self.path.as_ref() != Some(&path) {
-            self.moved(path);
-        }
+    /// Write to `path`. Somewhere new is a copy until [`Document::moved`] there.
+    pub fn save(&mut self, path: &Path) -> std::io::Result<()> {
+        std::fs::write(path, self.buffer.text())?;
         self.dirty = false;
-        if let Some(lsp) = &self.lsp {
+        if let Some(lsp) = self.lsp.as_ref().filter(|_| self.path.as_deref() == Some(path)) {
             // rust-analyzer and friends check the project on save.
             lsp.saved();
         }
         Ok(())
     }
 
-    /// The file moved on disk.
-    pub fn moved(&mut self, path: PathBuf) {
+    /// The file moved on disk: it may be another language now, with
+    /// another server (or none).
+    pub fn moved(&mut self, path: PathBuf, servers: &mut ghostwrite_lsp::Registry) {
         self.language = Language::for_path(&path);
         self.highlights.0 = u64::MAX;
-        if let Some(lsp) = &mut self.lsp {
-            lsp.moved(&path, self.buffer.text());
-        }
+        // Closes it on the old server first.
+        self.lsp = None;
+        self.diagnostics.clear();
+        self.lsp = server_for(servers, &path, self.buffer.text());
         self.path = Some(path);
     }
 

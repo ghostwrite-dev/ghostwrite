@@ -2,22 +2,22 @@
 //!
 //! The model is the [`Project`]: the open files ([`Tabs`] of [`Document`]s
 //! and their views), the file tree, the language servers. Each feature is a
-//! type that works on it: a Claude [`story`], a [`tour`] of command output,
-//! diagnostics or search matches, and the completion menu ([`language`]).
+//! type that works on it: a [`story`] (asked of the model, or one of the
+//! editor's [`stops`]: command output, diagnostics, search matches), and the
+//! completion menu ([`language`]).
 //! [`Editor`] is the gpui view around all of that: it routes keys, owns focus
 //! and prompts, runs background work, and decides when to switch tabs.
 //!
 //! Every key goes through [`Editor::key_down`] as a modal [`Key`]: the
 //! completion menu gets first say in insert mode, then the mode decides.
 //! Normal, select and insert mode edit the active document; tree mode
-//! drives the file tree; AI mode reviews a story and tour mode a tour, with
-//! the review keys. Text typed in insert mode arrives through the
+//! drives the file tree; AI mode reviews a story, with the review keys. Text typed in insert mode arrives through the
 //! platform's input handler.
 //!
 //! - [`project`], [`tabs`], [`document`]: the model
 //! - [`commands`]: `:` commands, in the [`prompt`]
 //! - [`input`]: text from the platform
-//! - [`story`] (drawn by [`story_view`]), [`shell`], [`tour`], [`language`], [`tree`]: features
+//! - [`story`] (drawn by [`story_view`]), [`stops`], [`shell`], [`language`], [`tree`]: features
 //! - [`view`] and [`element`]: drawing
 
 mod commands;
@@ -28,10 +28,10 @@ mod language;
 mod project;
 mod prompt;
 mod shell;
+mod stops;
 mod story;
 mod story_view;
 mod tabs;
-mod tour;
 mod tree;
 mod view;
 
@@ -68,13 +68,13 @@ pub enum EditorEvent {
 pub struct Options {
     /// Start language servers for the files opened.
     pub language_servers: bool,
-    /// How `space i` reaches Claude, if it can.
-    pub backend: Option<Backend>,
+    /// What `a` asks, the one in use first: `:model` switches between them.
+    pub backends: Vec<Backend>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { language_servers: true, backend: Backend::from_env() }
+        Self { language_servers: true, backends: Backend::available() }
     }
 }
 
@@ -99,9 +99,9 @@ pub struct Editor {
     history: Vec<String>,
     history_at: Option<usize>,
     cheatsheet: bool,
-    backend: Option<Arc<Backend>>,
+    /// What `a` asks, the one in use first.
+    backends: Vec<Arc<Backend>>,
     story: Option<story::StoryState>,
-    tour: Option<tour::TourState>,
     /// The last `:sh` command, running or done.
     shell: Option<shell::Shell>,
     last_shell: Option<String>,
@@ -206,9 +206,8 @@ impl Editor {
             history: store::command_history(),
             history_at: None,
             cheatsheet: false,
-            backend: options.backend.map(Arc::new),
+            backends: options.backends.into_iter().map(Arc::new).collect(),
             story: None,
-            tour: None,
             shell: None,
             last_shell: None,
             completion: None,
@@ -403,12 +402,10 @@ impl Editor {
         handled
     }
 
-    /// A review key, for what the mode is reviewing.
+    /// A review key, for the story under review.
     fn review(&mut self, key: Review, window: &mut Window, cx: &mut Context<Self>) {
-        match self.modal.mode {
-            Mode::Ai => self.story_review(key, window, cx),
-            Mode::Tour => self.tour_review(key, window, cx),
-            _ => {}
+        if self.modal.mode == Mode::Ai {
+            self.story_review(key, window, cx);
         }
     }
 
@@ -469,7 +466,7 @@ impl Editor {
             Effect::Cheatsheet => self.cheatsheet = true,
             Effect::GotoDefinition => self.goto_definition(window, cx),
             Effect::Hover => self.show_hover(window, cx),
-            Effect::Diagnostics => self.diagnostics_tour(cx),
+            Effect::Diagnostics => self.diagnostics_story(cx),
         }
     }
 }

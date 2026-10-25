@@ -1,12 +1,13 @@
 //! The editing model, with no UI: a [`Buffer`] of text with undo history,
 //! helix-style [`Range`] selections, the motions and text objects that move
-//! them, the [`modal`] key handling that drives it all, and [`syntax`]
-//! highlighting.
+//! them, the [`modal`] key handling that drives it all, the [`language`]s it
+//! knows, and [`syntax`] highlighting.
 //!
 //! Every offset is a byte offset into the text, always on a char boundary.
 
 pub mod buffer;
 pub mod indent;
+pub mod language;
 pub mod modal;
 pub mod movement;
 pub mod selection;
@@ -14,6 +15,7 @@ pub mod syntax;
 pub mod textobject;
 
 pub use buffer::Buffer;
+pub use language::Language;
 pub use modal::{Effect, Key, MenuKey, Modal, Mode, Outcome, Registers, Review, Target, TreeCommand};
 pub use selection::Range;
 

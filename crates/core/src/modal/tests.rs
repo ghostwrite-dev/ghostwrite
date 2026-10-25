@@ -139,16 +139,13 @@ fn tree_mode_turns_keys_into_tree_commands() {
 fn review_modes_take_review_keys_and_go_back_where_they_came_from() {
     let mut s = Session::new("one two\n");
     s.keys("v w");
-    s.modal.enter(Mode::Tour);
     s.modal.enter(Mode::Ai);
-    assert_eq!(s.modal.entered_from(), Some(Mode::Tour));
+    assert_eq!(s.modal.entered_from(), Some(Mode::Select));
     let indent = IndentUnit::default();
     let mut t = Target { buffer: &mut s.buffer, selection: &mut s.selection, indent: &indent, page_rows: 20 };
     assert_eq!(s.modal.key(Key::Tab, &mut s.regs, &mut t), Outcome::Review(Review::Next));
-    assert_eq!(s.modal.key(Key::BackTab, &mut s.regs, &mut t), Outcome::Review(Review::Back));
+    assert_ne!(s.modal.key(Key::BackTab, &mut s.regs, &mut t), Outcome::Review(Review::Next), "a story only goes forward");
     s.modal.leave(Mode::Ai);
-    assert_eq!(s.modal.mode, Mode::Tour);
-    s.modal.leave(Mode::Tour);
     assert_eq!(s.modal.mode, Mode::Select, "back to where it started");
     assert_eq!(s.modal.menu_key(Key::Ctrl('n')), Some(MenuKey::Next));
 }
@@ -160,22 +157,16 @@ fn reviewing_moves_but_never_edits() {
     s.keys("w j d c x p u ~ > r z m s ( i o");
     assert_eq!(s.text(), "one two\nthree\n", "nothing changes");
     assert_eq!(s.modal.mode, Mode::Ai, "and the mode stays");
-    s.keys("space i v");
+    s.keys("a v");
     assert_eq!(s.modal.mode, Mode::Ai, "nothing new starts mid-review");
-    s.modal.leave(Mode::Ai);
-    s.modal.enter(Mode::Tour);
-    let indent = IndentUnit::default();
-    let mut t = Target { buffer: &mut s.buffer, selection: &mut s.selection, indent: &indent, page_rows: 20 };
-    s.modal.key(Key::Char(' '), &mut s.regs, &mut t);
-    assert_eq!(s.modal.key(Key::Char('i'), &mut s.regs, &mut t), Outcome::Effect(Effect::Assist), "a tour can be asked about");
 }
 
 #[test]
 fn leaving_a_mode_below_the_current_one_drops_it() {
     let mut m = Modal::default();
-    m.enter(Mode::Tour);
+    m.enter(Mode::Tree);
     m.enter(Mode::Ai);
-    m.leave(Mode::Tour);
+    m.leave(Mode::Tree);
     assert_eq!(m.mode, Mode::Ai);
     m.leave(Mode::Ai);
     assert_eq!(m.mode, Mode::Normal);
@@ -195,7 +186,6 @@ fn effects_come_back() {
     let mut s = Session::new("abc\n");
     let indent = IndentUnit::default();
     let mut t = Target { buffer: &mut s.buffer, selection: &mut s.selection, indent: &indent, page_rows: 20 };
-    assert_eq!(s.modal.key(Key::Char(' '), &mut s.regs, &mut t), Outcome::Handled);
-    assert_eq!(s.modal.key(Key::Char('i'), &mut s.regs, &mut t), Outcome::Effect(Effect::Assist));
+    assert_eq!(s.modal.key(Key::Char('a'), &mut s.regs, &mut t), Outcome::Effect(Effect::Assist));
     assert_eq!(s.modal.key(Key::Char(':'), &mut s.regs, &mut t), Outcome::Effect(Effect::CommandLine));
 }

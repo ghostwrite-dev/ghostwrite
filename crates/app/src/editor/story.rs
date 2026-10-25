@@ -1,9 +1,10 @@
-//! `space i`: ask Claude about the lines at the cursor (or the selection),
-//! then review its reply where it applies, across the project's files. Tab
-//! accepts (or reads on), Backspace skips, Enter asks or redirects, Esc
-//! stops. A file to create, remove or rename is shown in the file tree.
-//! A step that doesn't apply to its file as it is goes back to Claude to
-//! rewrite before it's shown, and so does a reply with nothing to review.
+//! `a`: ask Claude about the lines at the cursor (or the selection),
+//! then review its reply one item at a time where it applies, across the
+//! project's files. Tab accepts (or reads on); there's no skipping: Enter
+//! says what you want instead, and the next item follows it. Esc stops. A
+//! file to create is shown in the file tree. An item that can't be found or
+//! applied goes back to the model to rewrite before it's shown, and so does
+//! a reply that breaks the format.
 //!
 //! [`StoryState`] is the feature: a [`Story`] (the bookkeeping) laid out in
 //! the [`Project`] with a [`Layout`]. It applies what's accepted and says
@@ -11,6 +12,7 @@
 //! editor runs the request and switches tabs. When a story ends it's logged
 //! for the next ones, and Claude's rewritten notes (if any) are kept.
 
+use std::collections::HashMap;
 use std::ops::Range as Lines;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,9 +20,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt as _;
 use ghostwrite_ai::backend::Listener;
-use ghostwrite_ai::placement::{self, Asked, Place, Placer};
-use ghostwrite_ai::protocol::Step;
-use ghostwrite_ai::{Interaction, Item, ItemId, Layout, Request, Settled, Story, Surroundings, Verdict};
+use ghostwrite_ai::context::Shown;
+use ghostwrite_ai::placement::{self, Asked, Assumed, Files as _, Overlay, Place, Placer};
+use ghostwrite_ai::protocol::{Note, Step};
+use ghostwrite_ai::{Interaction, Item, ItemId, Layout, Request, Settled, Story, Surroundings, Verdict, lines};
 use ghostwrite_core::{Mode, Range, Review};
 use ghostwrite_project::tree::Proposal;
 use ghostwrite_project::{fs, store};
@@ -51,6 +54,16 @@ pub(super) struct StoryState {
     placer: Placer,
     cancel: Arc<AtomicBool>,
     _task: Option<Task<()>>,
+    /// The request sent ahead of time that's on its way, and how to stop it.
+    prefetching: Option<(u64, Arc<AtomicBool>)>,
+    _prefetch_task: Option<Task<()>>,
+    /// The sessions requests sent ahead are in: the next one continues from there, and
+    /// the story's session becomes one once its reply is needed.
+    ahead_sessions: HashMap<u64, String>,
+    /// The items each request sent ahead assumed accepted, to check its reply against.
+    ahead_accepted: HashMap<u64, Vec<Item>>,
+    /// A reply sent ahead was needed before its session was known.
+    session_from: Option<u64>,
 }
 
 /// Where an item is in the code: its tab (if its file is open), its file
@@ -68,6 +81,14 @@ pub(super) enum Waiting {
     Here,
     /// Later items are here.
     Later,
+}
+
+/// Why an item can't be shown as it is.
+enum Problem {
+    /// Its file isn't in the project: the path, and what to say about it.
+    NoFile(String),
+    /// Its `<at>` lines aren't in its file.
+    NotFound,
 }
 
 /// What to show after the story moved on.
@@ -94,6 +115,21 @@ enum Message {
 }
 
 struct Forward(futures::channel::mpsc::UnboundedSender<Message>);
+
+/// A request sent ahead of time: what it reports goes to the story's replies asked ahead.
+struct Ahead(futures::channel::mpsc::UnboundedSender<Message>);
+
+impl Listener for Ahead {
+    fn text(&mut self, chunk: &str) {
+        self.0.unbounded_send(Message::Text(chunk.to_string())).ok();
+    }
+
+    fn looking(&mut self, _what: String) {}
+
+    fn session(&mut self, id: String) {
+        self.0.unbounded_send(Message::Session(id)).ok();
+    }
+}
 
 impl Listener for Forward {
     fn text(&mut self, chunk: &str) {
@@ -124,6 +160,11 @@ impl StoryState {
             placer: Placer::new(root),
             cancel: Arc::default(),
             _task: None,
+            prefetching: None,
+            _prefetch_task: None,
+            ahead_sessions: HashMap::new(),
+            ahead_accepted: HashMap::new(),
+            session_from: None,
         }
     }
 
@@ -134,19 +175,61 @@ impl StoryState {
 
     /// The request for the story so far, with the last `:sh` command's output.
     pub(super) fn request(&self, project: &Project, command: Option<String>) -> Option<Request> {
+        self.request_ahead(project, command, &[])
+    }
+
+    /// The request as it would be with `accepted` applied too, as a request
+    /// sent ahead assumes: the files it shows are as they'd be then.
+    pub(super) fn request_ahead(&self, project: &Project, command: Option<String>, accepted: &[Item]) -> Option<Request> {
         let story = self.story.as_ref()?;
         let doc = &project.tabs.by_id(self.doc)?.doc;
+        let assumed = self.assume(project, accepted)?;
         Some(Request {
             path: doc.path.clone(),
             language: doc.language_name(),
-            text: doc.text().to_string(),
             range: doc.buffer.lines_range(self.lines.clone()),
+            others: self.others(project, &assumed),
+            text: assumed.asked,
             instruction: story.instruction.clone(),
             followups: story.followups().to_vec(),
             root: Some(project.root.clone()),
             surroundings: Surroundings { command, ..self.surroundings(project) },
             session: self.session.clone(),
+            fork: false,
         })
+    }
+
+    /// The files as they'd be with `accepted` applied.
+    fn assume(&self, project: &Project, accepted: &[Item]) -> Option<Assumed> {
+        let asked = project.tabs.by_id(self.doc)?;
+        let asked = Asked { path: asked.doc.path.as_deref(), text: asked.doc.text(), lines: self.lines.clone() };
+        Some(self.placer.assume(&asked, &project.files(), accepted))
+    }
+
+    /// The files the story is in besides the one asked about, as `assumed`
+    /// has them: where its items are, and where the steps assumed accepted
+    /// went. Each is shown around the last place the story was at in it.
+    fn others(&self, project: &Project, assumed: &Assumed) -> Vec<Shown> {
+        let mut spots: Vec<(PathBuf, Lines<usize>)> = vec![];
+        if let Some(layout) = self.layout(project) {
+            for (id, _) in layout.story.items() {
+                if let Some(Place { path: Some(path), near }) = layout.lines(id).or_else(|| layout.spot(id)) {
+                    spots.push((path, near));
+                }
+            }
+        }
+        spots.extend(assumed.changed_at.iter().cloned());
+        let base = project.files();
+        let files = Overlay { files: &base, changed: &assumed.others };
+        let mut shown: Vec<Shown> = vec![];
+        for (path, focus) in spots {
+            let path_name = project.display(&path);
+            match shown.iter_mut().find(|s| s.path == path_name) {
+                Some(seen) => seen.focus = focus,
+                None => shown.extend(files.text(&path).map(|text| Shown { path: path_name, text, focus })),
+            }
+        }
+        shown
     }
 
     /// What's around the request in the editor: the open files, and
@@ -187,6 +270,56 @@ impl StoryState {
         }
         if !story.is_writing() {
             store::save_transcript(&story.transcript());
+        }
+    }
+
+    /// What a request sent ahead (`id`) reports.
+    fn receive_ahead(&mut self, id: u64, message: Message) {
+        let Some(story) = self.story.as_mut() else { return };
+        match message {
+            Message::Session(session) => {
+                if self.session_from == Some(id) {
+                    self.session = Some(session.clone());
+                }
+                self.ahead_sessions.insert(id, session);
+            }
+            Message::Text(chunk) => story.ahead_text(id, &chunk),
+            Message::Looking(_) => {}
+            Message::Done => story.ahead_finished(id, None),
+            Message::Failed(e) => story.ahead_finished(id, Some(e)),
+        }
+        if matches!(self.prefetching, Some((on_way, _)) if on_way == id) && !story.wants(id) {
+            self.prefetching = None;
+        }
+    }
+
+    /// A reply sent ahead became the next one: its session is the story's now.
+    fn take_adopted(&mut self) {
+        let Some(id) = self.story.as_mut().and_then(Story::take_adopted) else { return };
+        match self.ahead_sessions.get(&id) {
+            Some(session) => self.session = Some(session.clone()),
+            None => self.session_from = Some(id),
+        }
+    }
+
+    /// Place a reply asked ahead (`id`) once, in the files as it assumed them,
+    /// and keep where as its anchor.
+    fn anchor_ahead(&mut self, project: &Project, id: u64) {
+        let Some(item @ Item::Step(_)) = self.story.as_ref().and_then(|s| s.ahead_item(id)) else { return };
+        let Some(asked) = project.tabs.by_id(self.doc) else { return };
+        let accepted = self.ahead_accepted.get(&id).map(Vec::as_slice).unwrap_or_default();
+        let Some(assumed) = self.assume(project, accepted) else { return };
+        let base = project.files();
+        let files = Overlay { files: &base, changed: &assumed.others };
+        let place = self.placer.place(&item, &Asked { path: asked.doc.path.as_deref(), text: &assumed.asked, lines: self.lines.clone() }, &files);
+        let text = match &place.path {
+            None => Some(assumed.asked.clone()),
+            Some(path) => files.text(path),
+        };
+        if let Some(found) = text.and_then(|text| lines::find(&text, item.quoted(), place.near, item.line().is_some()))
+            && let Some(story) = self.story.as_mut()
+        {
+            story.anchor_ahead(id, found.lines);
         }
     }
 
@@ -249,7 +382,7 @@ impl StoryState {
         let mut files: Vec<(PathBuf, Waiting)> = self
             .story
             .iter()
-            .flat_map(|story| story.items().into_iter().filter(|(id, item)| story.verdict(*id) == Verdict::Pending && !item.is_file_op()))
+            .flat_map(|story| story.items().into_iter().filter(|(id, _)| story.verdict(*id) == Verdict::Pending))
             .filter_map(|(id, _)| Some((file_of(self.locate(project, id)?)?, if Some(id) == current { Waiting::Here } else { Waiting::Later })))
             .collect();
         // Nothing to review yet: Claude is answering where it was asked.
@@ -262,18 +395,27 @@ impl StoryState {
         files
     }
 
-    /// What the tree should show for item `id`: a file operation, the one
-    /// an answer was asked about, or a step for a file not made yet.
+    /// What the tree should show for item `id`: a new file, made by an edit.
     pub(super) fn proposal(&self, project: &Project, id: ItemId, item: &Item) -> Option<Proposal> {
-        let story = self.story.as_ref()?;
-        let about = story.asked_about(id).and_then(|a| story.item(a)).filter(Item::is_file_op);
-        let root = &project.root;
-        match about.as_ref().unwrap_or(item) {
-            Item::Create(rel) => Some(Proposal::Create(root.join(rel))),
-            Item::Remove(rel) => Some(Proposal::Remove(root.join(rel.trim_end_matches('/')))),
-            Item::Rename { from, to } => Some(Proposal::Rename(root.join(from.trim_end_matches('/')), to.clone())),
+        match item {
             Item::Step(_) => self.locate(project, id)?.path.filter(|p| !p.exists()).map(Proposal::Create),
             Item::Note(_) => None,
+        }
+    }
+
+    /// What's wrong with item `id`, if anything: a file that isn't there (or,
+    /// for a new one, already is), or `<at>` lines that aren't in its file.
+    fn problem(&self, project: &Project, id: ItemId, item: &Item) -> Option<Problem> {
+        let located = self.locate(project, id)?;
+        let exists = located.path.as_ref().is_none_or(|p| p.exists());
+        let named = || located.path.as_deref().map_or("the file".into(), |p| project.display(p));
+        match item {
+            Item::Step(step) if step.create && exists => Some(Problem::NoFile(format!("{} (it exists already, so edit it with <file>)", named()))),
+            Item::Step(step) if !step.create && !exists => Some(Problem::NoFile(named())),
+            Item::Step(step) if step.complete && !self.placeable(project, id, step) => Some(Problem::NotFound),
+            Item::Note(_) if !exists => Some(Problem::NoFile(named())),
+            Item::Note(note) if !note.at.is_empty() && self.lines_of(project, id).is_none() => Some(Problem::NotFound),
+            _ => None,
         }
     }
 
@@ -291,86 +433,62 @@ impl StoryState {
         }
     }
 
-    /// Step `id` can't be applied: ask Claude to rewrite it (and what follows).
-    fn revise_step(&mut self, project: &Project, id: ItemId) {
-        let located = self.locate(project, id);
-        let path = located.as_ref().and_then(|l| l.path.clone()).or_else(|| project.tabs.by_id(self.doc)?.doc.path.clone());
-        let file = path.as_deref().map_or("the file".into(), |p| project.display(p));
-        // The file asked about is in the request anyway; another is shown as it is.
-        let other =
-            located.and_then(|l| l.path).map(|p| project.tabs.text_of(&p).map(str::to_string).or_else(|| std::fs::read_to_string(&p).ok()).unwrap_or_default());
+    /// Item `id`'s lines aren't in its file: ask Claude to rewrite it, shown
+    /// the file around where they should be.
+    fn revise_lines(&mut self, project: &Project, id: ItemId, item: &Item) {
+        let Some(located) = self.locate(project, id) else { return };
+        let asked = project.tabs.by_id(self.doc).map(|t| &t.doc);
+        let (file, text) = match &located.path {
+            Some(path) => (project.display(path), project.files().text(path)),
+            None => (asked.and_then(|d| d.path.as_deref()).map_or("the file".into(), |p| project.display(p)), asked.map(|d| d.text().to_string())),
+        };
         if let Some(story) = self.story.as_mut() {
-            story.step_misplaced(&file, other.as_deref());
+            story.misplaced(&file, &text.unwrap_or_default(), item.quoted(), located.near);
         }
         self.shown = None;
     }
 
-    /// Accept (carrying it out) or skip the current item.
-    fn decide(&mut self, project: &mut Project, verdict: Verdict) -> Result<(), String> {
+    /// Accept the current item, carrying it out.
+    fn accept(&mut self, project: &mut Project) -> Result<(), String> {
         let Some((id, item)) = self.story.as_ref().and_then(|s| Some((s.current()?, s.current_item()?))) else { return Ok(()) };
-        if verdict == Verdict::Accepted {
-            self.apply(project, id, &item)?;
-        }
+        self.apply(project, id, &item)?;
         if let Some(story) = self.story.as_mut() {
-            story.decide(verdict);
+            story.accept();
         }
         Ok(())
     }
 
     fn apply(&self, project: &mut Project, id: ItemId, item: &Item) -> Result<(), String> {
-        let path = |rel: &str| project.root.join(rel.trim_end_matches('/'));
         match item {
-            Item::Note(_) => {}
-            Item::Create(rel) => {
-                let target = path(rel);
-                if !target.exists() {
-                    fs::create(&project.root, rel)?;
-                }
-                project.tree.refresh();
-                if target.is_file() {
-                    project.open(&target);
-                }
-            }
-            Item::Rename { from, to } => {
-                let (from, to) = (path(from), path(to));
-                if !to.starts_with(&project.root) {
-                    return Err(format!("can't move {} outside the project", from.display()));
-                }
-                fs::move_to(&from, &to)?;
-                project.path_moved(&from, &to);
-            }
-            Item::Remove(rel) => {
-                let target = path(rel);
-                if target.exists() {
-                    fs::trash(&target)?;
-                    project.path_deleted(&target);
-                }
-            }
-            Item::Step(step) => self.apply_step(project, id, step)?,
+            Item::Note(_) => Ok(()),
+            Item::Step(step) => self.apply_step(project, id, step),
         }
-        Ok(())
     }
 
     fn apply_step(&self, project: &mut Project, id: ItemId, step: &Step) -> Result<(), String> {
         if !step.complete {
             return Err("that step is still being written".into());
         }
-        // A step for a file that isn't there yet (Claude didn't propose creating it): make it.
-        if let Some(path) = self.locate(project, id).and_then(|l| l.path).filter(|p| !p.exists() && step.old.is_empty()) {
+        // A new file: make it, then write its first lines.
+        if let Some(path) = self.locate(project, id).and_then(|l| l.path).filter(|p| step.create && !p.exists()) {
             let rel = path.strip_prefix(&project.root).map_err(|_| format!("{} is outside the project", path.display()))?;
             fs::create(&project.root, &rel.to_string_lossy())?;
             project.tree.refresh();
         }
-        let missing = "that step's file doesn't exist; backspace skips it";
+        let missing = "that edit's file doesn't exist; ⏎ to say what you want instead";
         let located = self.open(project, id).ok_or(missing)?;
         let tab = located.tab.and_then(|ix| project.tabs.get_mut(ix)).ok_or(missing)?;
-        let edit = placement::edit(tab.doc.text(), step, located.near).ok_or("couldn't find where that step goes; backspace skips it")?;
+        let edit = placement::edit(tab.doc.text(), step, located.near).ok_or("couldn't find where that edit goes; ⏎ to say what you want instead")?;
         tab.doc.buffer.begin(tab.view.selection);
         tab.doc.buffer.edit(edit.bytes, &edit.text);
         let end = tab.doc.buffer.line_end(edit.cursor_line);
         tab.select(Range::point(end), Autoscroll::Fit);
         tab.doc.buffer.commit(tab.view.selection);
         tab.sync();
+        // Claude Code reads the disk: write what was accepted so it never works from the old file.
+        if let Some(path) = tab.doc.path.clone() {
+            tab.doc.save(&path).map_err(|e| format!("accepted, but couldn't save: {e}"))?;
+        }
         Ok(())
     }
 
@@ -378,13 +496,29 @@ impl StoryState {
     /// it'll be seen: its lines selected and centered in its file's tab, or
     /// its proposal in the tree.
     fn settle(&mut self, project: &mut Project) -> Show {
+        let show = self.move_on(project);
+        self.take_adopted();
+        show
+    }
+
+    fn move_on(&mut self, project: &mut Project) -> Show {
         let Some(story) = self.story.as_mut() else { return Show::Nothing };
+        // A reply that breaks the format is stopped there and written again.
+        if story.is_writing()
+            && story.can_revise()
+            && let Some(why) = story.format_problem()
+        {
+            story.reply_unusable(Some(&why));
+            return Show::Revise;
+        }
         let id = match story.settle() {
-            // Nothing in the reply to review: Claude writes it again.
+            // Nothing in the reply to review: the model writes it again.
             Settled::Finished if story.is_unusable() && story.can_revise() => {
-                story.reply_unusable();
+                let why = story.format_problem();
+                story.reply_unusable(why.as_deref());
                 return Show::Revise;
             }
+            Settled::Ask => return Show::Revise,
             Settled::Finished => return Show::Finished,
             Settled::Waiting => return Show::Nothing,
             Settled::At(id) => id,
@@ -393,15 +527,22 @@ impl StoryState {
             return Show::Nothing;
         }
         let Some(item) = story.item(id) else { return Show::Nothing };
-        let can_revise = story.can_revise();
-        // Never show a step that can't be applied: Claude rewrites it first.
-        if let Item::Step(step) = &item
-            && step.complete
-            && can_revise
-            && !self.placeable(project, id, step)
-        {
-            self.revise_step(project, id);
-            return Show::Revise;
+        // Never show an item that can't be found or applied: the model writes it again first.
+        if story.can_revise() && !self.docs_note {
+            match self.problem(project, id, &item) {
+                Some(Problem::NoFile(file)) => {
+                    if let Some(story) = self.story.as_mut() {
+                        story.file_missing(&file);
+                    }
+                    self.shown = None;
+                    return Show::Revise;
+                }
+                Some(Problem::NotFound) => {
+                    self.revise_lines(project, id, &item);
+                    return Show::Revise;
+                }
+                None => {}
+            }
         }
         self.shown = Some(id);
         let proposal = self.proposal(project, id, &item);
@@ -441,7 +582,7 @@ impl StoryState {
         if !self.docs_note || !story.followups().is_empty() {
             let path = project.tabs.by_id(self.doc).and_then(|t| t.doc.path.clone());
             let file = path.map_or("untitled".into(), |p| project.display(&p));
-            let said = story.followups().iter().filter(|f| !f.correction).map(|f| f.said.clone()).collect();
+            let said = story.followups().iter().filter(|f| !f.correction && !f.said.is_empty()).map(|f| f.said.clone()).collect();
             Interaction::new(file, story.instruction.clone(), said, story.outcome(), story.recap()).log(&project.root);
         }
     }
@@ -451,15 +592,11 @@ impl Editor {
     /// Open the prompt about the cursor's lines (or the selection's), with
     /// text typed in.
     pub(super) fn open_story(&mut self, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.backend.is_none() {
+        if self.backends.is_empty() {
             self.project.say("asking Claude needs ANTHROPIC_API_KEY or Claude Code (`claude`) installed");
             return;
         }
-        // The story is reviewed in AI mode, and afterwards it's back to where
-        // you were. A tour waits (if it isn't already handing a stop over).
-        if let Some(state) = self.tour.as_mut().filter(|s| !s.tour.paused()) {
-            state.tour.pause();
-        }
+        // The story is reviewed in AI mode, and afterwards it's back to where you were.
         self.leave_insert();
         self.modal.enter(Mode::Ai);
         let from_select = self.modal.entered_from() == Some(Mode::Select);
@@ -480,6 +617,31 @@ impl Editor {
         state.selection = kept;
         self.story = Some(state);
         self.open_prompt(PromptKind::Ask, typed, window, cx);
+    }
+
+    /// A story of `items` the editor gives (replacing any story under
+    /// review), from the file in view: each is shown in turn, and asking about
+    /// one hands over to the model.
+    pub(super) fn open_given(&mut self, instruction: String, items: Vec<Item>, cx: &mut Context<Self>) {
+        let Some(story) = Story::given(instruction, items) else { return };
+        // From a file: the first item's, if none is open.
+        if self.tab().is_none()
+            && let Some(Item::Note(Note { file: Some(file), .. })) = story.current_item()
+            && let Some(ix) = self.project.open(&self.project.root.join(&file))
+        {
+            self.activate(ix, cx);
+        }
+        let Some(tab) = self.tab() else { return };
+        let line = tab.doc.buffer.line_of(tab.cursor());
+        let mut state = StoryState::new(tab.doc.id, line..line + 1, self.project.root.clone());
+        state.story = Some(story);
+        if self.story.is_some() {
+            self.close_story(cx);
+        }
+        self.leave_insert();
+        self.modal.enter(Mode::Ai);
+        self.story = Some(state);
+        self.settle_story(cx);
     }
 
     /// Show `text` as a note under the cursor's line, reviewed like an
@@ -519,7 +681,7 @@ impl Editor {
     fn send_request(&mut self, cx: &mut Context<Self>) {
         // Claude reads the project from disk: let it see what's on screen.
         self.project.write_all();
-        let Some(backend) = self.backend.clone() else { return };
+        let Some(backend) = self.backends.first().cloned() else { return };
         let Some(state) = self.story.as_mut() else { return };
         // The first request says what the last command was; a follow-up, what's been run since.
         let command = self.shell.as_ref().map(|s| s.context());
@@ -575,20 +737,18 @@ impl Editor {
         }
     }
 
-    /// A review key for the story. A story only goes forward: Shift+Tab does nothing.
+    /// A review key for the story, which only goes forward.
     pub(super) fn story_review(&mut self, key: Review, window: &mut Window, cx: &mut Context<Self>) {
         match key {
-            Review::Next => self.decide(Verdict::Accepted, cx),
-            Review::Skip => self.decide(Verdict::Rejected, cx),
+            Review::Next => self.accept(cx),
             Review::Ask => self.open_prompt(PromptKind::Ask, "", window, cx),
             Review::Stop => self.finish_story(cx),
-            Review::Back => {}
         }
     }
 
-    fn decide(&mut self, verdict: Verdict, cx: &mut Context<Self>) {
+    fn accept(&mut self, cx: &mut Context<Self>) {
         let Some(state) = self.story.as_mut() else { return };
-        if let Err(e) = state.decide(&mut self.project, verdict) {
+        if let Err(e) = state.accept(&mut self.project) {
             self.project.say(e);
             return;
         }
@@ -609,7 +769,64 @@ impl Editor {
             Show::Tree => self.tree_pane.shown = true,
             Show::Finished => self.finish_story(cx),
         }
+        self.prefetch(cx);
         cx.notify();
+    }
+
+    /// While an item is reviewed, ask ahead for the next one (and, as each
+    /// arrives, the one after), assuming each is accepted. One that's no
+    /// longer wanted is stopped.
+    fn prefetch(&mut self, cx: &mut Context<Self>) {
+        let Some(backend) = self.backends.first().cloned() else { return };
+        let Some(state) = self.story.as_mut() else { return };
+        let Some(story) = state.story.as_mut() else { return };
+        if let Some((id, cancel)) = &state.prefetching {
+            if story.wants(*id) {
+                return;
+            }
+            cancel.store(true, Ordering::SeqCst);
+            state.prefetching = None;
+        }
+        let Some(ahead) = story.prefetch() else { return };
+        let first = state.first_command.clone().flatten();
+        let Some(mut req) = state.request_ahead(&self.project, first, &ahead.accepted) else { return };
+        req.followups = ahead.followups;
+        req.session = match ahead.after {
+            None => state.session.clone(),
+            Some(before) => state.ahead_sessions.get(&before).cloned(),
+        };
+        req.fork = req.session.is_some();
+        state.ahead_accepted.insert(ahead.id, ahead.accepted);
+        let (id, cancel) = (ahead.id, Arc::new(AtomicBool::new(false)));
+        state.prefetching = Some((id, cancel.clone()));
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        cx.background_spawn(async move {
+            let result = backend.run(&req, &mut Ahead(tx.clone()), &cancel);
+            tx.unbounded_send(result.map_or_else(Message::Failed, |()| Message::Done)).ok();
+        })
+        .detach();
+        state._prefetch_task = Some(cx.spawn(async move |this, cx| {
+            while let Some(message) = rx.next().await {
+                let done = matches!(message, Message::Done | Message::Failed(_));
+                let alive = this
+                    .update(cx, |this, cx| {
+                        let Some(state) = this.story.as_mut() else { return false };
+                        state.receive_ahead(id, message);
+                        if done {
+                            state.anchor_ahead(&this.project, id);
+                        }
+                        if done && matches!(state.prefetching, Some((on_way, _)) if on_way == id) {
+                            state.prefetching = None;
+                        }
+                        this.settle_story(cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if done || !alive {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Close the review, saying what came of it, and remember it.
@@ -623,6 +840,9 @@ impl Editor {
     fn close_story(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.story.take() {
             state.cancel.store(true, Ordering::SeqCst);
+            if let Some((_, cancel)) = &state.prefetching {
+                cancel.store(true, Ordering::SeqCst);
+            }
             // Asked from select mode: the selection comes back with it.
             if let Some(sel) = state.selection
                 && let Some(tab) = self.project.tabs.by_id_mut(state.doc)
@@ -635,8 +855,6 @@ impl Editor {
             self.prompt = None;
         }
         self.project.tree.propose(None);
-        // Asked from a tour: back to its stop.
-        self.resume_tour(cx);
         cx.notify();
     }
 }

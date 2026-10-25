@@ -1,181 +1,314 @@
-//! The reply format: what Claude is asked to write, and parsing it as it
-//! streams. Steps and notes appear as soon as enough of them has arrived to
-//! act on; [`locate`] and [`change`] place a step in the text.
+//! The reply format: what the model is asked to write, and parsing it as it
+//! streams. A story goes one item at a time: every reply is exactly one item
+//! (a note, an edit, or a new file) or `<done>`. Its parts come in a fixed
+//! order, each closed before the next opens, so an item can be checked part by
+//! part as it arrives. Quoted lines may carry the numbers they were shown with
+//! ([`crate::lines`]); those come off here, as where to look.
 
 use std::ops::Range;
 
-pub const SYSTEM: &str = "You are an assistant inside a text editor. The user points at some lines of their \
-file, marked with <cursor> tags, and either asks a question or asks for a change. Decide which it is.
+use crate::lines;
 
-You can read the project with your tools (read, search, list) to understand it: look at what the request \
-needs, briefly, then reply. You can't change files with tools. Every change, in any file, is a step in your \
-reply, which the user reviews and accepts one at a time. Don't narrate what you're doing; reply only in the \
-format below.
+pub const SYSTEM: &str = "You are an assistant inside a text editor. The user points at some lines of a file and asks \
+a question or asks for a change.
 
-If it's a question (explain, why, what, how, is this right, a tour of the code, ...), don't change anything. \
-Answer as a few short notes, each pinned to the lines it talks about, in the order you'd walk someone through \
-the code; the user jumps from note to note, across files:
+Files are shown to you with their lines numbered: each line is its number, │, and its text. The lines the user \
+points at are between <cursor> and </cursor>, which aren't in the file:
 
-<answer>
-<note>
+<contents path=\"src/lib.rs\">
+1│pub fn run() {
+<cursor>
+2│    start();
+</cursor>
+3│}
+</contents>
+
+You can look around the project to understand it, briefly: your tools read, search and list, and the shell runs \
+read-only commands (ls, cat, head, grep, git log and the like). You can't change files that way. You and the user \
+go through your answer together, one item at a time: each reply is exactly one item, the next thing to show them. \
+They review it, then ask for the next one, telling you what they did with it or what they said.
+
+An item is a place in the code and what you say about it:
+
 <file>
-src/other.rs
+src/lib.rs
 </file>
 <at>
-the exact existing lines this note is about, copied exactly, usually one or two
+2│    start();
 </at>
-one to three sentences
-</note>
-</answer>
+<say>
+one to three short sentences
+</say>
 
-Notes go wherever the code they explain is: when the answer involves other files (a tour, how something \
-flows, where a value comes from), read them and pin notes there, naming the file with <file> (relative to the \
-project). Leave out <file> for notes in the marked file, and <at> for a note about the marked lines as a whole. Be brief and direct, plain text without \
-markdown headings, bold or bullets. Put a short code snippet on its own lines, indented four spaces, \
-without fences.
+That is a note. A question (explain, why, how, is this right, a tour of the code) is answered with notes, one \
+per reply, in the order you'd walk someone through the code, across files as needed. To change code, add what \
+replaces the <at> lines:
 
-If it asks for a change, make only that change, matching the surrounding style and indentation, as steps \
-(and no <answer>). A change can span files: when it needs edits elsewhere in the project (a caller, an import, \
-a test, a definition), make them too, reading each file first so its <old> lines are exact, and name the file \
-in those steps (see <file> below).
-
-Your steps are shown to the user like autocomplete suggestions, one at a time, and accepted with Tab, so \
-each step is about one line: the next line they would type, or one line changed. Use two or three lines only \
-for something that can't be split, like a short closing block. Write the steps in the order the user would \
-type them, top to bottom. A step may build on the steps before it: its <old> can be a line an earlier step \
-added. Each step is one edit of whole lines:
-
-<step>
-<old>
-the existing lines to replace, copied exactly, enough of them to be unique
-</old>
 <new>
-the lines that replace them
+    start_logging();
+    start();
 </new>
-</step>
 
-A step in a file other than the marked one names it, relative to the project:
+That is an edit, and its <say> says why. Make each edit small, about one line: the next thing the user would \
+type, or one line changed. The user accepts it with Tab and it's applied at once, so your next item sees the \
+file with it. Order edits the way the user would make them, usually a definition before its uses.
 
-<step>
-<file>
-src/other.rs
-</file>
-<old>
-the existing lines there
-</old>
-<new>
-what replaces them
-</new>
-</step>
+A change often spans files: a function and its callers, a type and where it's built, code and its tests. Make it \
+file by file, each edit in the file its lines are in, named in <file>: when one file has what it needs (or what \
+the next depends on), go on to the next. Don't stop at the file the user pointed at while other files still need \
+changing, and read a file before you edit it.
 
-Order steps across files the way the user would make the change: usually the definition before its uses. \
-Put each tag on its own line. To insert, include one neighbouring existing line in <old> and repeat it in \
-<new>, followed or preceded by the new lines. An empty <old> means the marked lines themselves. Never copy the \
-<cursor> tags into a step. Reply with steps only: no explanation, no markdown fences.
-
-If the change needs a new file or folder, propose it as its own step, in the order it would be made, with a \
-path relative to the project (end it with / for a folder):
+To make a new file, write <create> in place of <file> and <at>, with the file's first lines in <new>; later \
+items add to it with <file>:
 
 <create>
 src/util.rs
 </create>
-
-Then write the new file's contents as steps in that file, a line or two at a time, naming it the same way:
-
-<step>
-<file>
-src/util.rs
-</file>
-<old>
-</old>
+<say>
+why it's needed
+</say>
 <new>
 its first lines
 </new>
-</step>
 
-In another file an empty <old> means: append at the end. Leave out <file> for steps in the marked file.
+Rules:
+- <file> is always there: the path of the file the item is in, relative to the project, of a file that exists.
+- <at> is consecutive lines copied from that file as it is now, each with its number as shown (`2│` and then \
+the text), the text exactly, indentation included, never shortened or paraphrased. One to three lines are \
+usually enough. A note about the file as a whole leaves <at> empty.
+- <new> is code as it will be in the file, without numbers.
+- To insert, put a neighbouring line in <at> and repeat it in <new> before or after the new lines. An empty \
+<new> deletes the <at> lines.
+- Each tag on its own line, in this order, and nothing else in the reply: no markdown, no code fences, no \
+narration. Never copy the <cursor> tags.
+- When there's nothing more to show or change, reply with only:
 
-To delete a file or folder the change makes unnecessary, propose it the same way:
+<done>
+</done>
 
-<remove>
-src/old_util.rs
-</remove>
+You keep notes about this project and this user between sessions; they're shown to you in <memory>. If you \
+learned something worth knowing next time (a preference, a convention, a decision), your <done> may carry the \
+complete updated notes, condensed, under 300 words:
 
-To rename or move one, the old path then the new:
-
-<rename>
-src/util.rs
-src/helpers.rs
-</rename>
-
-Steps after a rename name the file by its new path.
-
-You keep notes about this project and this user between sessions; they're shown to you in <memory>, \
-along with the user's recent requests. The notes are yours. When you learn something worth knowing next \
-time (a preference, a convention of the codebase, a decision, what the user is working toward), end your \
-reply with the complete updated notes, condensed: merge, rewrite and drop what no longer matters, and keep \
-them under 300 words.
-
+<done>
 <memory>
 the notes
 </memory>
+</done>
 
-Most replies don't need it.
+When the user says something (a question, a correction, a change of direction), your next item follows it: \
+answer with a note, or change course. What they accepted is already in the files.";
 
-The user reviews your reply one step or note at a time, and can say something at any point: a question, a \
-comment, a correction, a change of direction. Then they'll tell you where they are and what they said. Reply in \
-two parts, both optional:
+/// Bytes of a file shown when an item's lines aren't found in it.
+const MISPLACED_WINDOW: usize = 12_000;
 
-<answer>
-what answers them now, shown right where they are: notes (or steps for something to add right there)
-</answer>
-<rest>
-the new plan from where they are on, in the same format as a first reply: steps, file operations, or an \
-<answer> with notes
-</rest>
+/// What the model is told when an item doesn't place: its `<at>` lines
+/// (`quoted`, looked for near the lines `near`) aren't in `file`, whose text
+/// is `text`. It's shown the file around where they should be.
+pub fn misplaced(file: &str, text: &str, quoted: &[String], near: Range<usize>) -> String {
+    let closest = lines::closest(text, quoted);
+    let like = match &closest {
+        Some(l) if l.len() == 1 => format!(" (the most like them is line {})", l.start + 1),
+        Some(l) => format!(" (the most like them are lines {}-{})", l.start + 1, l.end),
+        None => String::new(),
+    };
+    let shown = crate::context::contents(file, text, closest.unwrap_or(near), MISPLACED_WINDOW, false);
+    format!(
+        "your item's <at> lines aren't in {file} as it is now{like}. Copy them from {file} as shown here, each with its \
+         number and the text exactly, and reply with the corrected item.\n\n{shown}"
+    )
+}
 
-The <rest> replaces the step they're at (or, at a note they've read, what follows it) and everything after it, \
-so include all of what's still to come. Whenever what they said changes what you'd do next (a correction, a \
-redirect, a different approach or focus), the new plan goes in <rest>, not in the first part: corrected steps \
-outside <rest> would come in addition to the old ones, not instead of them. Leave <rest> out only if everything \
-after stays exactly as it was; an empty <rest></rest> drops it all.";
+/// What the model is told when an item names a file that isn't in the project.
+pub fn missing_file(file: &str) -> String {
+    format!("there's no file {file} in the project. Name an existing file in <file> (or make one with <create>), and reply with the corrected item.")
+}
 
-/// What Claude is told when a step doesn't apply: its `<old>` lines aren't
-/// in `file`, shown as it is (`text`) unless it's the file asked about,
-/// which every follow-up shows anyway.
-pub fn misplaced_step(file: &str, text: Option<&str>) -> String {
-    let mut said = format!(
-        "your step's <old> lines aren't in {file} as it is now, so it can't be applied. Copy <old> exactly from the file as it \
-         is (a step it builds on may have been skipped). Reply with only <rest>: the corrected step and everything after it."
-    );
-    if let Some(text) = text {
-        let text = &text[..text.floor_char_boundary(crate::settings().context_bytes / 2)];
-        said.push_str(&format!("\n\n{file} as it is now:\n<file>\n{text}\n</file>"));
+/// What the model is told when a reply isn't an item.
+pub const NOTHING_TO_REVIEW: &str = "your reply isn't an item in the format (<file>, <at>, <say>, and <new> for an \
+    edit; or <create>; or <done>), so the user sees nothing. Reply again with one item.";
+
+/// One note: the file and lines it's about (no lines: the file as a whole),
+/// and what it says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Note {
+    pub file: Option<String>,
+    pub at: Vec<String>,
+    pub text: String,
+    /// Where `at` starts (zero-based), as its numbers (or the editor, for a
+    /// note it gives) said: where to look for it.
+    pub line: Option<usize>,
+}
+
+impl Note {
+    /// The note in the reply format, as the model would have written it.
+    pub fn render(&self) -> String {
+        let file = self.file.as_ref().map_or(String::new(), |f| format!("<file>\n{f}\n</file>\n"));
+        let at: String = match self.line {
+            Some(first) => self.at.iter().zip(first + 1..).map(|(l, n)| format!("{n}{}{l}\n", lines::SEP)).collect(),
+            None => self.at.iter().map(|l| format!("{l}\n")).collect(),
+        };
+        format!("{file}<at>\n{at}</at>\n<say>\n{}\n</say>\n", self.text.trim())
     }
-    said
 }
 
-/// What Claude is told when a reply has nothing in the format to review.
-pub const NOTHING_TO_REVIEW: &str = "there's nothing in your reply in the reply format (no <step>, file operation or <answer> \
-    with notes), so the user sees nothing. Reply again, in the format.";
-
-/// What Claude made of the request: steps that edit, or an answer that doesn't.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Edit,
-    Question,
+/// One edit: whole lines out, whole lines in, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Step {
+    /// The file it's in, relative to the project; `None`: the file asked about.
+    pub file: Option<String>,
+    pub old: Vec<String>,
+    /// Where `old` starts (zero-based), as its numbers said: where to look for it.
+    pub line: Option<usize>,
+    pub new: Vec<String>,
+    pub say: String,
+    /// It makes `file`, which doesn't exist yet.
+    pub create: bool,
+    /// `</new>` has arrived; until then `new` is still being written.
+    pub complete: bool,
 }
 
-/// Which kind of reply this is, once its first tag has arrived.
-pub fn reply_kind(reply: &str) -> Option<Kind> {
-    // From the first tag: Claude may say a word before looking at files.
-    let answer = find_tag(reply, "<answer>");
-    let edit = ["<step>", "<create>", "<remove>", "<rename>"].iter().filter_map(|t| find_tag(reply, t)).min();
-    match (answer, edit) {
-        (Some(a), Some(e)) => Some(if a < e { Kind::Question } else { Kind::Edit }),
-        (Some(_), None) => Some(Kind::Question),
-        (None, Some(_)) => Some(Kind::Edit),
-        (None, None) => None,
+/// What a reply is, as far as it has arrived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reply {
+    /// Nothing to act on yet (or, once complete, nothing in the format).
+    Partial,
+    Note(Note),
+    Step(Step),
+    /// Nothing more to show; maybe with the model's updated notes.
+    Done {
+        memory: Option<String>,
+    },
+}
+
+/// The item in `reply`, once enough of it has arrived to show: a note once its
+/// `<say>` is closed and nothing follows (`finished`: the reply is complete);
+/// an edit once its `<new>` has begun.
+pub fn parse(reply: &str, finished: bool) -> Reply {
+    if reply.trim_start().starts_with("<done>") {
+        let memory = tagged_lines(reply, "<memory>", "</memory>").filter(|(_, closed)| *closed).map(|(lines, _)| lines.join("\n").trim().to_string());
+        return Reply::Done { memory: memory.filter(|m| !m.is_empty()) };
+    }
+    let path = |open: &str, close: &str| {
+        tagged_lines(reply, open, close)
+            .filter(|(_, closed)| *closed)
+            .and_then(|(lines, _)| lines.into_iter().map(|l| l.trim().to_string()).find(|l| !l.is_empty()))
+    };
+    let (file, at, create) = match path("<create>", "</create>") {
+        Some(path) => (path, vec![], true),
+        None => {
+            let Some(file) = path("<file>", "</file>") else { return Reply::Partial };
+            match tagged_lines(reply, "<at>", "</at>") {
+                Some((at, true)) => (file, at, false),
+                _ => return Reply::Partial,
+            }
+        }
+    };
+    let Some((say, true)) = tagged_lines(reply, "<say>", "</say>") else { return Reply::Partial };
+    let say = say.join("\n").trim().to_string();
+    let (at, line) = lines::unnumbered(&at);
+    match tagged_lines(reply, "<new>", "</new>") {
+        // New lines are code; numbers copied onto them by mistake come off too.
+        Some((new, complete)) => Reply::Step(Step { file: Some(file), old: at, line, new: lines::unnumbered(&new).0, say, create, complete }),
+        None if finished && !create => Reply::Note(Note { file: Some(file), at, text: say, line }),
+        None => Reply::Partial,
+    }
+}
+
+/// Where a reply is in the format, line by line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Expect {
+    /// `<file>`, `<create>` or `<done>` (blank lines before it are fine).
+    Start,
+    /// The path line inside `<file>` or `<create>`.
+    Path(&'static str),
+    /// The closing tag after the path.
+    Close(&'static str),
+    /// `<at>`, after `</file>`.
+    At,
+    /// Lines up to the closing tag; `need` lines at least.
+    Lines { close: &'static str, need: usize },
+    /// `<say>`.
+    Say,
+    /// `<new>`, or the end of a note.
+    New,
+    /// `<memory>` or `</done>`.
+    InDone,
+    /// Nothing more.
+    End,
+}
+
+/// Whether `reply`, as far as it has arrived, keeps to the format: its tags in
+/// order, each closed before the next opens, and nothing else. Text before the
+/// first tag is let through (a word before looking at files); the line still
+/// being written isn't judged yet. `finished`: the reply is complete, so it
+/// must have ended where an item can.
+pub fn check(reply: &str, finished: bool) -> Result<(), String> {
+    let start = ["<file>", "<create>", "<done>"].iter().filter_map(|t| find_tag(reply, t)).min().unwrap_or(reply.len());
+    let body = &reply[start..];
+    let complete = if finished { body } else { &body[..body.rfind('\n').map_or(0, |i| i + 1)] };
+    let mut expect = Expect::Start;
+    let mut seen = 0;
+    for line in complete.lines() {
+        let tag = line.trim_end();
+        expect = match (expect, tag) {
+            (Expect::Start | Expect::End, "") => expect,
+            (Expect::Start, "<file>") => Expect::Path("</file>"),
+            (Expect::Start, "<create>") => Expect::Path("</create>"),
+            (Expect::Start, "<done>") => Expect::InDone,
+            (Expect::Path(close), path) if !path.trim().is_empty() && !path.starts_with('<') => Expect::Close(close),
+            (Expect::Close("</file>"), "</file>") => Expect::At,
+            (Expect::Close("</create>"), "</create>") => Expect::Say,
+            (Expect::At, "<at>") => lines(&mut seen, "</at>", 0),
+            (Expect::Say, "<say>") => lines(&mut seen, "</say>", 1),
+            (Expect::New, "<new>") => lines(&mut seen, "</new>", 0),
+            (Expect::InDone, "<memory>") => lines(&mut seen, "</memory>", 0),
+            (Expect::InDone, "</done>") => Expect::End,
+            (Expect::Lines { close, need }, line) if line.trim_end() == close => {
+                if seen < need {
+                    return Err(format!("{close} came with nothing before it"));
+                }
+                match close {
+                    "</at>" => Expect::Say,
+                    "</say>" => Expect::New,
+                    "</memory>" => Expect::InDone,
+                    _ => Expect::End,
+                }
+            }
+            // Code and prose lines; a line starting `</` can only be the closing tag.
+            (Expect::Lines { close, .. }, line) if line.starts_with("</") => return Err(format!("`{line}` came where {close} or more lines were expected")),
+            (Expect::Lines { .. }, _) => {
+                seen += 1;
+                expect
+            }
+            (expected, line) => return Err(format!("`{line}` came where {} was expected", describe(expected))),
+        };
+    }
+    match expect {
+        _ if !finished => Ok(()),
+        Expect::New | Expect::End => Ok(()),
+        Expect::Start => Err("there's no item in it".into()),
+        expected => Err(format!("it ended where {} was expected", describe(expected))),
+    }
+}
+
+/// Lines up to `close` begin, `need` of them at least.
+fn lines(seen: &mut usize, close: &'static str, need: usize) -> Expect {
+    *seen = 0;
+    Expect::Lines { close, need }
+}
+
+fn describe(expect: Expect) -> String {
+    match expect {
+        Expect::Start => "<file>, <create> or <done>".into(),
+        Expect::Path(_) => "a path".into(),
+        Expect::Close(close) => close.into(),
+        Expect::At => "<at>".into(),
+        Expect::Lines { close, .. } => close.into(),
+        Expect::Say => "<say>".into(),
+        Expect::New => "<new> or the end".into(),
+        Expect::InDone => "<memory> or </done>".into(),
+        Expect::End => "the end".into(),
     }
 }
 
@@ -215,193 +348,6 @@ fn find_tag(text: &str, tag: &str) -> Option<usize> {
 fn strip_partial_tag<'a>(text: &'a str, tag: &str) -> &'a str {
     let cut = (1..tag.len()).rev().find(|&n| text.ends_with(&tag[..n])).unwrap_or(0);
     &text[..text.len() - cut]
-}
-
-/// A follow-up's reply in its two parts: what answers the user now, and
-/// the revised rest of the plan (or walkthrough), once `<rest>` has begun.
-pub fn split_rest(reply: &str) -> (String, Option<String>) {
-    let Some(start) = find_tag(reply, "<rest>") else { return (reply.to_string(), None) };
-    let inside = &reply[start + "<rest>".len()..];
-    let (rest, after) = match find_tag(inside, "</rest>") {
-        Some(end) => (&inside[..end], &inside[end + "</rest>".len()..]),
-        None => (strip_partial_tag(inside, "</rest>"), ""),
-    };
-    (format!("{}{after}", &reply[..start]), Some(rest.to_string()))
-}
-
-/// Whether a follow-up's reply can no longer change what comes next: its
-/// `<rest>` is complete, or Claude has moved on to its `<memory>` notes.
-pub fn rest_settled(reply: &str) -> bool {
-    find_tag(reply, "</rest>").is_some() || find_tag(reply, "<memory>").is_some()
-}
-
-/// The answer so far, without its tags.
-pub fn answer_text(reply: &str) -> String {
-    tagged_lines(reply, "<answer>", "</answer>").map(|(lines, _)| lines.join("\n").trim_end().to_string()).unwrap_or_default()
-}
-
-/// Claude's updated notes, once the `<memory>` block is complete.
-pub fn memory_update(reply: &str) -> Option<String> {
-    let (lines, closed) = tagged_lines(reply, "<memory>", "</memory>")?;
-    closed.then(|| lines.join("\n").trim().to_string()).filter(|notes| !notes.is_empty())
-}
-
-/// One note of an answer: the file and lines it's about (none: the marked
-/// file, and the marked lines), and what it says.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Note {
-    pub file: Option<String>,
-    pub at: Vec<String>,
-    pub text: String,
-}
-
-/// The answer's notes so far; a note appears once its `<file>` and `<at>`
-/// are complete, and its text grows as it streams. An answer without notes:
-/// each paragraph is one.
-pub fn parse_notes(reply: &str) -> Vec<Note> {
-    let answer = answer_text(reply);
-    if find_tag(&answer, "<note>").is_none() {
-        return answer.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).map(|p| Note { file: None, at: vec![], text: p.to_string() }).collect();
-    }
-    tag_positions(&answer, "<note>")
-        .into_iter()
-        .map(|at| {
-            let rest = &answer[at + "<note>".len()..];
-            &rest[..find_tag(rest, "<note>").unwrap_or(rest.len())]
-        })
-        .filter_map(|chunk| {
-            let chunk = &chunk[..find_tag(chunk, "</note>").unwrap_or(chunk.len())];
-            // Each tag, once it's closed, and where the text after it starts.
-            let mut body_from = 0;
-            let mut tag = |open: &str, close: &str| -> Option<Option<Vec<String>>> {
-                if find_tag(chunk, open).is_none() {
-                    return Some(None);
-                }
-                let (lines, closed) = tagged_lines(chunk, open, close)?;
-                if !closed {
-                    return None;
-                }
-                body_from = body_from.max(find_tag(chunk, close)? + close.len());
-                Some(Some(lines))
-            };
-            let file = tag("<file>", "</file>")?.and_then(|lines| lines.into_iter().map(|l| l.trim().to_string()).find(|l| !l.is_empty()));
-            let at = tag("<at>", "</at>")?.unwrap_or_default();
-            Some(Note { file, at, text: strip_partial_tag(&chunk[body_from..], "</note>").trim().to_string() })
-        })
-        .collect()
-}
-
-/// One step of a change: whole lines out, whole lines in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Step {
-    /// The file it's in, relative to the project; `None`: the file being edited.
-    pub file: Option<String>,
-    pub old: Vec<String>,
-    pub new: Vec<String>,
-    /// `</new>` has arrived; until then `new` is still being written.
-    pub complete: bool,
-}
-
-/// A piece of a change, in the order Claude wrote them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Piece {
-    Step(Step),
-    /// A new file, or a folder if the path ends in `/`.
-    Create(String),
-    /// A file or folder to move to the Trash.
-    Remove(String),
-    /// A file or folder to move to a new path.
-    Rename {
-        from: String,
-        to: String,
-    },
-}
-
-/// The pieces of a change so far. A step shows up once its `<old>` is
-/// complete; a file operation once its path lines are.
-pub fn parse_pieces(reply: &str) -> Vec<Piece> {
-    let mut starts: Vec<(usize, &str)> =
-        ["<step>", "<create>", "<remove>", "<rename>"].iter().flat_map(|tag| tag_positions(reply, tag).into_iter().map(move |i| (i, *tag))).collect();
-    starts.sort();
-    starts
-        .iter()
-        .enumerate()
-        .filter_map(|(n, &(at, tag))| {
-            let end = starts.get(n + 1).map_or(reply.len(), |(next, _)| *next);
-            let chunk = &reply[at..end];
-            let close = format!("</{}", &tag[1..]);
-            match tag {
-                "<rename>" => {
-                    let (lines, done) = tagged_lines(chunk, tag, &close)?;
-                    let mut paths = lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty());
-                    let (from, to) = (paths.next()?, paths.next()?);
-                    (done || lines.len() > 2).then(|| Piece::Rename { from: from.to_string(), to: to.to_string() })
-                }
-                "<create>" | "<remove>" => {
-                    let (lines, done) = tagged_lines(chunk, tag, &close)?;
-                    let path = lines.iter().map(|l| l.trim()).find(|l| !l.is_empty())?.to_string();
-                    (done || lines.len() > 1).then(|| if tag == "<create>" { Piece::Create(path) } else { Piece::Remove(path) })
-                }
-                _ => {
-                    let file = tagged_lines(chunk, "<file>", "</file>")
-                        .filter(|(_, done)| *done)
-                        .and_then(|(lines, _)| lines.into_iter().map(|l| l.trim().to_string()).find(|l| !l.is_empty()));
-                    let (old, old_done) = tagged_lines(chunk, "<old>", "</old>")?;
-                    if !old_done {
-                        return None;
-                    }
-                    let after_old = &chunk[find_tag(chunk, "</old>")?..];
-                    let (new, complete) = tagged_lines(after_old, "<new>", "</new>").unwrap_or((vec![], false));
-                    Some(Piece::Step(Step { file, old, new, complete }))
-                }
-            }
-        })
-        .collect()
-}
-
-/// Where `old` is in `text`, as a range of whole lines: the occurrence
-/// nearest the lines `near`, ignoring trailing spaces (failing that,
-/// indentation). An empty `old` is `near` itself.
-pub fn locate(text: &str, old: &[String], near: Range<usize>) -> Option<Range<usize>> {
-    if old.is_empty() {
-        return Some(near);
-    }
-    let lines: Vec<&str> = text.split('\n').collect();
-    let find = |same: &dyn Fn(&str, &str) -> bool| {
-        (0..lines.len().saturating_sub(old.len() - 1))
-            .filter(|&i| old.iter().enumerate().all(|(j, o)| same(lines[i + j], o)))
-            .min_by_key(|&i| i.abs_diff(near.start))
-            .map(|i| i..i + old.len())
-    };
-    find(&|a, b| a.trim_end() == b.trim_end()).or_else(|| find(&|a, b| a.trim() == b.trim()))
-}
-
-/// The visible part of a step: the lines that change, after dropping the
-/// lines `old` and `new` share at either end.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Change {
-    /// Lines struck out.
-    pub removed: Range<usize>,
-    /// Lines shown after `removed` (or after the line above it).
-    pub added: Vec<String>,
-}
-
-impl Change {
-    /// The line the added lines show under.
-    pub fn anchor_line(&self) -> usize {
-        if self.removed.is_empty() { self.removed.start.saturating_sub(1) } else { self.removed.end - 1 }
-    }
-}
-
-/// `old` (found at lines `at`) becoming `new`.
-pub fn change(at: Range<usize>, old: &[String], new: &[String]) -> Change {
-    let prefix = old.iter().zip(new).take_while(|(a, b)| a.trim_end() == b.trim_end()).count();
-    let rest = old.len().min(new.len()) - prefix;
-    let suffix = old.iter().rev().zip(new.iter().rev()).take(rest).take_while(|(a, b)| a.trim_end() == b.trim_end()).count();
-    let (keep_old, keep_new) = if old.is_empty() { (0, 0) } else { (prefix, suffix) };
-    let removed_len = if old.is_empty() { at.len() } else { old.len() - keep_old - keep_new };
-    let start = at.start + keep_old;
-    Change { removed: start..start + removed_len, added: new[prefix.min(new.len())..new.len() - suffix.min(new.len() - prefix.min(new.len()))].to_vec() }
 }
 
 /// Word-wrap prose to `cols` columns, keeping its blank lines and indentation.
@@ -458,123 +404,77 @@ mod tests {
         s.iter().map(|l| l.to_string()).collect()
     }
 
-    fn steps(reply: &str) -> Vec<Step> {
-        parse_pieces(reply).into_iter().filter_map(|p| if let Piece::Step(s) = p { Some(s) } else { None }).collect()
-    }
+    const NOTE: &str = "<file>\nsrc/lib.rs\n</file>\n<at>\npub fn run() {\n</at>\n<say>\nIt starts here.\n</say>\n";
+    const EDIT: &str = "<file>\nsrc/lib.rs\n</file>\n<at>\n    a - b\n</at>\n<say>\nIt should add.\n</say>\n<new>\n    a + b\n</new>\n";
 
     #[test]
-    fn notes_pin_to_lines_as_they_stream() {
-        let reply = "<answer>\n<note>\n<at>\n    return a - b\n</at>\nThis subtracts.\n</note>\n<note>\nIt should add.\n</no";
+    fn a_note_shows_once_the_reply_is_complete() {
+        assert_eq!(parse(&NOTE[..60], false), Reply::Partial);
+        assert_eq!(parse(NOTE, false), Reply::Partial, "an edit's <new> may still come");
         assert_eq!(
-            parse_notes(reply),
-            vec![
-                Note { file: None, at: lines(&["    return a - b"]), text: "This subtracts.".into() },
-                Note { file: None, at: vec![], text: "It should add.".into() }
-            ]
-        );
-        assert_eq!(parse_notes("<answer>\n<note>\n<at>\n    ret"), vec![]);
-        assert_eq!(
-            parse_notes("<answer>\nPlain answer.\n\nSecond part.\n</answer>"),
-            vec![Note { file: None, at: vec![], text: "Plain answer.".into() }, Note { file: None, at: vec![], text: "Second part.".into() }]
+            parse(NOTE, true),
+            Reply::Note(Note { file: Some("src/lib.rs".into()), at: lines(&["pub fn run() {"]), text: "It starts here.".into(), line: None })
         );
     }
 
     #[test]
-    fn notes_can_be_in_other_files() {
-        let reply = "<answer>\n<note>\n<file>\nsrc/lib.rs\n</file>\n<at>\npub fn run() {\n</at>\nIt starts here.\n</note>\n<note>\n<file>\nsrc/ma";
-        assert_eq!(
-            parse_notes(reply),
-            vec![Note { file: Some("src/lib.rs".into()), at: lines(&["pub fn run() {"]), text: "It starts here.".into() }],
-            "a note waits for its file"
-        );
+    fn an_edit_shows_as_its_new_lines_stream() {
+        let streaming = &EDIT[..EDIT.len() - 12];
+        let Reply::Step(step) = parse(streaming, false) else { panic!("{:?}", parse(streaming, false)) };
+        assert!(!step.complete);
+        assert_eq!(step.old, lines(&["    a - b"]));
+        assert_eq!(step.say, "It should add.");
+        let Reply::Step(step) = parse(EDIT, true) else { panic!() };
+        assert!(step.complete && !step.create);
+        assert_eq!(step.new, lines(&["    a + b"]));
     }
 
     #[test]
-    fn tells_answers_from_edits() {
-        assert_eq!(reply_kind(""), None);
-        assert_eq!(reply_kind("\n<answ"), None);
-        assert_eq!(reply_kind("<answer>\nIt adds."), Some(Kind::Question));
-        assert_eq!(reply_kind("<step>\n<old>"), Some(Kind::Edit));
-        assert_eq!(reply_kind("<remove>\nx\n</remove>"), Some(Kind::Edit));
-        assert_eq!(answer_text("<answer>\nIt adds\ntwo numbers.\n</ans"), "It adds\ntwo numbers.");
+    fn quoted_numbers_say_where_to_look() {
+        let reply = "<file>\nsrc/lib.rs\n</file>\n<at>\n12│    a - b\n13│}\n</at>\n<say>\nAdd.\n</say>\n<new>\n12│    a + b\n13│}\n</new>\n";
+        let Reply::Step(step) = parse(reply, true) else { panic!() };
+        assert_eq!((step.old, step.line), (lines(&["    a - b", "}"]), Some(11)));
+        assert_eq!(step.new, lines(&["    a + b", "}"]), "numbers copied onto new lines come off");
+        let note = "<file>\nsrc/lib.rs\n</file>\n<at>\n3│fn run() {\n</at>\n<say>\nHere.\n</say>\n";
+        let Reply::Note(note) = parse(note, true) else { panic!() };
+        assert_eq!((note.at.clone(), note.line), (lines(&["fn run() {"]), Some(2)));
+        assert!(note.render().contains("<at>\n3│fn run() {\n</at>"), "and go back on when it's shown to the model again");
     }
 
     #[test]
-    fn memory_arrives_whole() {
-        let reply = "<answer>\nok\n</answer>\n<memory>\nPrefers tabs.\n";
-        assert_eq!(memory_update(reply), None, "not until it's closed");
-        assert_eq!(memory_update(&format!("{reply}</memory>")).as_deref(), Some("Prefers tabs."));
-        assert_eq!(parse_notes(&format!("{reply}</memory>")), vec![Note { file: None, at: vec![], text: "ok".into() }], "the notes aren't part of the answer");
+    fn a_new_file_is_an_edit_that_creates_it() {
+        let reply = "<create>\nsrc/util.rs\n</create>\n<say>\nA home for helpers.\n</say>\n<new>\npub fn one() {}\n</new>\n";
+        let Reply::Step(step) = parse(reply, true) else { panic!() };
+        assert!(step.create && step.complete && step.old.is_empty());
+        assert_eq!(step.file.as_deref(), Some("src/util.rs"));
     }
 
     #[test]
-    fn steps_appear_as_they_stream() {
-        let full =
-            "<step>\n<old>\n    pass\n</old>\n<new>\n    total = a + b\n    return total\n</new>\n</step>\n<step>\n<old>\n</old>\n<new>\nx\n</new>\n</step>";
-        assert_eq!(steps(&full[..20]), vec![]);
-        let partial = &full[..full.find("    return").unwrap() + 6];
-        assert_eq!(steps(partial), vec![Step { file: None, old: lines(&["    pass"]), new: lines(&["    total = a + b", "    re"]), complete: false }]);
-        let cut_tag = &full[..full.find("</new>").unwrap() + 3];
-        assert_eq!(steps(cut_tag)[0].new, lines(&["    total = a + b", "    return total", ""]));
-        let all = steps(full);
-        assert!(all[0].complete && all[1].complete);
-        assert_eq!(all[1], Step { file: None, old: vec![], new: lines(&["x"]), complete: true });
+    fn done_may_carry_notes() {
+        assert_eq!(parse("<done>\n</done>\n", true), Reply::Done { memory: None });
+        assert_eq!(parse("<done>\n<memory>\nPrefers tabs.\n</memory>\n</done>\n", true), Reply::Done { memory: Some("Prefers tabs.".into()) });
     }
 
     #[test]
-    fn file_operations_parse_in_order() {
-        let reply = "<create>\nsrc/util.rs\n</create>\n<step>\n<file>\nsrc/util.rs\n</file>\n<old>\n</old>\n<new>\npub fn one() {}\n</new>\n</step>\n<rename>\na.rs\nb.rs\n</rename>\n<remove>\nold.rs\n</remove>\n";
-        let pieces = parse_pieces(reply);
-        assert_eq!(pieces[0], Piece::Create("src/util.rs".into()));
-        assert!(matches!(&pieces[1], Piece::Step(s) if s.file.as_deref() == Some("src/util.rs") && s.old.is_empty()));
-        assert_eq!(pieces[2], Piece::Rename { from: "a.rs".into(), to: "b.rs".into() });
-        assert_eq!(pieces[3], Piece::Remove("old.rs".into()));
-        assert_eq!(parse_pieces("<create>\nsrc/ut"), vec![], "a path appears once its line is done");
-        assert_eq!(parse_pieces("<rename>\nsrc/util.rs\n"), vec![], "both paths first");
+    fn the_format_is_checked_line_by_line() {
+        assert_eq!(check(EDIT, true), Ok(()));
+        assert_eq!(check(NOTE, true), Ok(()));
+        assert_eq!(check("Let me look.\n<done>\n</done>\n", true), Ok(()), "a word before the first tag is let through");
+        assert_eq!(check(&EDIT[..30], false), Ok(()), "half an item is fine while it streams");
+        assert!(check("<file>\na.rs\n</file>\n<say>\n", false).unwrap_err().contains("<at>"), "a part left out");
+        assert!(check("<file>\na.rs\n</file>\n<at>\nx\n</at>\n<say>\n</say>\n", false).is_err(), "<say> needs words");
+        assert!(check("<file>\na.rs\n</file>\n<at>\nx\n</file>\n", false).is_err(), "a stray closing tag");
+        assert!(check(&format!("{EDIT}And here's why.\n"), false).is_err(), "nothing after the item");
+        assert!(check("<file>\na.rs\n</file>\n<at>\nx\n", true).unwrap_err().contains("ended"), "cut off");
+        assert!(check("```\n<file>\n", false).is_ok() && check("<file>\n```\n</file>\n", false).is_ok(), "a path is any line");
     }
 
     #[test]
     fn tags_inside_code_are_just_text() {
-        let reply = "<step>\n<old>\nlet s = \"<old>\";\n</old>\n<new>\n// see <create> and </new> in the docs\nlet s = \"<step>\";\n</new>\n</step>\n";
-        let all = steps(reply);
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].old, lines(&["let s = \"<old>\";"]));
-        assert_eq!(all[0].new, lines(&["// see <create> and </new> in the docs", "let s = \"<step>\";"]));
-        assert!(all[0].complete);
-        assert_eq!(reply_kind("Looking at <answer> handling first.\n<step>\n"), Some(Kind::Edit));
-    }
-
-    #[test]
-    fn a_follow_up_splits_into_now_and_the_rest() {
-        let reply = "<answer>\nBecause.\n</answer>\n<rest>\n<answer>\n<note>\nNext.\n</note>\n</answer>\n</rest>\n";
-        let (now, rest) = split_rest(reply);
-        assert_eq!(parse_notes(&now), vec![Note { file: None, at: vec![], text: "Because.".into() }]);
-        assert_eq!(parse_notes(&rest.unwrap()), vec![Note { file: None, at: vec![], text: "Next.".into() }]);
-        assert_eq!(split_rest("<answer>\nok\n</answer>\n").1, None, "no <rest>: the rest stays");
-        assert!(rest_settled("<answer>\nok\n</answer>\n<memory>\n") && rest_settled(reply) && !rest_settled("<answer>\nok\n</answer>\n"));
-        assert_eq!(split_rest("<rest>\n<step>\n<old>\na\n</re").1.as_deref(), Some("\n<step>\n<old>\na\n"), "streaming in");
-    }
-
-    #[test]
-    fn locates_the_nearest_copy() {
-        let text = "a\nx\nb\nx\nc\n";
-        assert_eq!(locate(text, &lines(&["x"]), 3..4), Some(3..4));
-        assert_eq!(locate(text, &lines(&["x  "]), 0..1), Some(1..2));
-        assert_eq!(locate(text, &lines(&["b", "x"]), 0..1), Some(2..4));
-        assert_eq!(locate(text, &lines(&["nope"]), 0..1), None);
-        assert_eq!(locate("def f():\n\treturn 1\n", &lines(&["    return 1"]), 0..1), Some(1..2), "indentation may differ");
-        assert_eq!(locate(text, &[], 4..5), Some(4..5));
-    }
-
-    #[test]
-    fn change_hides_shared_lines() {
-        let c = change(5..6, &lines(&["fn a() {"]), &lines(&["fn a() {", "    x();"]));
-        assert_eq!(c, Change { removed: 6..6, added: lines(&["    x();"]) });
-        assert_eq!(c.anchor_line(), 5);
-        let c = change(2..5, &lines(&["a", "b", "c"]), &lines(&["a", "B", "c"]));
-        assert_eq!(c, Change { removed: 3..4, added: lines(&["B"]) });
-        let c = change(7..8, &[], &lines(&["new"]));
-        assert_eq!(c, Change { removed: 7..8, added: lines(&["new"]) });
+        let reply = "<file>\na.rs\n</file>\n<at>\nlet s = \"<new>\";\n</at>\n<say>\nx\n</say>\n<new>\nlet s = \"</new>\";\n</new>\n";
+        let Reply::Step(step) = parse(reply, true) else { panic!() };
+        assert_eq!(step.old, lines(&["let s = \"<new>\";"]));
+        assert_eq!(step.new, lines(&["let s = \"</new>\";"]));
     }
 
     #[test]

@@ -1,11 +1,12 @@
-//! Syntax highlighting with tree-sitter: which language a file is, and the
-//! highlighted spans of its text.
+//! Syntax highlighting with tree-sitter: the highlighted spans of a
+//! [`Language`]'s text, in scopes the themes know.
 
 use std::ops::Range;
-use std::path::Path;
 use std::sync::OnceLock;
 
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+
+use crate::language::{LANGUAGES, Language};
 
 /// The scopes spans are tagged with; themes color them by name, falling
 /// back to the part before the last dot (`function.method` → `function`).
@@ -53,6 +54,34 @@ pub const SCOPES: &[&str] = &[
     "variable.special",
 ];
 
+/// What other editors' queries call scopes (Helix, nvim-treesitter), as
+/// ours, so a query from anywhere colors without being rewritten. A name
+/// not here falls back to its shorter forms (`keyword.control.import` →
+/// `keyword`).
+const ALIASES: &[(&str, &str)] = &[
+    ("character", "string.special"),
+    ("constant.builtin.boolean", "boolean"),
+    ("constant.character", "string.special"),
+    ("constant.character.escape", "escape"),
+    ("constant.numeric", "number"),
+    ("markup.bold", "text.strong"),
+    ("markup.heading", "text.title"),
+    ("markup.heading.marker", "punctuation.special"),
+    ("markup.italic", "text.emphasis"),
+    ("markup.link", "text.reference"),
+    ("markup.link.url", "text.uri"),
+    ("markup.list", "punctuation.special"),
+    ("markup.quote", "text.literal"),
+    ("markup.raw", "text.literal"),
+    ("markup.strong", "text.strong"),
+    ("namespace", "module"),
+    ("special", "punctuation.special"),
+    ("string.special.url", "text.uri"),
+    ("type.enum.variant", "constructor"),
+    ("variable.member", "property"),
+    ("variable.other.member", "property"),
+];
+
 /// Files bigger than this aren't highlighted (it's redone on every change).
 const MAX_HIGHLIGHT: usize = 1 << 20;
 
@@ -63,97 +92,52 @@ pub struct Span {
     pub scope: usize,
 }
 
-pub struct Language {
-    /// What the status line and Claude call it.
-    pub name: &'static str,
-    extensions: &'static [&'static str],
-    file_names: &'static [&'static str],
-    config: fn() -> Option<HighlightConfiguration>,
-    loaded: OnceLock<Option<HighlightConfiguration>>,
+/// A language's highlight query, compiled, and the scope each capture it
+/// reports shows as.
+pub(crate) struct Highlights {
+    config: HighlightConfiguration,
+    scopes: Vec<usize>,
 }
 
-macro_rules! language {
-    ($name:literal, [$($ext:literal),*], [$($file:literal),*], $lang:expr, $query:expr) => {
-        Language {
-            name: $name,
-            extensions: &[$($ext),*],
-            file_names: &[$($file),*],
-            config: || configure($name, $lang.into(), &$query),
-            loaded: OnceLock::new(),
-        }
-    };
-}
-
-static LANGUAGES: [Language; 15] = [
-    language!("rust", ["rs"], [], tree_sitter_rust::LANGUAGE, tree_sitter_rust::HIGHLIGHTS_QUERY),
-    language!("python", ["py", "pyi"], [], tree_sitter_python::LANGUAGE, tree_sitter_python::HIGHLIGHTS_QUERY),
-    language!("javascript", ["js", "mjs", "cjs"], [], tree_sitter_javascript::LANGUAGE, tree_sitter_javascript::HIGHLIGHT_QUERY),
-    language!(
-        "jsx",
-        ["jsx"],
-        [],
-        tree_sitter_javascript::LANGUAGE,
-        [tree_sitter_javascript::JSX_HIGHLIGHT_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY].join("\n")
-    ),
-    language!(
-        "typescript",
-        ["ts", "mts", "cts"],
-        [],
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
-        [tree_sitter_typescript::HIGHLIGHTS_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY].join("\n")
-    ),
-    language!(
-        "tsx",
-        ["tsx"],
-        [],
-        tree_sitter_typescript::LANGUAGE_TSX,
-        [tree_sitter_typescript::HIGHLIGHTS_QUERY, tree_sitter_javascript::JSX_HIGHLIGHT_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY].join("\n")
-    ),
-    language!("bash", ["sh", "bash", "zsh"], [".bashrc", ".zshrc", ".profile"], tree_sitter_bash::LANGUAGE, tree_sitter_bash::HIGHLIGHT_QUERY),
-    language!("toml", ["toml"], ["Cargo.lock"], tree_sitter_toml_ng::LANGUAGE, tree_sitter_toml_ng::HIGHLIGHTS_QUERY),
-    language!("markdown", ["md", "markdown"], [], tree_sitter_md::LANGUAGE, tree_sitter_md::HIGHLIGHT_QUERY_BLOCK),
-    language!("json", ["json"], [], tree_sitter_json::LANGUAGE, tree_sitter_json::HIGHLIGHTS_QUERY),
-    language!("yaml", ["yaml", "yml"], [], tree_sitter_yaml::LANGUAGE, tree_sitter_yaml::HIGHLIGHTS_QUERY),
-    language!("go", ["go"], [], tree_sitter_go::LANGUAGE, tree_sitter_go::HIGHLIGHTS_QUERY),
-    language!("c", ["c", "h"], [], tree_sitter_c::LANGUAGE, tree_sitter_c::HIGHLIGHT_QUERY),
-    language!(
-        "cpp",
-        ["cc", "cpp", "cxx", "hpp", "hh", "hxx"],
-        [],
-        tree_sitter_cpp::LANGUAGE,
-        [tree_sitter_cpp::HIGHLIGHT_QUERY, tree_sitter_c::HIGHLIGHT_QUERY].join("\n")
-    ),
-    language!("css", ["css"], [], tree_sitter_css::LANGUAGE, tree_sitter_css::HIGHLIGHTS_QUERY),
-];
-
-fn configure(name: &str, language: tree_sitter::Language, query: &str) -> Option<HighlightConfiguration> {
+/// Compile `query` for `grammar`; `None` (and a complaint) if it doesn't load.
+pub(crate) fn highlights(name: &str, grammar: impl Into<tree_sitter::Language>, query: &str) -> Option<Highlights> {
     let mut config =
-        HighlightConfiguration::new(language, name, query, "", "").inspect_err(|e| eprintln!("the {name} highlight query doesn't load: {e}")).ok()?;
-    config.configure(SCOPES);
-    Some(config)
+        HighlightConfiguration::new(grammar.into(), name, query, "", "").inspect_err(|e| eprintln!("the {name} highlight query doesn't load: {e}")).ok()?;
+    // Report only the captures that show as something, each as itself.
+    let (captures, scopes): (Vec<String>, Vec<usize>) = config.names().iter().filter_map(|c| Some((c.to_string(), scope(c)?))).unzip();
+    config.configure(&captures);
+    Some(Highlights { config, scopes })
+}
+
+/// The scope a capture shows as: its name, or what it's an alias of, or
+/// the same for a shorter form of it.
+fn scope(capture: &str) -> Option<usize> {
+    let mut name = capture;
+    loop {
+        let ours = ALIASES.iter().find(|(theirs, _)| *theirs == name).map_or(name, |(_, ours)| ours);
+        if let Some(scope) = SCOPES.iter().position(|s| *s == ours) {
+            return Some(scope);
+        }
+        name = &name[..name.rfind('.')?];
+    }
 }
 
 impl Language {
-    /// The language of `path`, by its name or extension.
-    pub fn for_path(path: &Path) -> Option<&'static Language> {
-        let name = path.file_name()?.to_str()?;
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-        LANGUAGES.iter().find(|l| l.file_names.contains(&name) || l.extensions.contains(&ext))
-    }
-
     /// The spans of `text`, innermost scope wins, in order.
     pub fn highlight(&self, text: &str) -> Vec<Span> {
+        static LOADED: [OnceLock<Option<Highlights>>; LANGUAGES.len()] = [const { OnceLock::new() }; LANGUAGES.len()];
         if text.len() > MAX_HIGHLIGHT {
             return vec![];
         }
-        let Some(config) = self.loaded.get_or_init(self.config).as_ref() else { return vec![] };
+        let Some(ix) = LANGUAGES.iter().position(|l| std::ptr::eq(l, self)) else { return vec![] };
+        let Some(Highlights { config, scopes }) = LOADED[ix].get_or_init(self.load).as_ref() else { return vec![] };
         let mut highlighter = Highlighter::new();
         let Ok(events) = highlighter.highlight(config, text.as_bytes(), None, None, |_| None) else { return vec![] };
         let mut spans = vec![];
         let mut stack: Vec<usize> = vec![];
         for event in events {
             match event {
-                Ok(HighlightEvent::HighlightStart(h)) => stack.push(h.0),
+                Ok(HighlightEvent::HighlightStart(h)) => stack.push(scopes[h.0]),
                 Ok(HighlightEvent::HighlightEnd) => {
                     stack.pop();
                 }
@@ -169,30 +153,46 @@ impl Language {
     }
 }
 
-impl std::fmt::Debug for Language {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name)
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
     fn every_query_loads() {
         for language in &LANGUAGES {
-            assert!((language.config)().is_some(), "{}", language.name);
+            assert!((language.load)().is_some(), "{}", language.name);
         }
+    }
+
+    /// The scope at each of `at` in `text`, highlighted as `path`.
+    fn scopes_at(path: &str, text: &str, at: &[usize]) -> Vec<Option<&'static str>> {
+        let spans = Language::for_path(Path::new(path)).unwrap().highlight(text);
+        at.iter().map(|&at| spans.iter().find(|s| s.range.contains(&at)).map(|s| SCOPES[s.scope])).collect()
     }
 
     #[test]
     fn highlights_rust() {
-        let rust = Language::for_path(Path::new("src/main.rs")).unwrap();
-        let spans = rust.highlight("fn main() { let x = 1; }");
-        let scope_at = |at: usize| spans.iter().find(|s| s.range.contains(&at)).map(|s| SCOPES[s.scope]);
-        assert_eq!(scope_at(0), Some("keyword"));
-        assert_eq!(scope_at(3).map(|s| s.starts_with("function")), Some(true));
-        assert!(Language::for_path(Path::new("notes.txt")).is_none());
+        let [keyword, name] = scopes_at("src/main.rs", "fn main() { let x = 1; }", &[0, 3])[..] else { unreachable!() };
+        assert_eq!(keyword, Some("keyword"));
+        assert_eq!(name.map(|s| s.starts_with("function")), Some(true));
+    }
+
+    #[test]
+    fn highlights_typst_through_aliases() {
+        let text = "= Title\n#let x = 1\n*bold*";
+        let at = [2, text.find("let").unwrap(), text.find("1").unwrap(), text.find("bold").unwrap()];
+        assert_eq!(scopes_at("paper.typ", text, &at), [Some("text.title"), Some("keyword"), Some("number"), Some("text.strong")]);
+    }
+
+    #[test]
+    fn aliases_and_shorter_forms() {
+        let name = |capture| scope(capture).map(|s| SCOPES[s]);
+        assert_eq!(name("keyword.control.import"), Some("keyword"));
+        assert_eq!(name("markup.heading.2"), Some("text.title"));
+        assert_eq!(name("constant.numeric.float"), Some("number"));
+        assert_eq!(name("function.method.call"), Some("function.method"));
+        assert_eq!(name("spell"), None);
     }
 }

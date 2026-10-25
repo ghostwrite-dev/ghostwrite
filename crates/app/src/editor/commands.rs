@@ -36,9 +36,9 @@ pub enum Command {
     Shell(Option<String>),
     /// Stop the running command.
     Stop,
-    /// Tour the last command's errors, or its output.
+    /// Go through the last command's errors, or its output.
     Output,
-    /// Search the project; the matches are a tour.
+    /// Search the project, and go through the matches.
     Grep(String),
     /// Show or hide the file tree.
     Tree,
@@ -267,7 +267,7 @@ impl Editor {
                 self.start_shell(command, cx)?;
             }
             Command::Stop => self.stop_shell()?,
-            Command::Output => self.output_tour(cx)?,
+            Command::Output => self.output_story(cx)?,
             Command::Grep(pattern) => self.start_search(&pattern, window, cx)?,
             Command::Tree => self.toggle_tree(cx),
             Command::Project(path) => {

@@ -8,6 +8,8 @@ use ghostwrite_project::files::{files, inside};
 use regex::Regex;
 use serde_json::{Value, json};
 
+use crate::lines;
+
 const MAX_READ: usize = 120_000;
 const MAX_MATCHES: usize = 200;
 
@@ -22,7 +24,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "read_file",
-            "description": "Read a file in the project, by path relative to the project root. Read-only.",
+            "description": "Read a file in the project, by path relative to the project root, its lines numbered as files are shown to you. Read-only.",
             "input_schema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false },
             "eager_input_streaming": true,
         },
@@ -40,6 +42,7 @@ pub fn describe(name: &str, input: &Value) -> String {
     match name {
         "read_file" | "Read" => format!("reading {}", input["path"].as_str().or_else(|| input["file_path"].as_str()).unwrap_or("a file")),
         "search" | "Grep" => format!("searching for {}", input["pattern"].as_str().unwrap_or("…")),
+        "Bash" => format!("running {}", input["command"].as_str().unwrap_or("a command")),
         _ => "looking around the project".into(),
     }
 }
@@ -59,7 +62,9 @@ pub fn call(root: &Path, name: &str, input: &Value) -> Result<String, String> {
         "read_file" => {
             let path = inside(root, path_arg.ok_or("read_file needs a path")?).ok_or("that file isn't in the project")?;
             let text = std::fs::read_to_string(&path).map_err(|e| format!("couldn't read it: {e}"))?;
-            Ok(if text.len() > MAX_READ { format!("{}\n… (cut off)", &text[..text.floor_char_boundary(MAX_READ)]) } else { text })
+            let cut = text.len() > MAX_READ;
+            let text = if cut { &text[..text[..text.floor_char_boundary(MAX_READ)].rfind('\n').map_or(0, |i| i + 1)] } else { &text };
+            Ok(format!("{}{}", lines::numbered(text, 0, None), if cut { "… (cut off)" } else { "" }))
         }
         "search" => {
             let pattern = Regex::new(input["pattern"].as_str().ok_or("search needs a pattern")?).map_err(|e| e.to_string())?;
@@ -93,7 +98,7 @@ mod tests {
         std::fs::create_dir_all(root.join("target")).unwrap();
         std::fs::write(root.join("target/junk"), "x").unwrap();
         assert_eq!(call(&root, "list_files", &json!({})).unwrap(), ".gitignore\nsrc/lib.rs");
-        assert_eq!(call(&root, "read_file", &json!({ "path": "src/lib.rs" })).unwrap(), "pub fn one() {}\npub fn two() {}\n");
+        assert_eq!(call(&root, "read_file", &json!({ "path": "src/lib.rs" })).unwrap(), "1│pub fn one() {}\n2│pub fn two() {}\n");
         assert_eq!(call(&root, "search", &json!({ "pattern": "fn two" })).unwrap(), "src/lib.rs:2: pub fn two() {}");
         assert!(call(&root, "read_file", &json!({ "path": "../../etc/passwd" })).is_err(), "nothing outside the project");
         assert!(call(&root, "read_file", &json!({ "path": "/etc/passwd" })).is_err());
