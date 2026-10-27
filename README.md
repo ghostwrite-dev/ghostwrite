@@ -33,6 +33,9 @@ The keys are helix's; `?` shows them all. The parts that aren't helix:
 | `f`, `space e` | the file tree; Claude's file operations are proposed there |
 | `⌘=`, `⌘-`, `⌘0` | zoom the window in, out, and back to 100% |
 
+A Typst file opens with tinymist's live preview in the browser: it updates
+as you type, scrolls to the cursor, and clicking in it jumps to that source.
+
 The tree and open files follow changes other programs make. A file you have
 unsaved changes in keeps them, and the status line says it changed on disk.
 

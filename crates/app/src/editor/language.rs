@@ -1,5 +1,6 @@
 //! Language servers in the editor: `gd`, `space k` (docs as a note under
-//! the line), and the completion menu while typing. Diagnostics go onto
+//! the line), the completion menu while typing, and going where a server
+//! says (a click in tinymist's preview). Diagnostics go onto
 //! documents as they arrive (see [`Project::apply_diagnostics`]).
 
 use ghostwrite_core::{Key, MenuKey, Mode, Range};
@@ -101,6 +102,20 @@ impl Editor {
             .ok();
         })
         .detach();
+    }
+
+    /// A server asked for `path` to be shown (tinymist, when its preview is
+    /// clicked): open it at `selection`, and bring the window to the front.
+    pub(super) fn show_document(&mut self, path: &std::path::Path, selection: Option<ghostwrite_lsp::RawRange>, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_insert();
+        let Some(ix) = self.project.open(path) else { return cx.notify() };
+        if let Some((tab, selection)) = self.project.tabs.get_mut(ix).zip(selection) {
+            let at = convert::range(tab.doc.text(), selection);
+            let lines = tab.doc.buffer.line_of(at.start)..tab.doc.buffer.line_of(at.end) + 1;
+            tab.select(Range::point(at.start), Autoscroll::Center(lines));
+        }
+        self.activate(ix, cx);
+        window.activate_window();
     }
 
     /// `space k`: the docs of what's under the cursor, as a note under the

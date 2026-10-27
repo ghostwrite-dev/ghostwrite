@@ -348,6 +348,7 @@ impl gpui::Render for Editor {
         }
         if let Some(tab) = self.tab_mut() {
             tab.doc.refresh_highlights();
+            tab.follow_cursor();
         }
         if self.story.as_ref().is_some_and(|s| s.thinking()) {
             window.request_animation_frame();

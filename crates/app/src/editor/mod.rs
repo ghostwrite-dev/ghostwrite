@@ -68,13 +68,15 @@ pub enum EditorEvent {
 pub struct Options {
     /// Start language servers for the files opened.
     pub language_servers: bool,
+    /// Preview Typst files in the browser, with tinymist.
+    pub previews: bool,
     /// What `a` asks, the one in use first: `:model` switches between them.
     pub backends: Vec<Backend>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { language_servers: true, backends: Backend::available() }
+        Self { language_servers: true, previews: true, backends: Backend::available() }
     }
 }
 
@@ -148,16 +150,19 @@ impl Registers for Regs<'_> {
 
 impl Editor {
     pub fn new(root: PathBuf, options: Options, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (events, mut diagnostics) = futures::channel::mpsc::unbounded();
+        let (events, mut from_servers) = futures::channel::mpsc::unbounded();
         let servers =
             if options.language_servers { ghostwrite_lsp::Registry::new(root.clone(), events) } else { ghostwrite_lsp::Registry::disabled(root.clone()) };
-        // Diagnostics arrive from the servers' reader threads.
-        cx.spawn(async move |this, cx| {
-            while let Some(ghostwrite_lsp::Event::Diagnostics { path, diagnostics }) = diagnostics.next().await {
-                let applied = this.update(cx, |this, cx| {
-                    if this.project.apply_diagnostics(&path, diagnostics) {
-                        cx.notify();
+        // Diagnostics, and files to show, arrive from the servers' reader threads.
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = from_servers.next().await {
+                let applied = this.update_in(cx, |this, window, cx| match event {
+                    ghostwrite_lsp::Event::Diagnostics { path, diagnostics } => {
+                        if this.project.apply_diagnostics(&path, diagnostics) {
+                            cx.notify();
+                        }
                     }
+                    ghostwrite_lsp::Event::Show { path, selection } => this.show_document(&path, selection, window, cx),
                 });
                 if applied.is_err() {
                     break;
@@ -197,7 +202,7 @@ impl Editor {
         let focus = cx.focus_handle();
         window.focus(&focus);
         Self {
-            project: Project::new(root, servers),
+            project: Project::new(root, servers, options.previews),
             focus,
             modal: Modal::default(),
             yanked: String::new(),

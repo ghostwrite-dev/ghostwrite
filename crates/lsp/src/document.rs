@@ -11,9 +11,9 @@ use crate::client::Client;
 use crate::convert::{position, uri};
 
 pub struct Document {
-    client: Arc<Client>,
+    pub(crate) client: Arc<Client>,
     language: &'static str,
-    uri: String,
+    pub(crate) uri: String,
     version: i32,
 }
 

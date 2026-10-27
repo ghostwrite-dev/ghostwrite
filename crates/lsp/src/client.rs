@@ -15,7 +15,16 @@ use serde_json::{Value, json};
 use crate::convert::{path_of, uri};
 
 pub enum Event {
-    Diagnostics { path: PathBuf, diagnostics: Vec<lsp_types::Diagnostic> },
+    Diagnostics {
+        path: PathBuf,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    },
+    /// The server wants `path` shown, at `selection` (tinymist, when its
+    /// preview is clicked).
+    Show {
+        path: PathBuf,
+        selection: Option<lsp_types::Range>,
+    },
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
@@ -97,13 +106,20 @@ impl Client {
                         }
                     }
                     (Some(_), Some(method)) => {
+                        let params = &message["params"];
                         let result = match method {
                             "workspace/configuration" => Value::Array(
-                                message["params"]["items"]
+                                params["items"]
                                     .as_array()
                                     .map(|items| items.iter().map(|i| settings(i["section"].as_str().unwrap_or(""))).collect())
                                     .unwrap_or_default(),
                             ),
+                            "window/showDocument" => {
+                                let path = params["uri"].as_str().and_then(path_of).filter(|_| params["external"] != true);
+                                let selection = serde_json::from_value(params["selection"].clone()).ok();
+                                let shown = path.is_some_and(|path| events.unbounded_send(Event::Show { path, selection }).is_ok());
+                                json!({ "success": shown })
+                            }
                             _ => Value::Null,
                         };
                         write(&writer, &json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
@@ -142,6 +158,7 @@ impl Client {
                         "publishDiagnostics": { "relatedInformation": false },
                     },
                     "workspace": { "configuration": true, "workspaceFolders": true },
+                    "window": { "showDocument": { "support": true } },
                 },
             },
         });
@@ -173,6 +190,11 @@ impl Client {
         self.pending.lock().unwrap().insert(id, tx);
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         rx
+    }
+
+    /// `workspace/executeCommand`.
+    pub fn execute(&self, command: &str, arguments: Value) -> oneshot::Receiver<Result<Value, String>> {
+        self.request("workspace/executeCommand", json!({ "command": command, "arguments": arguments }))
     }
 
     /// Characters that open the completion menu, as the server announced them.

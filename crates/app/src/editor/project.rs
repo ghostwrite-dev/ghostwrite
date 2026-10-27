@@ -1,5 +1,5 @@
 //! The project being edited, as a model: its folder, the open files, the
-//! file tree, its language servers, and what the status line says. The
+//! file tree, its language servers and previews, and what the status line says. The
 //! features (stories, completion) work on this; the editor around it
 //! adds keys, focus, prompts and drawing, and decides when to switch tabs.
 
@@ -19,6 +19,8 @@ pub struct Project {
     /// What the status line says, until something else does.
     pub status: Option<SharedString>,
     servers: ghostwrite_lsp::Registry,
+    /// Preview the files that can be (Typst), in the browser.
+    previews: bool,
 }
 
 /// The project's files as Claude's steps see them: open ones as they are on screen.
@@ -70,8 +72,8 @@ impl Disk {
 }
 
 impl Project {
-    pub fn new(root: PathBuf, servers: ghostwrite_lsp::Registry) -> Self {
-        Self { tree: Tree::new(root.clone()), root, tabs: Tabs::default(), status: None, servers }
+    pub fn new(root: PathBuf, servers: ghostwrite_lsp::Registry, previews: bool) -> Self {
+        Self { tree: Tree::new(root.clone()), root, tabs: Tabs::default(), status: None, servers, previews }
     }
 
     pub fn say(&mut self, message: impl Into<SharedString>) {
@@ -106,7 +108,11 @@ impl Project {
     /// A new tab for `text` (not switched to); returns its index.
     pub fn add(&mut self, path: Option<PathBuf>, text: String) -> usize {
         let lsp = path.as_deref().and_then(|p| document::server_for(&mut self.servers, p, &text));
-        self.tabs.add(|id| Document::new(id, path, text, lsp))
+        let ix = self.tabs.add(|id| Document::new(id, path, text, lsp));
+        if let Some(tab) = self.tabs.get_mut(ix).filter(|_| self.previews) {
+            preview(&mut tab.doc);
+        }
+        ix
     }
 
     /// The tab for `path`, opening the file if it isn't open (a missing file
@@ -158,6 +164,9 @@ impl Project {
                 let message = format!("saved {}", ghostwrite_project::display(&path, &self.root));
                 if tab.doc.path.as_ref() != Some(&path) {
                     tab.doc.moved(path, &mut self.servers);
+                    if self.previews {
+                        preview(&mut tab.doc);
+                    }
                 }
                 message
             }
@@ -189,6 +198,9 @@ impl Project {
             let Some(rest) = tab.doc.path.as_deref().and_then(|p| p.strip_prefix(from).ok()) else { continue };
             let moved = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
             tab.doc.moved(moved, &mut self.servers);
+            if self.previews {
+                preview(&mut tab.doc);
+            }
         }
         self.tree.renamed(from, to);
     }
@@ -277,4 +289,12 @@ impl Project {
             self.activate(ix);
         }
     }
+}
+
+/// tinymist's live preview of `doc`, opened in the browser, if it's Typst.
+fn preview(doc: &mut Document) {
+    let open = |url: String| {
+        std::process::Command::new("/usr/bin/open").arg(url).status().ok();
+    };
+    doc.preview = doc.lsp.as_ref().and_then(|lsp| ghostwrite_lsp::Preview::start(lsp, open));
 }

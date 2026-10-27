@@ -35,7 +35,7 @@ fn open_with<'a>(text: &str, replies: &[&str], language_servers: bool, cx: &'a m
     let backends = (!replies.is_empty()).then(|| Backend::Scripted(replies.iter().map(|r| r.to_string()).collect())).into_iter().collect();
     let root = dir.clone();
     let (editor, cx) = cx.add_window_view(|window, cx| {
-        let mut editor = Editor::new(root, Options { language_servers, backends }, window, cx);
+        let mut editor = Editor::new(root, Options { language_servers, previews: false, backends }, window, cx);
         editor.open_paths(vec![path], cx);
         editor
     });

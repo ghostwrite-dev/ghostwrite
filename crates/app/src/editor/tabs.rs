@@ -52,6 +52,13 @@ impl Tab {
         self.view.selection = self.view.selection.clamp(self.doc.buffer.len());
     }
 
+    /// Scroll the file's preview, if it has one, to the cursor.
+    pub fn follow_cursor(&mut self) {
+        if let Some(preview) = &mut self.doc.preview {
+            preview.scroll(self.doc.buffer.text(), self.view.selection.head);
+        }
+    }
+
     /// Take the file's new text from disk, keeping the cursor's line and column.
     pub fn reload(&mut self, text: String) {
         let (line, column) = self.cursor_position();

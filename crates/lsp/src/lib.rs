@@ -2,19 +2,25 @@
 //! language per project on first use; a [`Document`] keeps one open file in
 //! sync with its server and asks it things; [`convert`] turns the answers
 //! into byte offsets and plain text. Diagnostics arrive as [`Event`]s.
+//! A Typst file can also have tinymist's live [`Preview`].
 
 pub mod client;
 pub mod convert;
 pub mod document;
+pub mod preview;
 mod python;
 pub mod registry;
 
 pub use client::{Client, Event};
 pub use document::Document;
+pub use preview::Preview;
 pub use registry::Registry;
 
 /// A diagnostic as the server sends it, before [`convert::diagnostics`] places it.
 pub use lsp_types::Diagnostic as RawDiagnostic;
+
+/// A range as the server sends it, before [`convert::range`] places it.
+pub use lsp_types::Range as RawRange;
 
 /// How bad a diagnostic is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

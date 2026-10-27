@@ -1,5 +1,5 @@
 //! One open file: its buffer, where it lives on disk, its language and
-//! highlights, and its language server. How it's shown (selection, scroll)
+//! highlights, its language server, and its live preview (Typst). How it's shown (selection, scroll)
 //! is its tab's [`View`](super::tabs::View).
 
 use std::path::{Path, PathBuf};
@@ -28,6 +28,8 @@ pub struct Document {
     pub indent: IndentUnit,
     /// Differs from the file on disk.
     pub dirty: bool,
+    /// Before `lsp`, so it stops before the file closes on the server.
+    pub preview: Option<ghostwrite_lsp::Preview>,
     pub lsp: Option<ghostwrite_lsp::Document>,
     pub diagnostics: Vec<Diagnostic>,
     /// The buffer version the language server (and `dirty`) last saw.
@@ -46,6 +48,7 @@ impl Document {
             buffer,
             path,
             dirty: false,
+            preview: None,
             lsp,
             diagnostics: vec![],
             highlights: (u64::MAX, vec![]),
@@ -117,6 +120,7 @@ impl Document {
         self.language = Language::for_path(&path);
         self.highlights.0 = u64::MAX;
         // Closes it on the old server first.
+        self.preview = None;
         self.lsp = None;
         self.diagnostics.clear();
         self.lsp = server_for(servers, &path, self.buffer.text());
