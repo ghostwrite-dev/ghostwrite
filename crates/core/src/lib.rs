@@ -1,32 +1,48 @@
 //! The editing model, with no UI: a [`Buffer`] of text with undo history,
 //! helix-style [`Range`] selections, the motions and text objects that move
 //! them, the [`modal`] key handling that drives it all, the [`language`]s it
-//! knows, and [`syntax`] highlighting.
+//! knows, and [`syntax`] highlighting; and Lean's [`abbreviation`]s.
 //!
 //! Every offset is a byte offset into the text, always on a char boundary.
 
+pub mod abbreviation;
 pub mod buffer;
 pub mod indent;
 pub mod language;
+mod lean;
 pub mod modal;
 pub mod movement;
 pub mod selection;
 pub mod syntax;
 pub mod textobject;
 
-pub use buffer::Buffer;
+pub use buffer::{Buffer, Edit};
 pub use language::Language;
-pub use modal::{Effect, Key, MenuKey, Modal, Mode, Outcome, Registers, Review, Target, TreeCommand};
+pub use modal::{Effect, Key, MenuKey, Modal, Mode, Outcome, Place, Registers, Review, Target, TreeCommand};
 pub use selection::Range;
 
-/// The boundary after the char at `i` (or the end).
+/// The boundary after the character at `i` (or the end): a character as
+/// it's seen, which may be several code points (`é` as `e` and an accent,
+/// a flag, an emoji with a skin tone).
 pub fn next_char(text: &str, i: usize) -> usize {
-    text[i..].chars().next().map_or(text.len(), |c| i + c.len_utf8())
+    let mut cursor = unicode_segmentation::GraphemeCursor::new(i, text.len(), true);
+    cursor.next_boundary(text, 0).ok().flatten().unwrap_or(text.len())
 }
 
-/// The boundary before the char ending at `i` (or the start).
+/// The boundary before the character ending at `i` (or the start).
 pub fn prev_char(text: &str, i: usize) -> usize {
-    text[..i].chars().next_back().map_or(0, |c| i - c.len_utf8())
+    let mut cursor = unicode_segmentation::GraphemeCursor::new(i, text.len(), true);
+    cursor.prev_boundary(text, 0).ok().flatten().unwrap_or(0)
+}
+
+/// How many columns `text` takes on screen: wide characters two, a tab to
+/// the next stop of `tab_width`.
+pub fn display_width(text: &str, tab_width: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    text.graphemes(true).fold(0, |column, g| match g {
+        "\t" => column + tab_width.max(1) - column % tab_width.max(1),
+        g => column + unicode_width::UnicodeWidthStr::width(g).max(1),
+    })
 }
 
 /// Byte offset → (zero-based line, char column), for status lines and sessions.

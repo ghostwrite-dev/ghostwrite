@@ -20,8 +20,10 @@ use crate::protocol::SYSTEM;
 use crate::{settings, tools};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
-/// What Claude Code may use to look around the project: its own reading tools, and
-/// shell commands that only read (not `find`, whose `-delete` and `-exec` write).
+/// What Claude Code may use to look around the project: its own reading
+/// tools, and shell commands that only read whatever they're given. Not
+/// `find` (`-delete`, `-exec`), `rg` (`--pre` runs a program), `tree` (`-o`
+/// writes a file), nor `git log`/`show`/`diff` (`--output` writes one).
 const READ_ONLY: &[&str] = &[
     "Read",
     "Glob",
@@ -32,11 +34,6 @@ const READ_ONLY: &[&str] = &[
     "Bash(tail:*)",
     "Bash(wc:*)",
     "Bash(grep:*)",
-    "Bash(rg:*)",
-    "Bash(tree:*)",
-    "Bash(git log:*)",
-    "Bash(git show:*)",
-    "Bash(git diff:*)",
     "Bash(git status:*)",
     "Bash(git blame:*)",
 ];
@@ -83,8 +80,9 @@ impl Backend {
         match self {
             Backend::Api { key } => run_api(key, req, listener, cancel),
             Backend::ClaudeCode => match run_claude_code(req, req.session.as_deref(), listener, cancel) {
-                // The session may be gone: start over with the whole conversation.
-                Err(_) if req.session.is_some() => run_claude_code(req, None, listener, cancel),
+                // The session is gone: start over with the whole conversation (not
+                // after other errors, a rate limit say, which would only fail again, costlier).
+                Err(e) if req.session.is_some() && e.contains("No conversation found") => run_claude_code(req, None, listener, cancel),
                 result => result,
             },
             Backend::Scripted(replies) => {
@@ -121,7 +119,10 @@ fn run_api(key: &str, req: &Request, listener: &mut dyn Listener, cancel: &Atomi
             // Re-run a safety-classifier decline on Anthropic's recommended model for that category.
             "fallbacks": "default",
             "output_config": { "effort": effort() },
-            "system": SYSTEM,
+            // Cached: the tools and the system prompt (never change), and the
+            // conversation so far (each round and follow-up resends it).
+            "system": [{ "type": "text", "text": SYSTEM, "cache_control": { "type": "ephemeral" } }],
+            "cache_control": { "type": "ephemeral" },
             "messages": messages,
         });
         if req.root.is_some() {
@@ -240,6 +241,43 @@ fn run_claude_code(req: &Request, resume: Option<&str>, listener: &mut dyn Liste
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run `claude`: {e}"))?;
     child.stdin.take().ok_or("no stdin")?.write_all(message.as_bytes()).map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
+    // Stopped, it's killed at once, not when it next prints (it may be thinking for minutes).
+    let (pid, done) = (child.id(), AtomicBool::new(false));
+    let stderr = child.stderr.take();
+    std::thread::scope(|scope| {
+        // Read as it comes, so a full pipe never stalls it.
+        let errors = scope.spawn(move || {
+            let mut text = String::new();
+            if let Some(mut stderr) = stderr {
+                std::io::Read::read_to_string(&mut stderr, &mut text).ok();
+            }
+            text
+        });
+        scope.spawn(|| {
+            while !done.load(Ordering::SeqCst) {
+                if cancel.load(Ordering::SeqCst) {
+                    // SAFETY: kill(2) only sends a signal, to our own child.
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let result = read_claude_code(stdout, &mut child, req, listener, cancel);
+        done.store(true, Ordering::SeqCst);
+        let errors = errors.join().unwrap_or_default();
+        result.map_err(|e| if e.starts_with("claude exited") { format!("{e}: {}", errors.trim()) } else { e })
+    })
+}
+
+/// Claude Code's stream, to `listener`, until its result (or it's stopped).
+fn read_claude_code(
+    stdout: std::process::ChildStdout,
+    child: &mut std::process::Child,
+    req: &Request,
+    listener: &mut dyn Listener,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
     // macOS paths may come back resolved: /var is /private/var.
     let real_root = req.root.as_ref().and_then(|r| r.canonicalize().ok());
     let relative = |path: &str| -> Option<String> {
@@ -253,6 +291,7 @@ fn run_claude_code(req: &Request, resume: Option<&str>, listener: &mut dyn Liste
     for line in BufReader::new(stdout).lines() {
         if cancel.load(Ordering::SeqCst) {
             child.kill().ok();
+            child.wait().ok();
             return Ok(());
         }
         let Ok(value) = serde_json::from_str::<Value>(&line.map_err(|e| e.to_string())?) else { continue };
@@ -294,10 +333,14 @@ fn run_claude_code(req: &Request, resume: Option<&str>, listener: &mut dyn Liste
             _ => {}
         }
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if cancel.load(Ordering::SeqCst) {
+        child.wait().ok();
+        return Ok(());
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
     match failure {
         Some(message) => Err(message),
-        None if !out.status.success() => Err(format!("claude exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim())),
+        None if !status.success() => Err(format!("claude exited with {status}")),
         None => Ok(()),
     }
 }
@@ -373,7 +416,8 @@ mod tests {
     fn claude_code_follows_what_the_user_says() {
         let text = "def add(a, b):\n    pass\n";
         let first = ask(text, 0..24, "implement it with type hints", vec![]);
-        let followup = crate::FollowUp { reply: first, decided: vec![], said: "why int and not float?".into(), correction: false, command: None };
+        let followup =
+            crate::FollowUp { reply: first, decided: vec![], said: "why int and not float?".into(), correction: false, command: None, terminal: None };
         let second = ask(text, 0..24, "implement it with type hints", vec![followup]);
         assert!(matches!(item(&second), protocol::Reply::Note(_)), "a question is answered with a note: {second}");
     }
@@ -422,7 +466,7 @@ mod tests {
                 protocol::Reply::Done { .. } => break,
                 other => panic!("a tour is notes: {other:?}"),
             }
-            followups.push(crate::FollowUp { reply: out, decided: vec![], said: String::new(), correction: false, command: None });
+            followups.push(crate::FollowUp { reply: out, decided: vec![], said: String::new(), correction: false, command: None, terminal: None });
         }
         assert!(files.iter().any(|f| f == "util.py"), "a note in util.py: {files:?}");
     }
@@ -462,7 +506,7 @@ mod tests {
                 protocol::Reply::Step(step) => step,
                 protocol::Reply::Done { .. } => break,
                 protocol::Reply::Note(_) => {
-                    followups.push(crate::FollowUp { reply: out.0, decided: vec![], said: String::new(), correction: false, command: None });
+                    followups.push(crate::FollowUp { reply: out.0, decided: vec![], said: String::new(), correction: false, command: None, terminal: None });
                     continue;
                 }
                 protocol::Reply::Partial => panic!("{}", out.0),
@@ -476,7 +520,7 @@ mod tests {
             std::fs::write(root.join(&file), text).unwrap();
             edited.push(file);
             let decided = vec![format!("accepted: {}", crate::Item::Step(step).describe())];
-            followups.push(crate::FollowUp { reply: out.0, decided, said: String::new(), correction: false, command: None });
+            followups.push(crate::FollowUp { reply: out.0, decided, said: String::new(), correction: false, command: None, terminal: None });
         }
         assert!(edited.iter().any(|f| f == "util.py") && edited.iter().any(|f| f == "main.py"), "edits in both files: {edited:?}");
     }
@@ -490,8 +534,13 @@ mod tests {
         let first = ask_in(&root, text, 0..text.len(), "implement it", vec![]);
         assert!(matches!(item(&first), protocol::Reply::Step(_)), "{first}");
         let said = "don't use sum(); write an explicit for loop".into();
-        let second =
-            ask_in(&root, text, 0..text.len(), "implement it", vec![crate::FollowUp { reply: first, decided: vec![], said, correction: false, command: None }]);
+        let second = ask_in(
+            &root,
+            text,
+            0..text.len(),
+            "implement it",
+            vec![crate::FollowUp { reply: first, decided: vec![], said, correction: false, command: None, terminal: None }],
+        );
         let protocol::Reply::Step(step) = item(&second) else { panic!("an edit: {second}") };
         assert!(step.new.join("\n").contains("for ") || step.say.contains("loop"), "{second}");
     }
@@ -525,6 +574,7 @@ mod tests {
             said: String::new(),
             correction: false,
             command: None,
+            terminal: None,
         });
         let protocol::Reply::Step(step) = protocol::parse(&first.0, true) else { panic!("an edit first: {}", first.0) };
         let edit = crate::placement::edit(text, &step, 0..2).expect("it places");
@@ -574,6 +624,7 @@ mod tests {
             said: "what was the codeword in my first message?".into(),
             correction: false,
             command: None,
+            terminal: None,
         });
         req.session = Some(session);
         assert!(!req.latest().contains("PELICAN"), "only the newest turn is sent");

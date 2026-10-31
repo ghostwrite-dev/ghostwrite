@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use ghostwrite_project::files::{files, inside};
+use ghostwrite_project::files::{files, inside, searchable};
 use regex::Regex;
 use serde_json::{Value, json};
 
@@ -70,7 +70,7 @@ pub fn call(root: &Path, name: &str, input: &Value) -> Result<String, String> {
             let pattern = Regex::new(input["pattern"].as_str().ok_or("search needs a pattern")?).map_err(|e| e.to_string())?;
             let mut hits = vec![];
             'files: for rel in files(root, &folder()?) {
-                let Ok(text) = std::fs::read_to_string(root.join(&rel)) else { continue };
+                let Some(text) = searchable(&root.join(&rel)) else { continue };
                 for (i, line) in text.lines().enumerate().filter(|(_, l)| pattern.is_match(l)) {
                     hits.push(format!("{rel}:{}: {}", i + 1, line.trim()));
                     if hits.len() >= MAX_MATCHES {

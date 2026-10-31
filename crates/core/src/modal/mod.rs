@@ -7,7 +7,10 @@
 //! In normal and select mode every key is consumed, so stray letters never
 //! reach the text; in insert mode typed text arrives through
 //! [`Modal::insert`]. Tree mode drives the file tree instead of a buffer:
-//! [`Modal::tree_key`] turns keys into [`TreeCommand`]s.
+//! [`Modal::tree_key`] turns keys into [`TreeCommand`]s. Terminal mode
+//! gives the keys to the user's shell: the editor sends them there itself,
+//! and it's entered and left like the review modes, so a story under
+//! review is still there to go back to.
 //!
 //! Two modes are for reviewing: AI mode while a Claude story is up, and tour
 //! mode while a tour is (`:output` errors, diagnostics, search matches). Tab,
@@ -31,6 +34,7 @@ mod tests;
 
 use crate::buffer::Buffer;
 use crate::indent::IndentUnit;
+use crate::language::Language;
 use crate::selection::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +46,8 @@ pub enum Mode {
     Tree,
     /// Reviewing a story.
     Ai,
+    /// The terminal has the keyboard.
+    Terminal,
 }
 
 impl Mode {
@@ -52,6 +58,7 @@ impl Mode {
             Mode::Select => "SEL",
             Mode::Tree => "TRE",
             Mode::Ai => "AI",
+            Mode::Terminal => "TERM",
         }
     }
 
@@ -94,16 +101,64 @@ pub enum Effect {
     FocusTree,
     /// `:`
     CommandLine,
-    /// `a`: ask Claude about the selection or current line, or to change it.
+    /// `space a`: ask Claude about the selection or current line, or to change it.
     Assist,
-    /// `?`
+    /// `space ?`: every key.
     Cheatsheet,
+    /// `/`, `?`: search the file, forward or back, as it's typed.
+    Find {
+        backward: bool,
+    },
+    /// `n`, `N`: the next match of the last search, or the one before.
+    FindNext {
+        backward: bool,
+    },
+    /// `*`: search for what's selected.
+    FindSelection,
+    /// `gr`, `space r`, `space .`, `space s`: the language server's
+    /// references, renaming, code actions, and the file's symbols.
+    References,
+    Rename,
+    CodeActions,
+    Symbols,
+    /// `space f`, `space b`: pick a file of the project, or an open one.
+    PickFile,
+    PickBuffer,
+    /// `zz` `zt` `zb`: the cursor's line in the middle, at the top, at the bottom of the screen.
+    View(Place),
+    /// `gt` `gc` `gb`: to the top, middle, bottom line on screen.
+    ScreenLine(Place),
+    /// `]d`, `[d`: the next diagnostic, or the one before.
+    Diagnostic {
+        forward: bool,
+    },
+    /// `.`: the last change again.
+    Repeat,
+    /// `Q`: record keys (again: stop); `q`: play them.
+    RecordMacro,
+    PlayMacro,
+    /// `ctrl-o`, `ctrl-i`: back to where a jump came from, and forward again.
+    JumpBack,
+    JumpForward,
     /// `gd`, `space k`, `space d`: the language server's definition, docs, diagnostics.
     GotoDefinition,
     Hover,
     Diagnostics,
     /// `space /`: search the project.
     Search,
+    /// `space t`: the terminal, and terminal mode.
+    Terminal,
+    /// `space j`: go to the next error in the file (or warning, if it has
+    /// no errors), and bring a Typst file's pages there.
+    NextProblem,
+}
+
+/// Where on screen (`zt`, `gc`…).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    Top,
+    Middle,
+    Bottom,
 }
 
 /// What a key does in tree mode.
@@ -134,8 +189,10 @@ pub enum Review {
     Next,
     /// Enter: ask about it, or redirect.
     Ask,
-    /// Esc: stop.
+    /// Esc: stop, once Esc has been pressed twice in a row ([`Review::Stopping`] first).
     Stop,
+    /// The first Esc: one more stops.
+    Stopping,
 }
 
 /// What a key does while the completion menu is open.
@@ -166,12 +223,23 @@ pub struct Target<'a> {
     pub indent: &'a IndentUnit,
     /// Rows on screen, for paging.
     pub page_rows: usize,
+    /// The buffer's language: whether `\alpha` types `α` (see
+    /// [`crate::abbreviation`]), and which quotes close themselves.
+    pub language: Option<&'static Language>,
+}
+
+impl Target<'_> {
+    fn abbreviations(&self) -> bool {
+        self.language.is_some_and(|l| l.abbreviations)
+    }
 }
 
 /// The yank register and the system clipboard, shared across buffers.
+/// The registers, by name: `None` is the default one, `+` the clipboard,
+/// `_` throws away, and any other char names one of its own (`"a y`).
 pub trait Registers {
-    fn yanked(&self) -> String;
-    fn yank(&mut self, text: String);
+    fn yanked(&self, register: Option<char>) -> String;
+    fn yank(&mut self, register: Option<char>, text: String);
     fn clipboard(&self) -> Option<String>;
     fn set_clipboard(&mut self, text: String);
 }
@@ -194,6 +262,12 @@ enum Pending {
     Object {
         around: bool,
     },
+    /// `"`, then the register's name.
+    Register,
+    /// `z`: where the cursor's line goes on screen.
+    View,
+    /// `]`, `[`: the next or previous something (`d`: diagnostic).
+    Next(bool),
 }
 
 #[derive(Debug)]
@@ -204,11 +278,29 @@ pub struct Modal {
     pending: Option<Pending>,
     count: Option<usize>,
     sticky_col: Option<usize>,
+    /// The abbreviation being typed (`\alp`), from its backslash to the cursor.
+    abbreviating: Option<(usize, usize)>,
+    /// Esc was pressed in a review: another stops it.
+    stopping: bool,
+    /// The last key would have edited, but a review was up.
+    refused: bool,
+    /// The register the next yank, delete or paste uses (`"a`).
+    register: Option<char>,
 }
 
 impl Default for Modal {
     fn default() -> Self {
-        Self { mode: Mode::Normal, entered_from: vec![], pending: None, count: None, sticky_col: None }
+        Self {
+            mode: Mode::Normal,
+            entered_from: vec![],
+            pending: None,
+            count: None,
+            sticky_col: None,
+            abbreviating: None,
+            stopping: false,
+            refused: false,
+            register: None,
+        }
     }
 }
 
@@ -231,9 +323,14 @@ impl Modal {
             Some(Pending::SurroundReplaceWith(_)) => "mr…",
             Some(Pending::Object { around: true }) => "ma",
             Some(Pending::Object { around: false }) => "mi",
+            Some(Pending::Register) => "\"",
+            Some(Pending::View) => "z",
+            Some(Pending::Next(true)) => "]",
+            Some(Pending::Next(false)) => "[",
             None => "",
         };
-        format!("{count}{pending}")
+        let register = self.register.map(|r| format!("\"{r}")).unwrap_or_default();
+        format!("{register}{count}{pending}")
     }
 
     /// Back to normal mode, closing an insert session as one undo step.
@@ -248,19 +345,61 @@ impl Modal {
     }
 
     /// Typed text in insert mode; `false` (and nothing typed) in other modes.
+    /// A typed opening bracket or quote comes with its closing one (see
+    /// [`insert::paired`]), and typing a closing one that's next steps over
+    /// it. In a language with abbreviations, a backslash starts an
+    /// abbreviation (see [`Modal::abbreviate`]).
     pub fn insert(&mut self, text: &str, t: &mut Target) -> bool {
         if self.mode != Mode::Insert {
             return false;
         }
+        if t.abbreviations() {
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if t.selection.is_empty() && self.abbreviate(c, t) => return true,
+                (Some(_), None) => {}
+                _ => {
+                    self.finish_abbreviation(t);
+                }
+            }
+        }
+        let range = t.selection.bytes();
+        self.sticky_col = None;
+        let (before, after) = (&t.buffer.text()[..range.start], &t.buffer.text()[range.end..]);
+        let mut typed = text.chars();
+        if let (Some(c), None, true) = (typed.next(), typed.next(), range.is_empty()) {
+            if insert::closes(c) && after.starts_with(c) {
+                *t.selection = Range::point(range.start + c.len_utf8());
+                return true;
+            }
+            if let Some(close) = insert::paired(c, before, after).filter(|_| !t.language.is_some_and(|l| l.unpaired.contains(&c))) {
+                t.buffer.begin(*t.selection);
+                t.buffer.edit(range.clone(), &format!("{c}{close}"));
+                *t.selection = Range::point(range.start + c.len_utf8());
+                return true;
+            }
+        }
+        t.buffer.begin(*t.selection);
+        t.buffer.edit(range.clone(), text);
+        *t.selection = Range::point(range.start + text.len());
+        true
+    }
+
+    /// Text typed in insert mode just as it is: no pairs, no abbreviations
+    /// (what an input method is composing, or commits).
+    pub fn insert_as_is(&mut self, text: &str, t: &mut Target) -> bool {
+        if self.mode != Mode::Insert {
+            return false;
+        }
+        self.sticky_col = None;
         let range = t.selection.bytes();
         t.buffer.begin(*t.selection);
         t.buffer.edit(range.clone(), text);
         *t.selection = Range::point(range.start + text.len());
-        self.sticky_col = None;
         true
     }
 
-    /// Enter AI or tour mode over the current one (an insert session should
+    /// Enter AI, tour or terminal mode over the current one (an insert session should
     /// be closed first). Entering the mode you're in changes nothing.
     pub fn enter(&mut self, mode: Mode) {
         if self.mode == mode {
@@ -273,7 +412,7 @@ impl Modal {
         self.count = None;
     }
 
-    /// Leave AI or tour mode for the mode it was entered from. If it isn't
+    /// Leave AI, tour or terminal mode for the mode it was entered from. If it isn't
     /// the current mode but one further down, it's dropped from under it.
     pub fn leave(&mut self, mode: Mode) {
         if self.mode == mode {
@@ -284,6 +423,11 @@ impl Modal {
             // What was entered from it goes back to what it was entered from.
             self.entered_from.remove(at);
         }
+    }
+
+    /// Whether the last key would have edited the text, but a review was up (and say so once).
+    pub fn take_refused(&mut self) -> bool {
+        std::mem::take(&mut self.refused)
     }
 
     /// The mode the current one was entered from (AI and tour mode).
@@ -297,16 +441,26 @@ impl Modal {
         if self.mode == Mode::Tree {
             return self.tree_key(key);
         }
+        if self.mode == Mode::Terminal {
+            return Outcome::Ignored;
+        }
+        let stopping = std::mem::take(&mut self.stopping);
         if self.mode.reviewing()
             && self.pending.is_none()
             && let Some(review) = review_of(key)
         {
+            // Esc out of habit doesn't end a story: it takes two.
+            let review = match review {
+                Review::Stop if !stopping => Review::Stopping,
+                review => review,
+            };
+            self.stopping = review == Review::Stopping;
             return Outcome::Review(review);
         }
         if self.mode == Mode::Insert {
             return self.insert_key(key, t);
         }
-        if matches!(key, Key::Ctrl(c) if !matches!(c, 'd' | 'u' | 'f' | 'b')) {
+        if matches!(key, Key::Ctrl(c) if !matches!(c, 'd' | 'u' | 'f' | 'b' | 'o' | 'i' | 'a' | 'x' | 'c')) {
             return Outcome::Ignored;
         }
         t.buffer.begin(*t.selection);
@@ -325,11 +479,14 @@ impl Modal {
     }
 }
 
+/// The largest count: more is taken as this (`99999999999p` doesn't run out of memory).
+const MAX_COUNT: usize = 100_000;
+
 /// What a key does in AI mode, if it's a review key.
 fn review_of(key: Key) -> Option<Review> {
     Some(match key {
         Key::Tab => Review::Next,
-        Key::Enter | Key::Char('a') => Review::Ask,
+        Key::Enter => Review::Ask,
         Key::Escape => Review::Stop,
         _ => return None,
     })

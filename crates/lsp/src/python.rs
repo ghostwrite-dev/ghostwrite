@@ -18,6 +18,16 @@ fn login_shell(script: &str, dir: Option<&Path>) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The login shell's environment (its PATH above all: a Finder-launched
+/// app's is minimal, and servers run `node`, `go`, `cargo`…), read once.
+pub(crate) fn login_env() -> &'static [(String, String)] {
+    static ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    ENV.get_or_init(|| {
+        let out = login_shell("env -0", None).unwrap_or_default();
+        out.split('\0').filter_map(|pair| pair.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    })
+}
+
 /// `command -v` for each name through the login shell (a Finder-launched
 /// app has a minimal PATH): the absolute path, or `None`.
 pub(crate) fn which_all(names: &[&str]) -> Vec<Option<PathBuf>> {
@@ -56,7 +66,7 @@ pub fn interpreter(root: &Path) -> Option<PathBuf> {
 pub fn server_env(root: &Path) -> Vec<(String, String)> {
     let venv = interpreter(root).and_then(|p| p.parent()?.parent().map(Path::to_path_buf)).filter(|v| v.join("pyvenv.cfg").exists());
     let Some(venv) = venv.or_else(|| env(root)) else { return vec![] };
-    let path = std::env::var("PATH").unwrap_or_default();
+    let path = login_env().iter().find(|(k, _)| k == "PATH").map_or_else(|| std::env::var("PATH").unwrap_or_default(), |(_, v)| v.clone());
     vec![("VIRTUAL_ENV".into(), venv.display().to_string()), ("PATH".into(), format!("{}:{path}", venv.join("bin").display()))]
 }
 

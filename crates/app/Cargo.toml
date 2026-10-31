@@ -9,12 +9,18 @@ publish.workspace = true
 ghostwrite-ai.workspace = true
 ghostwrite-core.workspace = true
 ghostwrite-lsp.workspace = true
+ghostwrite-pdf.workspace = true
 ghostwrite-project.workspace = true
+ghostwrite-typst.workspace = true
 
 anyhow.workspace = true
 futures.workspace = true
 gpui.workspace = true
+image.workspace = true
+nucleo-matcher.workspace = true
+regex.workspace = true
 serde_json.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

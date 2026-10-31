@@ -1,6 +1,6 @@
 //! The reply format: what the model is asked to write, and parsing it as it
 //! streams. A story goes one item at a time: every reply is exactly one item
-//! (a note, an edit, or a new file) or `<done>`. Its parts come in a fixed
+//! (a note, an edit, a new file, a file removed or renamed) or `<done>`. Its parts come in a fixed
 //! order, each closed before the next opens, so an item can be checked part by
 //! part as it arrives. Quoted lines may carry the numbers they were shown with
 //! ([`crate::lines`]); those come off here, as where to look.
@@ -58,8 +58,9 @@ file by file, each edit in the file its lines are in, named in <file>: when one 
 the next depends on), go on to the next. Don't stop at the file the user pointed at while other files still need \
 changing, and read a file before you edit it.
 
-To make a new file, write <create> in place of <file> and <at>, with the file's first lines in <new>; later \
-items add to it with <file>:
+To make a new file, write <create> in place of <file> and <at>, with only its first few lines in <new> (at \
+most 8: a header, the imports, or the first definition's first line). Never write the whole file at once: later \
+items add the rest with <file>, small edits as anywhere else, so the user sees it built up step by step:
 
 <create>
 src/util.rs
@@ -71,12 +72,35 @@ why it's needed
 its first lines
 </new>
 
+To remove a file, or to rename or move one, write <remove> (its path) or <rename> (its path, then the new \
+one) in place of <file> and <at>, with no <new>. The user sees it in the file tree; accepted, a removed file goes \
+to the Trash, and later items name a renamed file by its new path:
+
+<remove>
+src/old.rs
+</remove>
+<say>
+why it can go
+</say>
+
+<rename>
+src/util.rs
+src/helpers.rs
+</rename>
+<say>
+why
+</say>
+
 Rules:
 - <file> is always there: the path of the file the item is in, relative to the project, of a file that exists.
 - <at> is consecutive lines copied from that file as it is now, each with its number as shown (`2│` and then \
 the text), the text exactly, indentation included, never shortened or paraphrased. One to three lines are \
 usually enough. A note about the file as a whole leaves <at> empty.
 - <new> is code as it will be in the file, without numbers.
+- <say> is shown with its math typeset: write math as Typst math, in `$…$` (a dollar that isn't math is \\$). \
+About a Typst file, all of <say> is Typst markup.
+- A .pdf is shown to you as its text, each page after a `── page N ──` line. Read it to understand, but never \
+make an item about it: it can't have notes or edits. Put them in the file it's made from, if there is one.
 - To insert, put a neighbouring line in <at> and repeat it in <new> before or after the new lines. An empty \
 <new> deletes the <at> lines.
 - Each tag on its own line, in this order, and nothing else in the reply: no markdown, no code fences, no \
@@ -119,6 +143,13 @@ pub fn misplaced(file: &str, text: &str, quoted: &[String], near: Range<usize>) 
     )
 }
 
+/// What the model is told when an item is about a PDF.
+pub fn about_a_pdf(file: &str) -> String {
+    format!(
+        "your item is about {file}, a PDF: it can't have notes or edits. Make the item about another file (the one it's made from, if there is one), and reply with it."
+    )
+}
+
 /// What the model is told when an item names a file that isn't in the project.
 pub fn missing_file(file: &str) -> String {
     format!("there's no file {file} in the project. Name an existing file in <file> (or make one with <create>), and reply with the corrected item.")
@@ -126,7 +157,7 @@ pub fn missing_file(file: &str) -> String {
 
 /// What the model is told when a reply isn't an item.
 pub const NOTHING_TO_REVIEW: &str = "your reply isn't an item in the format (<file>, <at>, <say>, and <new> for an \
-    edit; or <create>; or <done>), so the user sees nothing. Reply again with one item.";
+    edit; or <create>, <remove> or <rename>; or <done>), so the user sees nothing. Reply again with one item.";
 
 /// One note: the file and lines it's about (no lines: the file as a whole),
 /// and what it says.
@@ -162,10 +193,27 @@ pub struct Step {
     pub line: Option<usize>,
     pub new: Vec<String>,
     pub say: String,
-    /// It makes `file`, which doesn't exist yet.
-    pub create: bool,
+    /// What it does to `file` as a whole, if anything: make it, remove it, rename it.
+    pub op: Option<FileOp>,
     /// `</new>` has arrived; until then `new` is still being written.
     pub complete: bool,
+}
+
+/// A step that's about a whole file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileOp {
+    /// Make the file, which doesn't exist yet, with `new` as its first lines.
+    Create,
+    /// Move it to the Trash.
+    Remove,
+    /// Move it to this path (relative to the project).
+    Rename(String),
+}
+
+impl Step {
+    pub fn creates(&self) -> bool {
+        self.op == Some(FileOp::Create)
+    }
 }
 
 /// What a reply is, as far as it has arrived.
@@ -194,6 +242,18 @@ pub fn parse(reply: &str, finished: bool) -> Reply {
             .filter(|(_, closed)| *closed)
             .and_then(|(lines, _)| lines.into_iter().map(|l| l.trim().to_string()).find(|l| !l.is_empty()))
     };
+    // A whole file removed or renamed: ready once `<say>` is closed.
+    let said = || tagged_lines(reply, "<say>", "</say>").filter(|(_, closed)| *closed).map(|(say, _)| say.join("\n").trim().to_string());
+    let op =
+        |file: String, op: FileOp, say: String| Reply::Step(Step { file: Some(file), old: vec![], line: None, new: vec![], say, op: Some(op), complete: true });
+    if let Some(file) = path("<remove>", "</remove>") {
+        return said().map_or(Reply::Partial, |say| op(file, FileOp::Remove, say));
+    }
+    if let Some((paths, true)) = tagged_lines(reply, "<rename>", "</rename>") {
+        let mut paths = paths.into_iter().map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
+        let (Some(from), Some(to)) = (paths.next(), paths.next()) else { return Reply::Partial };
+        return said().map_or(Reply::Partial, |say| op(from, FileOp::Rename(to), say));
+    }
     let (file, at, create) = match path("<create>", "</create>") {
         Some(path) => (path, vec![], true),
         None => {
@@ -209,7 +269,10 @@ pub fn parse(reply: &str, finished: bool) -> Reply {
     let (at, line) = lines::unnumbered(&at);
     match tagged_lines(reply, "<new>", "</new>") {
         // New lines are code; numbers copied onto them by mistake come off too.
-        Some((new, complete)) => Reply::Step(Step { file: Some(file), old: at, line, new: lines::unnumbered(&new).0, say, create, complete }),
+        Some((new, complete)) => {
+            let op = create.then_some(FileOp::Create);
+            Reply::Step(Step { file: Some(file), old: at, line, new: lines::unnumbered(&new).0, say, op, complete })
+        }
         None if finished && !create => Reply::Note(Note { file: Some(file), at, text: say, line }),
         None => Reply::Partial,
     }
@@ -220,8 +283,10 @@ pub fn parse(reply: &str, finished: bool) -> Reply {
 enum Expect {
     /// `<file>`, `<create>` or `<done>` (blank lines before it are fine).
     Start,
-    /// The path line inside `<file>` or `<create>`.
+    /// The path line inside `<file>`, `<create>`, `<remove>` or `<rename>`.
     Path(&'static str),
+    /// The new path inside `<rename>`.
+    To,
     /// The closing tag after the path.
     Close(&'static str),
     /// `<at>`, after `</file>`.
@@ -244,21 +309,35 @@ enum Expect {
 /// being written isn't judged yet. `finished`: the reply is complete, so it
 /// must have ended where an item can.
 pub fn check(reply: &str, finished: bool) -> Result<(), String> {
-    let start = ["<file>", "<create>", "<done>"].iter().filter_map(|t| find_tag(reply, t)).min().unwrap_or(reply.len());
+    let start = ["<file>", "<create>", "<remove>", "<rename>", "<done>"].iter().filter_map(|t| find_tag(reply, t)).min().unwrap_or(reply.len());
     let body = &reply[start..];
     let complete = if finished { body } else { &body[..body.rfind('\n').map_or(0, |i| i + 1)] };
     let mut expect = Expect::Start;
     let mut seen = 0;
+    // A removal or rename: no `<new>` after its `<say>`.
+    let mut whole_file = false;
+    let mut creating = false;
     for line in complete.lines() {
         let tag = line.trim_end();
         expect = match (expect, tag) {
             (Expect::Start | Expect::End, "") => expect,
             (Expect::Start, "<file>") => Expect::Path("</file>"),
             (Expect::Start, "<create>") => Expect::Path("</create>"),
+            (Expect::Start, "<remove>") => Expect::Path("</remove>"),
+            (Expect::Start, "<rename>") => Expect::Path("</rename>"),
+            (Expect::Path("</rename>"), path) if !path.trim().is_empty() && !path.starts_with('<') => Expect::To,
+            (Expect::To, path) if !path.trim().is_empty() && !path.starts_with('<') => Expect::Close("</rename>"),
             (Expect::Start, "<done>") => Expect::InDone,
             (Expect::Path(close), path) if !path.trim().is_empty() && !path.starts_with('<') => Expect::Close(close),
             (Expect::Close("</file>"), "</file>") => Expect::At,
-            (Expect::Close("</create>"), "</create>") => Expect::Say,
+            (Expect::Close("</create>"), "</create>") => {
+                creating = true;
+                Expect::Say
+            }
+            (Expect::Close("</remove>"), "</remove>") | (Expect::Close("</rename>"), "</rename>") => {
+                whole_file = true;
+                Expect::Say
+            }
             (Expect::At, "<at>") => lines(&mut seen, "</at>", 0),
             (Expect::Say, "<say>") => lines(&mut seen, "</say>", 1),
             (Expect::New, "<new>") => lines(&mut seen, "</new>", 0),
@@ -270,6 +349,7 @@ pub fn check(reply: &str, finished: bool) -> Result<(), String> {
                 }
                 match close {
                     "</at>" => Expect::Say,
+                    "</say>" if whole_file => Expect::End,
                     "</say>" => Expect::New,
                     "</memory>" => Expect::InDone,
                     _ => Expect::End,
@@ -277,6 +357,11 @@ pub fn check(reply: &str, finished: bool) -> Result<(), String> {
             }
             // Code and prose lines; a line starting `</` can only be the closing tag.
             (Expect::Lines { close, .. }, line) if line.starts_with("</") => return Err(format!("`{line}` came where {close} or more lines were expected")),
+            (Expect::Lines { close: "</new>", .. }, _) if creating && seen == MAX_CREATED => {
+                return Err(format!(
+                    "a new file starts with at most {MAX_CREATED} lines in <new>; later items add the rest to it with <file>, one small edit at a time"
+                ));
+            }
             (Expect::Lines { .. }, _) => {
                 seen += 1;
                 expect
@@ -292,6 +377,9 @@ pub fn check(reply: &str, finished: bool) -> Result<(), String> {
     }
 }
 
+/// The most lines a new file starts with: the rest comes in edits after.
+pub const MAX_CREATED: usize = 8;
+
 /// Lines up to `close` begin, `need` of them at least.
 fn lines(seen: &mut usize, close: &'static str, need: usize) -> Expect {
     *seen = 0;
@@ -300,8 +388,9 @@ fn lines(seen: &mut usize, close: &'static str, need: usize) -> Expect {
 
 fn describe(expect: Expect) -> String {
     match expect {
-        Expect::Start => "<file>, <create> or <done>".into(),
+        Expect::Start => "<file>, <create>, <remove>, <rename> or <done>".into(),
         Expect::Path(_) => "a path".into(),
+        Expect::To => "the new path".into(),
         Expect::Close(close) => close.into(),
         Expect::At => "<at>".into(),
         Expect::Lines { close, .. } => close.into(),
@@ -425,7 +514,7 @@ mod tests {
         assert_eq!(step.old, lines(&["    a - b"]));
         assert_eq!(step.say, "It should add.");
         let Reply::Step(step) = parse(EDIT, true) else { panic!() };
-        assert!(step.complete && !step.create);
+        assert!(step.complete && step.op.is_none());
         assert_eq!(step.new, lines(&["    a + b"]));
     }
 
@@ -445,7 +534,7 @@ mod tests {
     fn a_new_file_is_an_edit_that_creates_it() {
         let reply = "<create>\nsrc/util.rs\n</create>\n<say>\nA home for helpers.\n</say>\n<new>\npub fn one() {}\n</new>\n";
         let Reply::Step(step) = parse(reply, true) else { panic!() };
-        assert!(step.create && step.complete && step.old.is_empty());
+        assert!(step.creates() && step.complete && step.old.is_empty());
         assert_eq!(step.file.as_deref(), Some("src/util.rs"));
     }
 
@@ -453,6 +542,21 @@ mod tests {
     fn done_may_carry_notes() {
         assert_eq!(parse("<done>\n</done>\n", true), Reply::Done { memory: None });
         assert_eq!(parse("<done>\n<memory>\nPrefers tabs.\n</memory>\n</done>\n", true), Reply::Done { memory: Some("Prefers tabs.".into()) });
+    }
+
+    #[test]
+    fn a_file_can_be_removed_or_renamed() {
+        let remove = "<remove>\nold.rs\n</remove>\n<say>\nNothing uses it.\n</say>\n";
+        let Reply::Step(step) = parse(remove, false) else { panic!() };
+        assert_eq!((step.file.as_deref(), step.op, step.complete), (Some("old.rs"), Some(FileOp::Remove), true), "ready once <say> is closed");
+        let rename = "<rename>\nsrc/util.rs\nsrc/helpers.rs\n</rename>\n<say>\nA clearer name.\n</say>\n";
+        let Reply::Step(step) = parse(rename, false) else { panic!() };
+        assert_eq!((step.file.as_deref(), step.op), (Some("src/util.rs"), Some(FileOp::Rename("src/helpers.rs".into()))));
+        assert_eq!(parse("<rename>\nsrc/util.rs\n</rename>\n<say>\nx\n</say>\n", true), Reply::Partial, "both paths");
+        assert_eq!(check(remove, true), Ok(()));
+        assert_eq!(check(rename, true), Ok(()));
+        assert!(check("<rename>\nsrc/util.rs\n</rename>\n", false).is_err(), "the new path is missing");
+        assert!(check(&format!("{remove}<new>\nx\n</new>\n"), true).is_err(), "nothing follows a removal");
     }
 
     #[test]
@@ -467,6 +571,9 @@ mod tests {
         assert!(check(&format!("{EDIT}And here's why.\n"), false).is_err(), "nothing after the item");
         assert!(check("<file>\na.rs\n</file>\n<at>\nx\n", true).unwrap_err().contains("ended"), "cut off");
         assert!(check("```\n<file>\n", false).is_ok() && check("<file>\n```\n</file>\n", false).is_ok(), "a path is any line");
+        let create = |n: usize| format!("<create>\nb.rs\n</create>\n<say>\nx\n</say>\n<new>\n{}", "line\n".repeat(n));
+        assert_eq!(check(&format!("{}</new>\n", create(MAX_CREATED)), true), Ok(()), "a new file starts small");
+        assert!(check(&create(MAX_CREATED + 1), false).unwrap_err().contains("one small edit at a time"), "not all at once, caught as it streams");
     }
 
     #[test]

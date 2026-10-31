@@ -2,19 +2,21 @@
 //! language per project on first use; a [`Document`] keeps one open file in
 //! sync with its server and asks it things; [`convert`] turns the answers
 //! into byte offsets and plain text. Diagnostics arrive as [`Event`]s.
-//! A Typst file can also have tinymist's live [`Preview`].
 
 pub mod client;
 pub mod convert;
 pub mod document;
-pub mod preview;
 mod python;
 pub mod registry;
 
 pub use client::{Client, Event};
 pub use document::Document;
-pub use preview::Preview;
-pub use registry::Registry;
+pub use registry::{Registry, warm};
+
+/// `name` on the login shell's PATH (a Finder-launched app's is minimal).
+pub fn which(name: &str) -> Option<std::path::PathBuf> {
+    python::which_all(&[name]).pop().flatten()
+}
 
 /// A diagnostic as the server sends it, before [`convert::diagnostics`] places it.
 pub use lsp_types::Diagnostic as RawDiagnostic;
@@ -57,4 +59,30 @@ pub struct Completion {
     pub detail: Option<String>,
     pub range: std::ops::Range<usize>,
     pub text: String,
+    /// More edits that come with it (an import it needs), elsewhere in the file.
+    pub more: Vec<(std::ops::Range<usize>, String)>,
+}
+
+/// An edit to a file a server asks for: where (as the server counts) and what goes there.
+pub type TextEdit = (lsp_types::Range, String);
+
+/// A symbol in a file (`space s`): its name, what it is, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    pub kind: &'static str,
+    /// Its container's names, outermost first (`impl Editor`).
+    pub within: Vec<String>,
+    pub range: lsp_types::Range,
+}
+
+/// A change the server offers at the cursor (`space .`): a quick fix, a refactoring.
+#[derive(Debug, Clone)]
+pub struct CodeAction {
+    pub title: String,
+    /// The edit it makes, if the server said (else it's resolved first, or a command does it).
+    pub edit: Option<serde_json::Value>,
+    pub command: Option<serde_json::Value>,
+    /// The action as the server sent it, to resolve.
+    pub raw: serde_json::Value,
 }

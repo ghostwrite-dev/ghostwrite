@@ -7,19 +7,28 @@ use crate::selection::Range;
 pub fn move_horizontally(b: &Buffer, r: Range, forward: bool, count: usize, extend: bool) -> Range {
     let mut at = r.cursor(b.text());
     for _ in 0..count {
-        at = if forward { b.next(at) } else { b.prev(at) };
+        let next = if forward { b.next(at) } else { b.prev(at) };
+        if next == at {
+            break;
+        }
+        at = next;
     }
     r.put_cursor(b.text(), at, extend)
 }
 
 /// Returns the new range and the column to keep for the next vertical move.
-pub fn move_vertically(b: &Buffer, r: Range, down: bool, count: usize, extend: bool, sticky: Option<usize>) -> (Range, usize) {
+/// The column is where it is on screen: tabs to their stops (`tab_width`),
+/// wide characters two columns.
+pub fn move_vertically(b: &Buffer, r: Range, down: bool, count: usize, extend: bool, sticky: Option<usize>, tab_width: usize) -> (Range, usize) {
+    use unicode_segmentation::UnicodeSegmentation as _;
     let cursor = r.cursor(b.text());
     let line = b.line_of(cursor);
-    let col = sticky.unwrap_or_else(|| b.text()[b.line_start(line)..cursor].chars().count());
-    let target = if down { (line + count).min(b.line_count() - 1) } else { line.saturating_sub(count) };
+    let col = sticky.unwrap_or_else(|| crate::display_width(&b.text()[b.line_start(line)..cursor], tab_width));
+    let target = if down { line.saturating_add(count).min(b.line_count() - 1) } else { line.saturating_sub(count) };
     let (start, end) = (b.line_start(target), b.line_end(target));
-    let at = b.text()[start..end].char_indices().nth(col).map_or(end, |(i, _)| start + i);
+    // The character covering that column, or the line's end.
+    let row = &b.text()[start..end];
+    let at = row.grapheme_indices(true).find(|(i, g)| crate::display_width(&row[..i + g.len()], tab_width) > col).map_or(end, |(i, _)| start + i);
     (r.put_cursor(b.text(), at, extend), col)
 }
 
@@ -236,9 +245,9 @@ mod tests {
     #[test]
     fn vertical_keeps_column() {
         let b = Buffer::new("abcdef\nab\nabcdef");
-        let (r, col) = move_vertically(&b, Range::point(4), true, 1, false, None);
+        let (r, col) = move_vertically(&b, Range::point(4), true, 1, false, None, 4);
         assert_eq!(r, Range::point(9));
-        let (r, _) = move_vertically(&b, r, true, 1, false, Some(col));
+        let (r, _) = move_vertically(&b, r, true, 1, false, Some(col), 4);
         assert_eq!(r, Range::point(14));
     }
 

@@ -58,6 +58,18 @@ impl Range {
         Self::new(self.anchor.min(len), self.head.min(len))
     }
 
+    /// Clamped to `text`, each end on a char boundary (moved back if it was inside one).
+    pub fn within(&self, text: &str) -> Self {
+        let snap = |at: usize| {
+            let mut at = at.min(text.len());
+            while !text.is_char_boundary(at) {
+                at -= 1;
+            }
+            at
+        };
+        Self::new(snap(self.anchor), snap(self.head))
+    }
+
     /// Move the cursor to `at`, extending from the anchor when `extend` is
     /// set (`Range::put_cursor` in helix).
     pub fn put_cursor(&self, text: &str, at: usize, extend: bool) -> Self {

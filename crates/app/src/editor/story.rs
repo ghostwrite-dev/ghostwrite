@@ -1,4 +1,4 @@
-//! `a`: ask Claude about the lines at the cursor (or the selection),
+//! `space a`: ask Claude about the lines at the cursor (or the selection),
 //! then review its reply one item at a time where it applies, across the
 //! project's files. Tab accepts (or reads on); there's no skipping: Enter
 //! says what you want instead, and the next item follows it. Esc stops. A
@@ -22,7 +22,7 @@ use futures::StreamExt as _;
 use ghostwrite_ai::backend::Listener;
 use ghostwrite_ai::context::Shown;
 use ghostwrite_ai::placement::{self, Asked, Assumed, Files as _, Overlay, Place, Placer};
-use ghostwrite_ai::protocol::{Note, Step};
+use ghostwrite_ai::protocol::{FileOp, Note, Step};
 use ghostwrite_ai::{Interaction, Item, ItemId, Layout, Request, Settled, Story, Surroundings, Verdict, lines};
 use ghostwrite_core::{Mode, Range, Review};
 use ghostwrite_project::tree::Proposal;
@@ -31,6 +31,33 @@ use gpui::{AppContext as _, Context, Task, Window};
 
 use super::project::ProjectFiles;
 use super::{Autoscroll, DocId, Editor, Project, PromptKind};
+
+/// Something about the editor Claude is told as it was when the story
+/// started, and again in the newest turn whenever it's changed since.
+#[derive(Default)]
+pub(super) struct Told {
+    /// What the first request said: `None` until it's sent. Kept, so the
+    /// conversation's start stays the same.
+    pub(super) first: Option<Option<String>>,
+    /// What Claude was last told.
+    last: Option<String>,
+}
+
+impl Told {
+    /// It's `now` as a request goes out: what's changed since Claude was
+    /// last told, if anything (the first request is told it as it starts).
+    fn tell(&mut self, now: Option<String>) -> Option<String> {
+        let changed = self.first.is_some() && now != self.last;
+        self.last.clone_from(&now);
+        self.first.get_or_insert_with(|| now.clone());
+        now.filter(|_| changed)
+    }
+
+    /// What the conversation starts with.
+    fn started(&self) -> Option<String> {
+        self.first.clone().flatten()
+    }
+}
 
 pub(super) struct StoryState {
     /// `None` until the first request is sent.
@@ -42,15 +69,15 @@ pub(super) struct StoryState {
     docs_note: bool,
     /// The item last brought into view.
     shown: Option<ItemId>,
+    /// The tabs the story opened to show an item, closed as it moves on from them.
+    opened: Vec<DocId>,
     /// Asked from select mode: the selection to give back afterwards.
     selection: Option<Range>,
     /// The Claude Code session the story is in, resumed for each follow-up.
     session: Option<String>,
-    /// The `:sh` command (with output) the first request carried: `None`
-    /// until it's sent. Kept, so the conversation's start stays the same.
-    pub(super) first_command: Option<Option<String>>,
-    /// The command Claude was last told about.
-    told_command: Option<String>,
+    /// The last `:sh` command (with its output), and the terminal, as Claude is told them.
+    pub(super) command: Told,
+    pub(super) terminal: Told,
     placer: Placer,
     cancel: Arc<AtomicBool>,
     _task: Option<Task<()>>,
@@ -87,6 +114,8 @@ pub(super) enum Waiting {
 enum Problem {
     /// Its file isn't in the project: the path, and what to say about it.
     NoFile(String),
+    /// Its file is a PDF, which Claude doesn't comment on.
+    Pdf(String),
     /// Its `<at>` lines aren't in its file.
     NotFound,
 }
@@ -153,10 +182,11 @@ impl StoryState {
             lines,
             docs_note: false,
             shown: None,
+            opened: vec![],
             selection: None,
             session: None,
-            first_command: None,
-            told_command: None,
+            command: Told::default(),
+            terminal: Told::default(),
             placer: Placer::new(root),
             cancel: Arc::default(),
             _task: None,
@@ -173,14 +203,14 @@ impl StoryState {
         self.story.is_some()
     }
 
-    /// The request for the story so far, with the last `:sh` command's output.
-    pub(super) fn request(&self, project: &Project, command: Option<String>) -> Option<Request> {
-        self.request_ahead(project, command, &[])
+    /// The request for the story so far.
+    pub(super) fn request(&self, project: &Project) -> Option<Request> {
+        self.request_ahead(project, &[])
     }
 
     /// The request as it would be with `accepted` applied too, as a request
     /// sent ahead assumes: the files it shows are as they'd be then.
-    pub(super) fn request_ahead(&self, project: &Project, command: Option<String>, accepted: &[Item]) -> Option<Request> {
+    pub(super) fn request_ahead(&self, project: &Project, accepted: &[Item]) -> Option<Request> {
         let story = self.story.as_ref()?;
         let doc = &project.tabs.by_id(self.doc)?.doc;
         let assumed = self.assume(project, accepted)?;
@@ -193,7 +223,7 @@ impl StoryState {
             instruction: story.instruction.clone(),
             followups: story.followups().to_vec(),
             root: Some(project.root.clone()),
-            surroundings: Surroundings { command, ..self.surroundings(project) },
+            surroundings: Surroundings { command: self.command.started(), terminal: self.terminal.started(), ..self.surroundings(project) },
             session: self.session.clone(),
             fork: false,
         })
@@ -252,7 +282,7 @@ impl StoryState {
                     .collect()
             })
             .unwrap_or_default();
-        Surroundings { open_files, diagnostics, command: None }
+        Surroundings { open_files, diagnostics, command: None, terminal: None }
     }
 
     fn receive(&mut self, message: Message) {
@@ -395,10 +425,14 @@ impl StoryState {
         files
     }
 
-    /// What the tree should show for item `id`: a new file, made by an edit.
+    /// What the tree should show for item `id`: a new file made by an edit,
+    /// or a file removed or renamed.
     pub(super) fn proposal(&self, project: &Project, id: ItemId, item: &Item) -> Option<Proposal> {
+        let path = self.locate(project, id)?.path;
         match item {
-            Item::Step(_) => self.locate(project, id)?.path.filter(|p| !p.exists()).map(Proposal::Create),
+            Item::Step(Step { op: Some(FileOp::Remove), .. }) => path.map(Proposal::Remove),
+            Item::Step(Step { op: Some(FileOp::Rename(to)), .. }) => path.map(|p| Proposal::Rename(p, to.trim_start_matches("./").to_string())),
+            Item::Step(_) => path.filter(|p| !p.exists()).map(Proposal::Create),
             Item::Note(_) => None,
         }
     }
@@ -410,8 +444,13 @@ impl StoryState {
         let exists = located.path.as_ref().is_none_or(|p| p.exists());
         let named = || located.path.as_deref().map_or("the file".into(), |p| project.display(p));
         match item {
-            Item::Step(step) if step.create && exists => Some(Problem::NoFile(format!("{} (it exists already, so edit it with <file>)", named()))),
-            Item::Step(step) if !step.create && !exists => Some(Problem::NoFile(named())),
+            Item::Step(step) if step.creates() && exists => Some(Problem::NoFile(format!("{} (it exists already, so edit it with <file>)", named()))),
+            Item::Step(step) if !step.creates() && !exists => Some(Problem::NoFile(named())),
+            Item::Step(Step { op: Some(FileOp::Rename(to)), .. }) if project.root.join(to.trim_start_matches("./")).exists() => {
+                Some(Problem::NoFile(format!("{to} (it exists already, so rename to a path that's free)")))
+            }
+            Item::Step(Step { op: Some(FileOp::Remove | FileOp::Rename(_)), .. }) => None,
+            _ if located.path.as_ref().is_some_and(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))) => Some(Problem::Pdf(named())),
             Item::Step(step) if step.complete && !self.placeable(project, id, step) => Some(Problem::NotFound),
             Item::Note(_) if !exists => Some(Problem::NoFile(named())),
             Item::Note(note) if !note.at.is_empty() && self.lines_of(project, id).is_none() => Some(Problem::NotFound),
@@ -469,8 +508,24 @@ impl StoryState {
         if !step.complete {
             return Err("that step is still being written".into());
         }
+        // A whole file removed or renamed.
+        match (&step.op, self.locate(project, id).and_then(|l| l.path)) {
+            (Some(FileOp::Remove), Some(path)) => {
+                fs::trash(&path)?;
+                project.path_deleted(&path);
+                project.tree.refresh();
+                return Ok(());
+            }
+            (Some(FileOp::Rename(to)), Some(path)) => {
+                let to = fs::move_to(&path, &project.root.join(to.trim_start_matches("./")))?;
+                project.path_moved(&path, &to);
+                project.tree.refresh();
+                return Ok(());
+            }
+            _ => {}
+        }
         // A new file: make it, then write its first lines.
-        if let Some(path) = self.locate(project, id).and_then(|l| l.path).filter(|p| step.create && !p.exists()) {
+        if let Some(path) = self.locate(project, id).and_then(|l| l.path).filter(|p| step.creates() && !p.exists()) {
             let rel = path.strip_prefix(&project.root).map_err(|_| format!("{} is outside the project", path.display()))?;
             fs::create(&project.root, &rel.to_string_lossy())?;
             project.tree.refresh();
@@ -485,9 +540,12 @@ impl StoryState {
         tab.select(Range::point(end), Autoscroll::Fit);
         tab.doc.buffer.commit(tab.view.selection);
         tab.sync();
-        // Claude Code reads the disk: write what was accepted so it never works from the old file.
-        if let Some(path) = tab.doc.path.clone() {
-            tab.doc.save(&path).map_err(|e| format!("accepted, but couldn't save: {e}"))?;
+        // Claude Code reads the disk: write what was accepted so it never works
+        // from the old file. It's accepted either way (it's in the buffer).
+        if let Some(path) = tab.doc.path.clone()
+            && let Err(e) = tab.doc.save(&path, false)
+        {
+            project.say(format!("accepted, but couldn't save: {e}"));
         }
         Ok(())
     }
@@ -537,6 +595,13 @@ impl StoryState {
                     self.shown = None;
                     return Show::Revise;
                 }
+                Some(Problem::Pdf(file)) => {
+                    if let Some(story) = self.story.as_mut() {
+                        story.about_a_pdf(&file);
+                    }
+                    self.shown = None;
+                    return Show::Revise;
+                }
                 Some(Problem::NotFound) => {
                     self.revise_lines(project, id, &item);
                     return Show::Revise;
@@ -549,9 +614,17 @@ impl StoryState {
         let in_tree = proposal.is_some();
         project.tree.propose(proposal);
         if in_tree {
+            self.close_opened(project, None);
             return Show::Tree;
         }
+        let was_open = self.locate(project, id).is_some_and(|l| l.tab.is_some());
         let Some(Located { tab: Some(ix), near, .. }) = self.open(project, id) else { return Show::Nothing };
+        let Some(here) = project.tabs.get(ix).map(|t| t.doc.id) else { return Show::Nothing };
+        if !was_open {
+            self.opened.push(here);
+        }
+        self.close_opened(project, Some(here));
+        let Some(ix) = project.tabs.index_of_id(here) else { return Show::Nothing };
         // Its own lines, or (if they aren't found) where it was placed: either way, go there.
         let lines = self.lines_of(project, id).map_or(near, |l| l.near);
         let Some(tab) = project.tabs.get_mut(ix) else { return Show::Nothing };
@@ -567,6 +640,19 @@ impl StoryState {
         };
         tab.select(Range::point(cursor), Autoscroll::Center(lines));
         Show::Tab(ix)
+    }
+
+    /// Close the tabs the story opened for earlier items, but `keep` (the
+    /// one it's showing now) and any with unsaved changes.
+    fn close_opened(&mut self, project: &mut Project, keep: Option<DocId>) {
+        let tabs = &project.tabs;
+        let closing: Vec<DocId> = self.opened.iter().copied().filter(|&d| Some(d) != keep && tabs.by_id(d).is_some_and(|t| !t.doc.dirty)).collect();
+        if closing.is_empty() {
+            return;
+        }
+        self.opened.retain(|d| !closing.contains(d));
+        project.tabs.retain(|t| !closing.contains(&t.doc.id));
+        project.tree.set_active(project.active_path());
     }
 
     /// The story is over: say what came of it, keep Claude's notes, and log it.
@@ -592,19 +678,28 @@ impl Editor {
     /// Open the prompt about the cursor's lines (or the selection's), with
     /// text typed in.
     pub(super) fn open_story(&mut self, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab().is_some_and(|t| t.doc.pdf.is_some()) {
+            self.project.say("Claude doesn't comment on PDFs: ask in the file that makes it");
+            return;
+        }
         if self.backends.is_empty() {
             self.project.say("asking Claude needs ANTHROPIC_API_KEY or Claude Code (`claude`) installed");
             return;
+        }
+        if self.tab().is_none() {
+            self.project.say("open a file to ask about");
+            return;
+        }
+        // One story at a time: whatever was up ends first.
+        if self.story.is_some() {
+            self.finish_story(cx);
         }
         // The story is reviewed in AI mode, and afterwards it's back to where you were.
         self.leave_insert();
         self.modal.enter(Mode::Ai);
         let from_select = self.modal.entered_from() == Some(Mode::Select);
         let root = self.project.root.clone();
-        let Some(tab) = self.project.tab_mut() else {
-            self.project.say("open a file to ask about");
-            return;
-        };
+        let Some(tab) = self.project.tab_mut() else { return };
         let sel = tab.view.selection;
         let kept = from_select.then_some(sel);
         let (from, to) = if sel.is_wide(tab.doc.text()) { (sel.from(), tab.doc.buffer.prev(sel.to())) } else { (tab.cursor(), tab.cursor()) };
@@ -623,6 +718,10 @@ impl Editor {
     /// review), from the file in view: each is shown in turn, and asking about
     /// one hands over to the model.
     pub(super) fn open_given(&mut self, instruction: String, items: Vec<Item>, cx: &mut Context<Self>) {
+        if self.reviewing_claude() {
+            self.project.say("Claude's story is still under review: esc esc ends it first");
+            return;
+        }
         let Some(story) = Story::given(instruction, items) else { return };
         // From a file: the first item's, if none is open.
         if self.tab().is_none()
@@ -647,6 +746,10 @@ impl Editor {
     /// Show `text` as a note under the cursor's line, reviewed like an
     /// answer (`space k` docs); Enter asks Claude about it.
     pub(super) fn show_note(&mut self, text: &str, cx: &mut Context<Self>) {
+        // Docs that arrive after a story began (`space k` then `space a`) don't replace it.
+        if self.story.is_some() {
+            return;
+        }
         self.leave_insert();
         let Some(tab) = self.tab() else { return };
         let line = tab.doc.buffer.line_of(tab.cursor());
@@ -682,21 +785,19 @@ impl Editor {
         // Claude reads the project from disk: let it see what's on screen.
         self.project.write_all();
         let Some(backend) = self.backends.first().cloned() else { return };
+        let (command, terminal) = (self.shell.as_ref().map(|s| s.context()), self.terminal_context());
         let Some(state) = self.story.as_mut() else { return };
-        // The first request says what the last command was; a follow-up, what's been run since.
-        let command = self.shell.as_ref().map(|s| s.context());
-        match &state.first_command {
-            None => state.told_command.clone_from(&command),
-            Some(_) if command != state.told_command => {
-                if let (Some(command), Some(story)) = (&command, state.story.as_mut()) {
-                    story.ran(command.clone());
-                }
-                state.told_command.clone_from(&command);
-            }
-            Some(_) => {}
+        // The first request says what the last command was and what's in the
+        // terminal; a follow-up, what's been run since and what the terminal shows now.
+        let ran = state.command.tell(command);
+        let seen = state.terminal.tell(terminal);
+        if let (Some(command), Some(story)) = (ran, state.story.as_mut()) {
+            story.ran(command);
         }
-        let first = state.first_command.get_or_insert(command).clone();
-        let Some(req) = state.request(&self.project, first) else { return };
+        if let (Some(terminal), Some(story)) = (seen, state.story.as_mut()) {
+            story.saw_terminal(terminal);
+        }
+        let Some(req) = state.request(&self.project) else { return };
         // Whatever was still coming is superseded.
         state.cancel.store(true, Ordering::SeqCst);
         state.cancel = Arc::new(AtomicBool::new(false));
@@ -743,6 +844,7 @@ impl Editor {
             Review::Next => self.accept(cx),
             Review::Ask => self.open_prompt(PromptKind::Ask, "", window, cx),
             Review::Stop => self.finish_story(cx),
+            Review::Stopping => self.project.say("esc again to end this story"),
         }
     }
 
@@ -788,8 +890,7 @@ impl Editor {
             state.prefetching = None;
         }
         let Some(ahead) = story.prefetch() else { return };
-        let first = state.first_command.clone().flatten();
-        let Some(mut req) = state.request_ahead(&self.project, first, &ahead.accepted) else { return };
+        let Some(mut req) = state.request_ahead(&self.project, &ahead.accepted) else { return };
         req.followups = ahead.followups;
         req.session = match ahead.after {
             None => state.session.clone(),
@@ -829,6 +930,11 @@ impl Editor {
         }));
     }
 
+    /// Whether a story with Claude in it is up (being asked, or under review).
+    fn reviewing_claude(&self) -> bool {
+        self.story.as_ref().is_some_and(|state| state.story.as_ref().is_none_or(|story| story.involves_model()))
+    }
+
     /// Close the review, saying what came of it, and remember it.
     pub(super) fn finish_story(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.story.as_ref() {
@@ -853,6 +959,8 @@ impl Editor {
         self.modal.leave(Mode::Ai);
         if self.asking() {
             self.prompt = None;
+            // The ask field had the keys: the code gets them back.
+            self.refocus = true;
         }
         self.project.tree.propose(None);
         cx.notify();

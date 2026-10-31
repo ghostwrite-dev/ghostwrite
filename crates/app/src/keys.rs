@@ -16,8 +16,16 @@ pub fn key_of(ks: &Keystroke) -> Option<Key> {
     if m.control {
         return single(&ks.key).map(Key::Ctrl);
     }
+    // Option-Backspace deletes the word before, as ctrl-w does.
+    if m.alt && ks.key == "backspace" {
+        return Some(Key::Ctrl('w'));
+    }
     if m.alt {
-        return single(&ks.key).map(Key::Alt);
+        // On many layouts Option types ASCII (`[ ] { } | \\ @ $ ~` on Nordic
+        // and German Macs): that's what was typed. Elsewhere it's Option
+        // with the key (`alt-;`), where it'd type `…`.
+        let typed = ks.key_char.as_deref().and_then(single).filter(|c| c.is_ascii_graphic() && Some(*c) != single(&ks.key));
+        return typed.map(Key::Char).or_else(|| single(&ks.key).map(Key::Alt));
     }
     let named = match ks.key.as_str() {
         "escape" => Some(Key::Escape),
@@ -56,6 +64,10 @@ mod tests {
         assert_eq!(k("shift-g"), Some(Key::Char('G')));
         assert_eq!(k("ctrl-d"), Some(Key::Ctrl('d')));
         assert_eq!(k("alt-;"), Some(Key::Alt(';')));
+        let typing = |key: &str, typed: &str| key_of(&Keystroke { key_char: Some(typed.into()), ..Keystroke::parse(key).unwrap() });
+        assert_eq!(typing("alt-8", "["), Some(Key::Char('[')), "Option-8 on a Swedish Mac is [");
+        assert_eq!(typing("alt-shift-8", "{"), Some(Key::Char('{')));
+        assert_eq!(typing("alt-;", "…"), Some(Key::Alt(';')), "a US Mac's Option-; is still alt-;");
         assert_eq!(k("escape"), Some(Key::Escape));
         assert_eq!(k("shift-tab"), Some(Key::BackTab));
         assert_eq!(k("space"), Some(Key::Char(' ')));

@@ -1,0 +1,14 @@
+[package]
+name = "ghostwrite-pdf"
+description = "PDFs, through macOS's PDFKit: their text, where each character of it is on the page, and pages drawn."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSRange", "NSString", "NSURL"] }
+objc2-pdf-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-graphics", "PDFDocument", "PDFPage", "PDFSelection"] }

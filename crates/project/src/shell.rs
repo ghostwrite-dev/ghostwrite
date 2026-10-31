@@ -2,6 +2,7 @@
 //! and finding the places in the code its output points at.
 
 use std::io::{BufRead as _, BufReader};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,15 +12,22 @@ use regex::Regex;
 
 /// The user's login shell: a Finder-launched app still gets their PATH through it.
 pub fn login_shell() -> Command {
-    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
-    let mut command = Command::new(shell);
+    let mut command = Command::new(user_shell());
     command.arg("-lc");
     command
 }
 
-/// A running command; dropping it kills the process.
+/// The user's shell, from `$SHELL`.
+pub fn user_shell() -> String {
+    std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into())
+}
+
+/// A running command. It runs in a process group of its own, so stopping
+/// it stops everything it started too.
 pub struct Run {
     child: Arc<Mutex<Child>>,
+    /// Its process group (the shell's pid).
+    group: u32,
     cancel: Arc<AtomicBool>,
 }
 
@@ -36,8 +44,10 @@ impl Run {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .process_group(0)
             .spawn()?;
-        Ok(Self { child: Arc::new(Mutex::new(child)), cancel: Arc::default() })
+        let group = child.id();
+        Ok(Self { child: Arc::new(Mutex::new(child)), group, cancel: Arc::default() })
     }
 
     /// Feed the output to `on_line` until the process exits or is stopped;
@@ -51,23 +61,26 @@ impl Run {
             let Ok(line) = line else { break };
             on_line(clean_line(&line));
         }
-        let mut child = self.child.lock().ok()?;
         if self.cancel.load(Ordering::SeqCst) {
-            child.kill().ok();
+            self.kill();
         }
-        child.wait().ok()?.code()
+        self.child.lock().ok()?.wait().ok()?.code()
     }
 
-    /// Stop it: the stream ends and the process is killed.
+    /// Stop it: the stream ends and the command, and all it started, are killed.
     pub fn stop(&self) {
         self.cancel.store(true, Ordering::SeqCst);
-        if let Ok(mut child) = self.child.try_lock() {
-            child.kill().ok();
-        }
+        self.kill();
+    }
+
+    fn kill(&self) {
+        // The whole group: the shell, the command, and anything it started.
+        // SAFETY: kill(2) with a negative pid only sends a signal.
+        unsafe { libc::kill(-(self.group as libc::pid_t), libc::SIGKILL) };
     }
 
     pub fn handle(&self) -> Self {
-        Self { child: self.child.clone(), cancel: self.cancel.clone() }
+        Self { child: self.child.clone(), group: self.group, cancel: self.cancel.clone() }
     }
 }
 
@@ -149,6 +162,20 @@ mod tests {
         let mut lines = vec![];
         assert_eq!(run.stream(&mut |l| lines.push(l)), Some(3));
         assert_eq!(lines, ["one", "two"]);
+    }
+
+    #[test]
+    fn stopping_a_command_stops_what_it_started() {
+        let run = Run::start("sleep 77 & sleep 78; echo done", &std::env::temp_dir()).unwrap();
+        let reader = run.handle();
+        let streaming = std::thread::spawn(move || reader.stream(&mut |_| {}));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        run.stop();
+        streaming.join().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // SAFETY: signal 0 only asks whether the group has any process left.
+        let left = unsafe { libc::kill(-(run.group as libc::pid_t), 0) } == 0;
+        assert!(!left, "the backgrounded sleep went too");
     }
 
     #[test]

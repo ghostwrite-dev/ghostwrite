@@ -17,6 +17,14 @@ pub(super) enum PromptKind {
     /// Naming a new file or folder in this folder.
     TreeAdd(PathBuf),
     TreeRename(PathBuf),
+    /// Searching the file, forward or back.
+    Find {
+        backward: bool,
+    },
+    /// What's typed into a picker (`space f`).
+    Pick,
+    /// A new name for what's under the cursor (`space r`).
+    Rename,
 }
 
 /// The one open prompt: it has the keyboard until it closes.
@@ -33,6 +41,9 @@ impl Editor {
             PromptKind::Command => "",
             PromptKind::TreeAdd(_) => "name, or name/ for a folder",
             PromptKind::TreeRename(_) => "new name",
+            PromptKind::Find { .. } => "",
+            PromptKind::Pick => "type to narrow down",
+            PromptKind::Rename => "new name",
         };
         let field = cx.new(|cx| TextField::new(text, placeholder, cx));
         let subscription = cx.subscribe_in(&field, window, |this, field, event, window, cx| {
@@ -82,6 +93,17 @@ impl Editor {
                 self.close_prompt(window, cx);
                 self.tree_rename(&from, &text);
             }
+            (TextFieldEvent::Submit, PromptKind::Rename) => {
+                self.close_prompt(window, cx);
+                self.rename_to(text.trim(), cx);
+            }
+            (TextFieldEvent::Changed, PromptKind::Pick) => self.picker_typed(&text, cx),
+            (TextFieldEvent::Up | TextFieldEvent::Down, PromptKind::Pick) => self.picker_move(event == TextFieldEvent::Down, cx),
+            (TextFieldEvent::Submit, PromptKind::Pick) => self.picker_open(window, cx),
+            (TextFieldEvent::Cancel, PromptKind::Pick) => self.close_picker(window, cx),
+            (TextFieldEvent::Changed, PromptKind::Find { .. }) => self.find_typed(&text, cx),
+            (TextFieldEvent::Submit, PromptKind::Find { .. }) => self.end_find(window, cx),
+            (TextFieldEvent::Cancel, PromptKind::Find { .. }) => self.cancel_find(window, cx),
             (TextFieldEvent::Cancel, PromptKind::Ask) => self.cancel_ask(window, cx),
             (TextFieldEvent::Cancel, _) => self.close_prompt(window, cx),
             (TextFieldEvent::Up | TextFieldEvent::Down, PromptKind::Command) => self.history_step(event == TextFieldEvent::Up, cx),

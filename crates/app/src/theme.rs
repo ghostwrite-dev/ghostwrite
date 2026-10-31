@@ -53,6 +53,8 @@ pub struct Theme {
     pub cursor_select: Hsla,
     pub cursor_text: Hsla,
     pub syntax: HashMap<String, SyntaxStyle>,
+    /// The terminal's sixteen colors: gruvbox's, for this half.
+    pub ansi: [Hsla; 16],
     pub mono_font: SharedString,
     /// The code text's size, zoomed.
     pub mono_size: Pixels,
@@ -192,12 +194,24 @@ fn parse(theme: &Value) -> Theme {
         cursor_select: gpui::rgb(orange1).into(),
         cursor_text: gpui::rgb(bg1).into(),
         syntax,
+        ansi: (if dark { ANSI_DARK } else { ANSI_LIGHT }).map(|c| gpui::rgb(c).into()),
         mono_font: "Menlo".into(),
         mono_size: px(crate::config::get().font_size),
         ui_font: ".SystemUIFont".into(),
         zoom: 1.0,
     }
 }
+
+/// Gruvbox's terminal colors: black, red, green, yellow, blue, magenta,
+/// cyan, white, then the bright ones.
+const ANSI_DARK: [u32; 16] = [
+    0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984, 0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c,
+    0xebdbb2,
+];
+const ANSI_LIGHT: [u32; 16] = [
+    0xfbf1c7, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0x7c6f64, 0x928374, 0x9d0006, 0x79740e, 0xb57614, 0x076678, 0x8f3f71, 0x427b58,
+    0x3c3836,
+];
 
 /// Our scope names that the theme spells differently.
 const ALIASES: &[(&str, &str)] = &[

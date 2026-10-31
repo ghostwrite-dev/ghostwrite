@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use ghostwrite_ai::Backend;
 use ghostwrite_core::Mode;
+use ghostwrite_project::tree::Proposal;
 use ghostwrite_project::{fs, scratch_dir, store};
 use gpui::{Entity, TestAppContext, VisualTestContext, WindowAppearance};
 
@@ -93,7 +94,7 @@ impl Setup<'_> {
 
     /// `space i`, a request, Enter, and the scripted reply arrives.
     fn ask(&mut self, what: &str) -> &mut Self {
-        self.keys("a").input(what).keys("enter")
+        self.keys("space a").input(what).keys("enter")
     }
 
     fn file(&self, rel: &str) -> String {
@@ -108,6 +109,34 @@ fn modal_keys_edit_and_undo(cx: &mut TestAppContext) {
     assert_eq!(t.keys("u").text(), "foo bar baz\n");
     // Letters in normal mode never reach the text.
     assert_eq!(t.keys("z q").text(), "foo bar baz\n");
+}
+
+#[gpui::test]
+fn a_click_moves_the_cursor_and_shift_or_v_extends(cx: &mut TestAppContext) {
+    let mut t = open("foo bar baz\n", &[], cx);
+    let selected = |t: &mut Setup| t.read(|e| (e.tab().map(|tab| tab.doc.text()[tab.view.selection.bytes()].to_string()).unwrap(), e.modal.mode));
+    let editor = t.editor.clone();
+    let click = |t: &mut Setup, at: usize, shift: bool, clicks: usize| t.cx.update(|_, cx| editor.update(cx, |e, cx| e.click(at, shift, clicks, cx)));
+    click(&mut t, 4, false, 1);
+    assert_eq!(selected(&mut t), ("".into(), Mode::Normal), "the cursor, still in normal mode");
+    click(&mut t, 9, true, 1);
+    assert_eq!(selected(&mut t), ("bar ba".into(), Mode::Normal), "shift selects to the char clicked");
+    click(&mut t, 0, false, 1);
+    t.keys("v");
+    click(&mut t, 2, false, 1);
+    assert_eq!(selected(&mut t), ("foo".into(), Mode::Select), "in select mode a click extends");
+    click(&mut t, 5, false, 2);
+    assert_eq!(selected(&mut t), ("bar".into(), Mode::Select), "a double click is the word");
+    t.keys("space e escape");
+    click(&mut t, 8, false, 1);
+    assert_eq!(selected(&mut t), ("".into(), Mode::Normal), "going to the tree ended the selection");
+    click(&mut t, 5, false, 3);
+    assert_eq!(selected(&mut t), ("foo bar baz\n".into(), Mode::Normal), "a triple click is the line");
+    click(&mut t, 4, false, 1);
+    t.cx.update(|_, cx| editor.update(cx, |e, cx| e.drag_to(9, cx)));
+    assert_eq!(selected(&mut t), ("bar ba".into(), Mode::Normal), "dragging from a click selects to the char under the mouse");
+    t.cx.update(|_, cx| editor.update(cx, |e, cx| e.drag_to(1, cx)));
+    assert_eq!(selected(&mut t), ("oo ".into(), Mode::Normal), "and back before where it was pressed");
 }
 
 #[gpui::test]
@@ -140,7 +169,178 @@ fn typing_in_insert_mode(cx: &mut TestAppContext) {
     assert_eq!(t.text(), "one\ntwo\n", "the insert is one undo step");
 }
 
+#[gpui::test]
+fn saving_never_writes_over_what_another_program_changed(cx: &mut TestAppContext) {
+    let mut t = open("one\n", &[], cx);
+    let path = t.dir.join("doc.txt");
+    t.keys("i").input("mine ").keys("escape");
+    // Another program writes, and the watcher hasn't said yet.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&path, "theirs\n").unwrap();
+    t.command("w");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", ":w refuses");
+    assert!(t.status().is_some_and(|s| s.contains("changed on disk")), "{:?}", t.status());
+    t.command("n");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "leaving the tab doesn't write it either");
+    t.command("bp").command("w!");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine one\n", ":w! does");
+    t.command("w other.txt");
+    assert_eq!(std::fs::read_to_string(t.dir.join("other.txt")).unwrap(), "mine one\n", "a new file is written");
+    std::fs::write(t.dir.join("other.txt"), "keep\n").unwrap();
+    t.command("w other.txt");
+    assert_eq!(std::fs::read_to_string(t.dir.join("other.txt")).unwrap(), "keep\n", "an existing one takes :w!");
+}
+
+#[gpui::test]
+fn crlf_files_keep_their_line_endings(cx: &mut TestAppContext) {
+    let mut t = open("", &[], cx);
+    let path = t.dir.join("win.txt");
+    std::fs::write(&path, "one\r\ntwo\r\n").unwrap();
+    t.command("e win.txt");
+    assert_eq!(t.text(), "one\ntwo\n");
+    t.keys("A").input("!").keys("enter").input("new").keys("escape").command("w");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one!\r\nnew\r\ntwo\r\n");
+}
+
+#[gpui::test]
+fn rm_stays_in_the_project(cx: &mut TestAppContext) {
+    let mut t = open("x\n", &[], cx);
+    std::fs::create_dir_all(t.dir.join("dir")).unwrap();
+    t.command("rm .");
+    assert!(t.dir.exists() && t.status().is_some_and(|s| s.contains("isn't in the project")));
+    t.command("rm ../");
+    assert!(t.status().is_some_and(|s| s.contains("isn't in the project")));
+    t.command("rm dir");
+    assert!(t.dir.join("dir").exists() && t.status().is_some_and(|s| s.contains(":rm!")), "a folder takes :rm!");
+    t.command("rm! dir");
+    assert!(!t.dir.join("dir").exists());
+}
+
+#[gpui::test]
+fn the_same_file_opens_once_however_its_spelled(cx: &mut TestAppContext) {
+    let mut t = open("x\n", &[], cx);
+    std::fs::create_dir_all(t.dir.join("src")).unwrap();
+    std::fs::write(t.dir.join("src/a.rs"), "").unwrap();
+    std::os::unix::fs::symlink(t.dir.join("src"), t.dir.join("link")).unwrap();
+    t.command("e src/a.rs").command("e src/../src/a.rs").command("e link/a.rs");
+    assert_eq!(t.read(|e| e.project.tabs.len()), 2);
+}
+
+#[gpui::test]
+fn searching_the_file(cx: &mut TestAppContext) {
+    let mut t = open("one Two\ntwo three\nTWO\n", &[], cx);
+    let selected = |t: &mut Setup| t.read(|e| e.tab().map(|tab| (tab.view.selection.from(), tab.doc.text()[tab.view.selection.bytes()].to_string())).unwrap());
+    t.keys("/").input("two");
+    assert_eq!(selected(&mut t), (4, "Two".into()), "found as typed, ignoring case without a capital");
+    t.keys("enter n");
+    assert_eq!(selected(&mut t), (8, "two".into()));
+    assert_eq!(t.status().as_deref(), Some("2/3 two"));
+    t.keys("n n");
+    assert_eq!(selected(&mut t).0, 4, "round the end");
+    t.keys("N");
+    assert_eq!(selected(&mut t).0, 18, "and back");
+    t.keys("/").input("TWO").keys("escape");
+    assert_eq!(selected(&mut t).0, 18, "esc goes back to where it began");
+    t.keys("/").input("TWO").keys("enter");
+    assert_eq!(selected(&mut t), (18, "TWO".into()), "a capital: case matters");
+    t.keys("g g j e *");
+    assert_eq!(selected(&mut t), (18, "TWO".into()), "* searches for what's selected, from it on");
+    t.keys("?").input("one").keys("enter");
+    assert_eq!(selected(&mut t).0, 0, "? searches back");
+    t.keys("space ?");
+    assert!(t.read(|e| e.cheatsheet), "the cheatsheet is space ?");
+}
+
+#[gpui::test]
+fn ctrl_o_goes_back_where_a_jump_came_from(cx: &mut TestAppContext) {
+    let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let mut t = open(&text, &[], cx);
+    let line = |t: &mut Setup| t.read(|e| e.tab().map(|tab| tab.doc.buffer.line_of(tab.cursor())).unwrap());
+    t.keys("j j G");
+    assert_eq!(line(&mut t), 199);
+    t.keys("ctrl-o");
+    assert_eq!(line(&mut t), 2, "back where G came from");
+    t.keys("ctrl-i");
+    assert_eq!(line(&mut t), 199, "and forward again");
+    t.keys("j k");
+    t.keys("ctrl-o ctrl-o");
+    assert_eq!(line(&mut t), 2, "small moves aren't jumps");
+    t.command("n");
+    t.keys("ctrl-o");
+    assert_eq!(t.active().as_deref(), Some("doc.txt"), "another file is a jump too");
+}
+
+#[gpui::test]
+fn pickers_open_files_by_a_few_letters(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut t = open("x\n", &[], cx);
+    std::fs::create_dir_all(t.dir.join("src/editor")).unwrap();
+    for f in ["src/editor/mod.rs", "src/editor/view.rs", "src/main.rs"] {
+        std::fs::write(t.dir.join(f), "").unwrap();
+    }
+    t.keys("space f");
+    for _ in 0..100 {
+        t.cx.run_until_parked();
+        if t.read(|e| e.picker.as_ref().is_some_and(|p| !p.listing())) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    t.input("edmod").keys("enter");
+    assert_eq!(t.active().as_deref(), Some("src/editor/mod.rs"));
+    t.keys("space b").input("doc").keys("enter");
+    assert_eq!(t.active().as_deref(), Some("doc.txt"), "space b: the open ones");
+    t.keys("space b down escape");
+    assert_eq!(t.active().as_deref(), Some("doc.txt"), "esc leaves it be");
+    assert!(t.read(|e| e.picker.is_none()));
+}
+
+#[gpui::test]
+fn colors_are_worked_out_aside_and_follow_edits_meanwhile(cx: &mut TestAppContext) {
+    let mut t = open("", &[], cx);
+    std::fs::write(t.dir.join("main.rs"), "fn main() {}\n").unwrap();
+    t.command("e main.rs");
+    let scope_at = |t: &mut Setup, at: usize| {
+        t.read(|e| e.tab().unwrap().doc.cached_highlights().iter().find(|s| s.range.contains(&at)).map(|s| ghostwrite_core::syntax::SCOPES[s.scope]))
+    };
+    assert_eq!(scope_at(&mut t, 0), Some("keyword"), "fn, once worked out");
+    t.keys("O").input("// hi").keys("escape");
+    assert_eq!(scope_at(&mut t, 0), Some("comment"), "the new line too");
+    assert_eq!(scope_at(&mut t, "// hi\n".len()), Some("keyword"), "and fn moved down with its text");
+}
+
+#[gpui::test]
+fn dot_repeats_the_last_change_and_q_plays_a_macro(cx: &mut TestAppContext) {
+    let mut t = open("one\ntwo\nthree\n", &[], cx);
+    t.keys("A").input("!").keys("escape j .");
+    assert_eq!(t.text(), "one!\ntwo!\nthree\n", ". appends again on the next line");
+    t.keys("g g Q x d Q");
+    assert_eq!(t.text(), "two!\nthree\n");
+    t.keys("q");
+    assert_eq!(t.text(), "three\n", "q plays what Q recorded");
+    t.keys("u u");
+    t.keys("g g J");
+    assert_eq!(t.text(), "one! two!\nthree\n", "J");
+    t.keys("g g i").input("foo bar").keys("alt-backspace escape");
+    assert_eq!(t.text(), "foo one! two!\nthree\n", "option-backspace takes the word before");
+}
+
 /// What the watcher reports when another program changes `paths`.
+#[gpui::test]
+fn a_lean_file_types_symbols_from_backslashes(cx: &mut TestAppContext) {
+    let mut t = open("", &[], cx);
+    let path = t.dir.join("Basic.lean");
+    std::fs::write(&path, "").unwrap();
+    t.editor.update(t.cx, |e, cx| e.open_paths(vec![path], cx));
+    t.keys("i");
+    for c in "\\forall n : \\N, n \\ge 0".chars() {
+        t.input(&c.to_string());
+    }
+    assert_eq!(t.text(), "∀ n : ℕ, n ≥ 0");
+    t.keys("escape").command("e doc.txt").keys("i").input("\\").input("a").input(" ");
+    assert_eq!(t.text(), "\\a ", "only in Lean");
+}
+
 fn changed_elsewhere(t: &mut Setup, paths: &[&str]) {
     let paths: Vec<PathBuf> = paths.iter().map(|p| t.dir.join(p)).collect();
     t.editor.update(t.cx, |e, cx| e.disk_changed(&paths, cx));
@@ -155,7 +355,10 @@ fn changes_from_other_programs_show_up(cx: &mut TestAppContext) {
     std::fs::write(t.dir.join("new.txt"), "").unwrap();
     changed_elsewhere(&mut t, &["doc.txt", "new.txt"]);
     assert_eq!(t.text(), "one\nTWO\nthree\n", "a clean file reloads");
-    assert_eq!(t.cursor(), 5, "on the same line and column");
+    assert_eq!(t.cursor(), 5, "where it was in the text that changed");
+    t.keys("u");
+    assert_eq!(t.text(), "one\ntwo\n", "the reload is an undo step");
+    t.keys("U");
     assert!(t.read(|e| e.project.tree.index_of(&e.project.root.join("new.txt")).is_some()), "the tree lists the new file");
 
     t.keys("x d");
@@ -224,9 +427,9 @@ fn leaving_a_file_writes_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn question_mark_shows_the_cheatsheet_and_any_key_closes_it(cx: &mut TestAppContext) {
+fn space_question_mark_shows_the_cheatsheet_and_any_key_closes_it(cx: &mut TestAppContext) {
     let mut t = open("one\ntwo\n", &[], cx);
-    t.keys("?");
+    t.keys("space ?");
     assert!(t.read(|e| e.cheatsheet));
     t.keys("j");
     assert!(!t.read(|e| e.cheatsheet));
@@ -252,10 +455,10 @@ fn tree_mode_drives_the_file_tree(cx: &mut TestAppContext) {
     assert_eq!(t.read(|e| e.modal.mode), Mode::Normal, "enter opens it and leaves the tree");
     t.keys("space e escape");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Normal);
-    t.keys("f");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tree, "f opens the tree");
-    t.keys("f");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Normal, "and f closes it");
+    t.keys("space e");
+    assert_eq!(t.read(|e| e.modal.mode), Mode::Tree, "space e opens the tree");
+    t.keys("space e");
+    assert_eq!(t.read(|e| e.modal.mode), Mode::Normal, "and closes it");
 }
 
 #[gpui::test]
@@ -284,6 +487,84 @@ fn a_renamed_file_moves_to_its_new_languages_server(cx: &mut TestAppContext) {
     assert_eq!(server(&mut t), None, "renaming it to .md leaves tinymist");
 }
 
+/// Live: needs `lake` (elan) installed.
+#[gpui::test]
+#[ignore]
+fn a_lean_file_shows_the_goals_at_the_cursor(cx: &mut TestAppContext) {
+    let mut t = open_with("", &[], true, cx);
+    let text = "theorem t (n : Nat) : n + 0 = n := by\n  rfl\n\n#eval 6 * 7\n";
+    let path = t.dir.join("Main.lean");
+    std::fs::write(&path, text).unwrap();
+    t.editor.update(t.cx, |e, cx| {
+        e.project.previews = true;
+        e.open_paths(vec![path], cx);
+    });
+    let wait_for = |t: &mut Setup, what: &dyn Fn(&Editor) -> bool| {
+        for _ in 0..600 {
+            t.cx.run_until_parked();
+            if t.read(what) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            t.cx.update(|window, _| window.refresh());
+        }
+        panic!("timed out");
+    };
+    let goals = |e: &Editor| e.tab().and_then(|t| t.doc.goals.as_ref()?.goals.clone());
+    t.keys("j w");
+    wait_for(&mut t, &|e| goals(e).is_some());
+    assert_eq!(t.read(goals), Some(vec!["n : Nat\n⊢ n + 0 = n".to_string()]));
+    t.keys("j j");
+    wait_for(&mut t, &|e| e.tab().is_some_and(|t| t.doc.diagnostics.iter().any(|d| d.message == "42")));
+}
+
+/// Live: needs `rust-analyzer` installed.
+#[gpui::test]
+#[ignore]
+fn the_language_server_formats_renames_and_lists_symbols(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut t = open_with("", &[], true, cx);
+    std::fs::write(t.dir.join("Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::create_dir_all(t.dir.join("src")).unwrap();
+    std::fs::write(t.dir.join("src/main.rs"), "fn add(a: i32, b: i32) -> i32 {   a + b }\nfn main() { let x = add(1, 2); println!(\"{x}\"); }\n").unwrap();
+    t.command("e src/main.rs");
+    let wait = |t: &mut Setup, what: &str, done: &dyn Fn(&Editor) -> bool, again: &dyn Fn(&mut Setup)| {
+        for round in 0..300 {
+            t.cx.run_until_parked();
+            if t.read(done) {
+                return;
+            }
+            if round % 25 == 0 {
+                again(t);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("timed out waiting for {what}: {}", t.text());
+    };
+    wait(&mut t, "formatting", &|e| e.tab().unwrap().doc.text().contains("i32 {\n    a + b\n}"), &|t| {
+        t.command("format");
+    });
+    wait(&mut t, "renaming", &|e| e.tab().unwrap().doc.text().matches("plus").count() == 2, &|t| {
+        t.keys("escape g g f d space r");
+        assert_eq!(
+            t.read(|e| e.prompt.as_ref().map(|p| p.field.clone())).map(|f| t.cx.update(|_, cx| f.read(cx).text().to_string())).as_deref(),
+            Some("add"),
+            "the prompt starts with its name"
+        );
+        t.keys("cmd-a").input("plus").keys("enter");
+    });
+    wait(&mut t, "symbols", &|e| e.picker.is_some(), &|t| {
+        t.keys("escape space s");
+    });
+    t.input("main").keys("enter");
+    assert_eq!(t.read(|e| e.tab().map(|t| t.doc.buffer.line_of(t.cursor()))), Some(3), "main, picked");
+    t.keys("g g f s");
+    wait(&mut t, "references", &|e| e.story.is_some(), &|t| {
+        t.keys("g r");
+    });
+    assert!(t.status().is_none_or(|s| !s.contains("no references")));
+}
+
 const ADD: &str = "def add(a, b):\n    pass\n";
 const DONE: &str = "<done>\n</done>\n";
 
@@ -309,7 +590,7 @@ fn hints() -> String {
 #[gpui::test]
 fn each_item_is_asked_for_once_the_last_is_decided(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), &hints(), DONE], cx);
-    t.keys("j a").input("implement it");
+    t.keys("j space a").input("implement it");
     assert_eq!(t.text(), ADD, "typing in the prompt doesn't drive normal mode");
     t.keys("enter");
     assert_eq!(t.text(), ADD, "nothing changes before accepting");
@@ -336,7 +617,7 @@ fn the_next_items_are_asked_for_ahead(cx: &mut TestAppContext) {
     });
     assert_eq!(wanted, (true, true, false), "the next item and the one after, up to <done>");
     let item = t.read(|e| e.story.as_ref().unwrap().story.as_ref().unwrap().current_item().unwrap());
-    let ahead = t.read(|e| e.story.as_ref().unwrap().request_ahead(&e.project, None, &[item]).unwrap().text);
+    let ahead = t.read(|e| e.story.as_ref().unwrap().request_ahead(&e.project, &[item]).unwrap().text);
     assert_eq!(ahead, "def add(a, b):\n    return a + b\n", "what's sent ahead shows the file as if the edit were accepted");
     t.keys("tab");
     assert_eq!(t.current(), Some(1), "accepting brings the next item, asked ahead");
@@ -349,6 +630,8 @@ fn the_next_items_are_asked_for_ahead(cx: &mut TestAppContext) {
 fn escape_stops_early_and_keeps_what_was_accepted(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), &hints(), DONE], cx);
     t.ask("types and body").keys("tab escape");
+    assert!(t.reviewing(), "one esc doesn't end it");
+    t.keys("escape");
     assert!(!t.reviewing());
     assert_eq!(t.text(), "def add(a, b):\n    return a + b\n");
 }
@@ -364,6 +647,72 @@ fn notes_are_read_one_at_a_time(cx: &mut TestAppContext) {
     t.keys("tab");
     assert!(!t.reviewing(), "<done> finishes");
     assert_eq!(t.text(), ADD, "notes never edit");
+}
+
+/// Live: needs `typst` installed, to make the PDF.
+#[gpui::test]
+#[ignore]
+fn a_pdf_is_read_only_text_claude_leaves_be(cx: &mut TestAppContext) {
+    let mut t = open("", &[], cx);
+    std::fs::write(t.dir.join("paper.typ"), "#set page(width: 300pt, height: 200pt)\nHello world\n\nSecond line").unwrap();
+    let made = std::process::Command::new("typst").arg("compile").arg(t.dir.join("paper.typ")).status().unwrap();
+    assert!(made.success());
+    let pdf = t.dir.join("paper.pdf");
+    let original = std::fs::read(&pdf).unwrap();
+    let editor = t.editor.clone();
+    t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![pdf.clone()], cx)));
+    t.cx.run_until_parked();
+    assert_eq!(t.active().as_deref(), Some("paper.pdf"));
+    assert_eq!(t.text(), "── page 1 ──\nHello world\nSecond line", "its text, after the page's line");
+
+    t.keys("j x d");
+    assert_eq!(t.text(), "── page 1 ──\nHello world\nSecond line", "an edit is undone");
+    assert_eq!(t.status().as_deref(), Some("a PDF is read-only"));
+    t.keys("i");
+    assert_eq!(t.read(|e| e.modal.mode), Mode::Normal, "no inserting");
+    t.command("w");
+    assert_eq!(std::fs::read(&pdf).unwrap(), original, "and it's never written");
+
+    t.keys("space a");
+    assert!(!t.reviewing(), "Claude doesn't comment on a PDF");
+    assert!(t.status().is_some_and(|s| s.contains("doesn't comment on PDFs")), "{:?}", t.status());
+}
+
+#[gpui::test]
+fn a_typst_files_pages_are_beside_it_and_follow_it(cx: &mut TestAppContext) {
+    let mut t = open("", &[], cx);
+    let source = "#set page(width: 300pt, height: 200pt)\n= Intro\nThe cat sat on the mat.\n";
+    let path = t.dir.join("paper.typ");
+    std::fs::write(&path, source).unwrap();
+    let editor = t.editor.clone();
+    t.cx.update(|_, cx| {
+        editor.update(cx, |e, cx| {
+            e.project.previews = true;
+            e.open_paths(vec![path.clone()], cx);
+        })
+    });
+    let compiled = |t: &mut Setup| {
+        t.cx.update(|_, cx| editor.update(cx, |e, cx| e.refresh_preview(cx)));
+        t.cx.run_until_parked();
+        t.read(|e| {
+            let p = e.tab().unwrap().doc.preview.as_ref().unwrap();
+            (p.document.as_ref().map(|d| d.pages.len()), p.error.clone(), p.line)
+        })
+    };
+    assert_eq!(compiled(&mut t), (Some(1), None, None), "its page, as it opens, left where it was");
+    let cat = source.find("cat").unwrap();
+    let glyph = t.read(|e| e.tab().unwrap().doc.preview.as_ref().unwrap().document.as_ref().unwrap().pages[0].glyphs.clone());
+    assert!(glyph.iter().any(|g| g.source == Some(cat..cat + 1)), "the c of cat is on the page, from the text");
+
+    t.keys("j j A").input(" Again.").keys("escape");
+    assert_eq!(compiled(&mut t), (Some(1), None, Some(2)), "compiled as typed, unsaved; and an edit on another line brings the page to it");
+    t.keys("i").input("#oops(").keys("escape");
+    let (_, error, _) = compiled(&mut t);
+    assert!(error.is_some_and(|e| e.contains("paper.typ:3: error")), "why it doesn't compile, and where");
+
+    t.keys("g g space j");
+    assert_eq!(t.read(|e| e.tab().unwrap().doc.preview.as_ref().unwrap().line), Some(0), "space j brings the pages to the cursor");
+    assert_eq!(t.status().as_deref(), Some("no problems in this file"), "it has no server here to say");
 }
 
 #[gpui::test]
@@ -398,6 +747,27 @@ fn escape_leaves_a_redirect_but_keeps_reviewing(cx: &mut TestAppContext) {
     assert!(t.reviewing() && t.read(|e| e.prompt.is_none()));
     t.keys("tab");
     assert_eq!(t.text(), "def add(a, b):\n    return a + b\n");
+}
+
+#[gpui::test]
+fn a_story_can_rename_and_remove_files(cx: &mut TestAppContext) {
+    let rename = "<rename>\nsrc/util.rs\nsrc/helpers.rs\n</rename>\n<say>\nA clearer name.\n</say>\n";
+    let remove = "<remove>\nold.txt\n</remove>\n<say>\nNothing uses it.\n</say>\n";
+    let mut t = open("x\n", &[rename, remove, DONE], cx);
+    std::fs::create_dir_all(t.dir.join("src")).unwrap();
+    std::fs::write(t.dir.join("src/util.rs"), "pub fn one() {}\n").unwrap();
+    std::fs::write(t.dir.join("old.txt"), "old\n").unwrap();
+    t.editor.update(t.cx, |e, _| e.project.tree.refresh());
+    t.ask("tidy up the files");
+    let proposal = t.read(|e| e.project.tree.proposal().cloned());
+    assert_eq!(proposal, Some(Proposal::Rename(t.dir.join("src/util.rs"), "src/helpers.rs".into())), "shown in the tree first");
+    assert!(t.dir.join("src/util.rs").is_file(), "nothing moves before Tab");
+    t.keys("tab");
+    assert!(!t.dir.join("src/util.rs").exists() && t.dir.join("src/helpers.rs").is_file(), "Tab renames it");
+    assert_eq!(t.read(|e| e.project.tree.proposal().cloned()), Some(Proposal::Remove(t.dir.join("old.txt"))));
+    t.keys("tab");
+    assert!(!t.dir.join("old.txt").exists(), "and moves the other to the Trash");
+    assert_eq!(t.status().as_deref(), Some("applied 2 of 2 steps"));
 }
 
 #[gpui::test]
@@ -497,7 +867,7 @@ fn claude_is_told_the_last_command(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[&note("doc.txt", "x", "It failed."), DONE], cx);
     run_sh(&mut t, "echo one; echo two; exit 2");
     t.ask("why did that fail?");
-    let command = t.read(|e| e.story.as_ref().unwrap().request(&e.project, e.shell.as_ref().map(|s| s.context())).unwrap().surroundings.command);
+    let command = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap().surroundings.command);
     assert_eq!(command.as_deref(), Some("$ echo one; echo two; exit 2 (✗ exit 2)\none\ntwo"));
 }
 
@@ -523,7 +893,8 @@ fn a_tour_walks_through_other_files(cx: &mut TestAppContext) {
     let start = note("doc.txt", "fn main() { run(); }", "It starts here.");
     let run = note("src/lib.rs", "pub fn run() {", "The work happens in run.");
     let helper = note("src/lib.rs", "    helper();", "Which calls the helper.");
-    let mut t = open("fn main() { run(); }\n", &[&start, &run, &helper, DONE], cx);
+    let back = note("doc.txt", "fn main() { run(); }", "And that's all main does.");
+    let mut t = open("fn main() { run(); }\n", &[&start, &run, &helper, &back, DONE], cx);
     std::fs::create_dir_all(t.dir.join("src")).unwrap();
     std::fs::write(t.dir.join("src/lib.rs"), "pub fn run() {\n    helper();\n}\n").unwrap();
     t.ask("give me a tour");
@@ -533,6 +904,9 @@ fn a_tour_walks_through_other_files(cx: &mut TestAppContext) {
     assert_eq!(t.cursor(), 0);
     t.keys("tab");
     assert_eq!(t.cursor(), "pub fn run() {\n".len());
+    t.keys("tab");
+    assert_eq!(t.active().as_deref(), Some("doc.txt"));
+    assert_eq!(t.read(|e| e.project.tabs.len()), 1, "the tab the tour opened closes as it moves on");
     t.keys("tab");
     assert!(!t.reviewing());
 }
@@ -552,7 +926,7 @@ fn a_change_edits_other_existing_files(cx: &mut TestAppContext) {
     let ahead = t.read(|e| {
         let state = e.story.as_ref().unwrap();
         let item = state.story.as_ref().unwrap().current_item().unwrap();
-        state.request_ahead(&e.project, None, &[item]).unwrap()
+        state.request_ahead(&e.project, &[item]).unwrap()
     });
     assert_eq!(
         shown(ahead),
@@ -560,7 +934,7 @@ fn a_change_edits_other_existing_files(cx: &mut TestAppContext) {
         "asked ahead, Claude sees the other file as if the edit there were accepted"
     );
     t.keys("tab");
-    let now = t.read(|e| e.story.as_ref().unwrap().request(&e.project, None).unwrap());
+    let now = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap());
     assert_eq!(shown(now).len(), 1, "and goes on seeing the other files the story is in");
     assert_eq!(
         t.read(|e| e.project.tabs.text_of(&e.project.root.join("src/lib.rs")).map(str::to_string)).as_deref(),
@@ -587,13 +961,13 @@ fn ai_mode_reviews_and_goes_back_to_where_you_were(cx: &mut TestAppContext) {
     // From select mode: the selection is the context, and comes back after.
     t.keys("v j");
     let selected = t.read(|e| e.tab().unwrap().view.selection);
-    t.keys("a");
+    t.keys("space a");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Ai);
     t.input("implement it").keys("enter");
     // Looking around works; editing doesn't.
     t.keys("g g d x");
     assert_eq!(t.text(), ADD, "no edits in AI mode");
-    t.keys("escape");
+    t.keys("escape escape");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Select, "back to select mode");
     assert_eq!(t.read(|e| e.tab().unwrap().view.selection), selected, "with the selection");
 }
@@ -603,7 +977,7 @@ fn ai_mode_from_the_tree_goes_back_to_the_tree(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), &hints(), DONE], cx);
     t.keys("space e");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Tree);
-    t.keys("space i");
+    t.keys("space a");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Ai);
     t.input("implement it").keys("enter").keys("tab");
     assert_eq!(t.text(), "def add(a, b):\n    return a + b\n");
@@ -675,7 +1049,7 @@ fn the_tree_marks_where_the_story_is_waiting(cx: &mut TestAppContext) {
         files.sort();
         files
     };
-    t.keys("a");
+    t.keys("space a");
     assert_eq!(waiting(&mut t), [("doc.txt".into(), super::story::Waiting::Here)], "asking about this file");
     t.input("add a verbose flag").keys("enter");
     assert_eq!(waiting(&mut t), [("src/lib.rs".into(), super::story::Waiting::Here)]);
@@ -690,7 +1064,7 @@ fn claude_hears_the_whole_conversation_and_the_editor(cx: &mut TestAppContext) {
     t.command("e other.py").command("e doc.txt");
     t.ask("types and body").keys("tab");
     t.keys("enter").input("why int?").keys("enter");
-    let req = t.read(|e| e.story.as_ref().unwrap().request(&e.project, None).unwrap());
+    let req = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap());
     assert_eq!(req.surroundings.open_files, ["doc.txt", "other.py"], "what is open, in tab order");
     assert_eq!(req.followups[0].reply, fix(), "each reply, whole");
     assert_eq!(req.followups[0].decided.len(), 1, "what was accepted");
@@ -730,6 +1104,17 @@ fn an_item_in_a_missing_file_is_rewritten_first(cx: &mut TestAppContext) {
     assert!(!t.dir.join("src/doc.txt").exists(), "nothing was made for it");
     t.keys("tab");
     assert_eq!(t.text(), "def add(a, b):\n    return a + b\n");
+}
+
+#[gpui::test]
+fn an_item_about_a_pdf_is_rewritten_about_another_file(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&note("paper.pdf", "", "It says hello."), &fix(), DONE], cx);
+    std::fs::write(t.dir.join("paper.pdf"), "%PDF-1.4").unwrap();
+    t.ask("implement it");
+    let followups = t.read(|e| e.story.as_ref().unwrap().story.as_ref().unwrap().followups().to_vec());
+    assert!(followups[0].correction && followups[0].said.contains("a PDF"), "{:?}", followups[0]);
+    t.keys("tab");
+    assert_eq!(t.text(), "def add(a, b):\n    return a + b\n", "the next reply is used");
 }
 
 #[gpui::test]
@@ -805,10 +1190,41 @@ fn claude_hears_about_commands_run_mid_story(cx: &mut TestAppContext) {
     t.keys("enter").input("does it pass now?").keys("enter");
     let req = t.read(|e| {
         let state = e.story.as_ref().unwrap();
-        state.request(&e.project, Some("first".into())).unwrap()
+        state.request(&e.project).unwrap()
     });
     let followup = &req.followups[0];
     assert_eq!(followup.command.as_deref(), Some("$ echo during (✓ exit 0)\nduring"), "the newest turn says what ran since");
-    let first = t.read(|e| e.story.as_ref().unwrap().first_command.clone());
+    let first = t.read(|e| e.story.as_ref().unwrap().command.first.clone());
     assert_eq!(first, Some(Some("$ echo before (✓ exit 0)\nbefore".into())), "the start of the conversation stays as it was");
+}
+
+#[gpui::test]
+fn claude_reads_the_terminal_but_only_the_user_types_in_it(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut t = open("x\n", &[&note("doc.txt", "x", "It printed ok."), DONE], cx);
+    t.keys("space t");
+    assert_eq!(t.read(|e| (e.terminal.shown, e.modal.mode)), (true, Mode::Terminal), "space t is terminal mode");
+    t.keys("e c h o space o k enter");
+    let printed = |e: &Editor| e.terminal_context().is_some_and(|text| text.lines().any(|l| l.trim() == "ok"));
+    for _ in 0..400 {
+        if t.read(printed) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        t.cx.run_until_parked();
+    }
+    assert!(t.read(printed), "the shell ran it: {:?}", t.read(|e| e.terminal_context()));
+    assert_eq!(t.text(), "x\n", "the keys went to the shell, not the file");
+    t.keys("escape");
+    assert_eq!(t.read(|e| e.modal.mode), Mode::Terminal, "one Esc is the shell's");
+    t.keys("escape");
+    assert_eq!(t.read(|e| (e.terminal.shown, e.modal.mode)), (true, Mode::Normal), "a second leaves, and the terminal stays up");
+    t.cx.update(|_, cx| cx.bind_keys([gpui::KeyBinding::new("cmd-j", crate::actions::ToggleTerminal, Some("Editor"))]));
+    t.keys("cmd-j");
+    assert_eq!(t.read(|e| e.modal.mode), Mode::Terminal, "cmd-j goes back in");
+    t.keys("cmd-j");
+    assert_eq!(t.read(|e| (e.terminal.shown, e.modal.mode)), (false, Mode::Normal), "and from there hides it");
+    t.ask("what did it print?");
+    let told = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap().surroundings.terminal);
+    assert!(told.is_some_and(|text| text.lines().any(|l| l.trim() == "ok")), "Claude is shown the terminal");
 }

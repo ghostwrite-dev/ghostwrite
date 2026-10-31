@@ -1,7 +1,66 @@
-//! Changing the project's files: creating, renaming, and moving to the Trash.
+//! Changing the project's files: writing them safely, creating, renaming,
+//! and moving to the Trash; and a file's line endings and when it last changed.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::SystemTime;
+
+/// Write `bytes` to `path` so it's never half-written: into a file beside
+/// it, flushed to the disk, then renamed over it. A symlink is written
+/// through, and an existing file keeps its permissions. Where a file can't
+/// be made beside it (a folder we can't write to), it's written in place.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = target.file_name().map_or_else(Default::default, |n| n.to_string_lossy().into_owned());
+    let temp = dir.join(format!(".{name}.ghostwrite-{}.tmp", std::process::id()));
+    // Can't make a file beside it: write it where it is.
+    let Ok(mut file) = std::fs::File::create(&temp) else { return std::fs::write(&target, bytes) };
+    let written = (|| {
+        file.write_all(bytes)?;
+        if let Ok(meta) = std::fs::metadata(&target) {
+            file.set_permissions(meta.permissions())?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&temp, &target)
+    })();
+    if written.is_err() {
+        std::fs::remove_file(&temp).ok();
+    }
+    written
+}
+
+/// A file as it was when last read or written: when it changed, and how
+/// big it was. If the disk's differs, another program changed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    /// `path`'s now; `None` if there's no file there.
+    pub fn of(path: &Path) -> Option<Stamp> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Stamp { modified: meta.modified().ok(), len: meta.len() })
+    }
+}
+
+/// `text` with `\n` line endings, and whether it had `\r\n` ones (most of
+/// its lines did): what to write back.
+pub fn normalize(text: String) -> (String, bool) {
+    let crlf = text.matches("\r\n").count();
+    if crlf == 0 || crlf * 2 < text.matches('\n').count() {
+        return (text, false);
+    }
+    (text.replace("\r\n", "\n"), true)
+}
+
+/// `text` as it's written: with `\r\n` line endings if the file had them.
+pub fn denormalize(text: &str, crlf: bool) -> std::borrow::Cow<'_, str> {
+    if crlf { text.replace('\n', "\r\n").into() } else { text.into() }
+}
 
 /// Create `name` inside `dir`: a folder when it ends in `/`, else an empty
 /// file. Missing folders on the way are made; an existing entry is an error.
@@ -32,7 +91,9 @@ pub fn move_to(from: &Path, to: &Path) -> Result<PathBuf, String> {
     if to == from {
         return Ok(to.to_path_buf());
     }
-    if to.exists() {
+    // `a.txt` → `A.txt` on a disk that ignores case: it "exists", as itself.
+    let case_only = to.parent() == from.parent() && crate::same_file(from, to);
+    if to.exists() && !case_only {
         return Err(format!("{} already exists", to.display()));
     }
     to.parent()
@@ -69,6 +130,42 @@ fn check_name(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_whole_files_through_symlinks_keeping_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::scratch_dir("atomic");
+        let real = dir.join("real.sh");
+        std::fs::write(&real, "old").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.join("link.sh");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(link.is_symlink(), "the link stays a link");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "no temporary file left");
+        write_atomic(&dir.join("fresh.txt"), b"x").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("fresh.txt")).unwrap(), "x");
+    }
+
+    #[test]
+    fn line_endings_round_trip() {
+        assert_eq!(normalize("a\r\nb\r\n".into()), ("a\nb\n".into(), true));
+        assert_eq!(normalize("a\nb\r\nc\n".into()), ("a\nb\r\nc\n".into(), false), "mostly \\n: left as it is");
+        assert_eq!(denormalize("a\nb\n", true), "a\r\nb\r\n");
+    }
+
+    #[test]
+    fn a_rename_can_change_only_the_case() {
+        let dir = crate::scratch_dir("case");
+        let from = create(&dir, "readme.md").unwrap();
+        let to = rename(&from, "README.md").unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>(), ["README.md"]);
+        assert!(rename(&to, "other.md").is_ok());
+        create(&dir, "taken.md").unwrap();
+        assert!(rename(&dir.join("other.md"), "taken.md").is_err(), "another file is still in the way");
+    }
 
     #[test]
     fn creates_and_renames_entries() {

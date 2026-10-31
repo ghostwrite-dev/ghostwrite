@@ -106,14 +106,18 @@ impl Placer {
     pub fn assume(&self, asked: &Asked, files: &dyn Files, accepted: &[Item]) -> Assumed {
         let mut assumed = Assumed { asked: asked.text.to_string(), ..Assumed::default() };
         for item in accepted {
+            // Removing and renaming aren't assumed: the next request sees the files as they are.
             let Item::Step(step) = item else { continue };
+            if step.op.as_ref().is_some_and(|op| *op != crate::protocol::FileOp::Create) {
+                continue;
+            }
             let (place, text) = {
                 let files = Overlay { files, changed: &assumed.others };
                 let now = Asked { text: &assumed.asked, lines: asked.lines.clone(), ..*asked };
                 let place = self.place(item, &now, &files);
                 let text = match &place.path {
                     None => Some(assumed.asked.clone()),
-                    Some(path) => files.text(path).or_else(|| step.create.then(String::new)),
+                    Some(path) => files.text(path).or_else(|| step.creates().then(String::new)),
                 };
                 (place, text)
             };
@@ -250,7 +254,7 @@ mod tests {
             line: None,
             new: new.iter().map(|s| s.to_string()).collect(),
             say: String::new(),
-            create: false,
+            op: None,
             complete: true,
         })
     }
@@ -346,7 +350,7 @@ mod tests {
         ];
         let mut create = step(Some("util.rs"), &[], &["pub fn two() {}"]);
         if let Item::Step(s) = &mut create {
-            s.create = true;
+            s.op = Some(crate::protocol::FileOp::Create);
         }
         let mut accepted = accepted.to_vec();
         accepted.push(create);

@@ -46,7 +46,7 @@ fn read(name: &str) -> Option<String> {
 
 fn write(name: &str, text: &str) {
     let Some(path) = path_of(name) else { return };
-    let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, text));
+    let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| crate::fs::write_atomic(&path, text.as_bytes()));
     if let Err(e) = saved {
         eprintln!("couldn't save {}: {e}", path.display());
     }
@@ -126,6 +126,22 @@ pub fn tree_width() -> Option<f32> {
 
 pub fn save_tree_width(width: f32) {
     write("tree-width", &width.to_string());
+}
+
+pub fn preview_width() -> Option<f32> {
+    read("preview-width")?.trim().parse().ok()
+}
+
+pub fn save_preview_width(width: f32) {
+    write("preview-width", &width.to_string());
+}
+
+pub fn terminal_height() -> Option<f32> {
+    read("terminal-height")?.trim().parse().ok()
+}
+
+pub fn save_terminal_height(height: f32) {
+    write("terminal-height", &height.to_string());
 }
 
 /// The last request to Claude and its replies, kept for when a step won't place.

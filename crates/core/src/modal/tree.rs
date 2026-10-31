@@ -18,7 +18,8 @@ impl Modal {
             (Some(Pending::Goto), Key::Char('g')) => TreeCommand::First,
             (Some(Pending::Goto), Key::Char('e')) => TreeCommand::Last,
             (Some(Pending::Space), Key::Char('e')) => TreeCommand::Leave,
-            (Some(Pending::Space), Key::Char('i')) => return Outcome::Effect(Effect::Assist),
+            (Some(Pending::Space), Key::Char('a')) => return Outcome::Effect(Effect::Assist),
+            (Some(Pending::Space), Key::Char('t')) => return Outcome::Effect(Effect::Terminal),
             (Some(Pending::Space), Key::Char('/')) => return Outcome::Effect(Effect::Search),
             (Some(_), _) => return Outcome::Handled,
             (None, Key::Char('g')) => {
@@ -38,7 +39,7 @@ impl Modal {
             (None, Key::Char('l') | Key::Right) => TreeCommand::Expand,
             (None, Key::Char('h') | Key::Left) => TreeCommand::Collapse,
             (None, Key::Enter) => TreeCommand::Open,
-            (None, Key::Escape | Key::Char('f')) => TreeCommand::Leave,
+            (None, Key::Escape) => TreeCommand::Leave,
             (None, Key::Char('a')) => TreeCommand::Add,
             (None, Key::Char('r')) => TreeCommand::Rename,
             (None, Key::Char('d')) => TreeCommand::Delete,

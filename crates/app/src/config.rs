@@ -20,6 +20,8 @@ pub struct Config {
     /// Bytes of uncommitted changes sent to Claude.
     pub max_diff: usize,
     pub max_recent_projects: usize,
+    /// Format a file with its language server when it's saved (`:w`, ⌘S).
+    pub format_on_save: bool,
 }
 
 impl Default for Config {
@@ -34,6 +36,7 @@ impl Default for Config {
             context_bytes: 200_000,
             max_diff: 12_000,
             max_recent_projects: 20,
+            format_on_save: true,
         }
     }
 }
@@ -74,6 +77,9 @@ fn load() -> Config {
     }
     if let Some(n) = usize_of("context_bytes") {
         config.context_bytes = n;
+    }
+    if let Some(on) = json.get("format_on_save").and_then(|v| v.as_bool()) {
+        config.format_on_save = on;
     }
     if let Some(n) = usize_of("max_diff") {
         config.max_diff = n;

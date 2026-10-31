@@ -19,6 +19,9 @@ pub enum Autoscroll {
     Fit,
     /// These lines in the middle, plus room for what folds out under them.
     Center(std::ops::Range<usize>),
+    /// The cursor's line at the top of the screen (`zt`), or the bottom (`zb`).
+    Top,
+    Bottom,
 }
 
 pub struct View {
@@ -42,35 +45,25 @@ pub struct Tab {
 impl Tab {
     /// Select `range` and bring it into view.
     pub fn select(&mut self, range: Range, scroll: Autoscroll) {
-        self.view.selection = range.clamp(self.doc.buffer.len());
+        self.view.selection = range.within(self.doc.text());
         self.view.autoscroll = Some(scroll);
     }
 
     /// After an edit: the document syncs, and the selection stays in the text.
     pub fn sync(&mut self) {
         self.doc.sync();
-        self.view.selection = self.view.selection.clamp(self.doc.buffer.len());
+        self.view.selection = self.view.selection.within(self.doc.text());
     }
 
-    /// Scroll the file's preview, if it has one, to the cursor.
-    pub fn follow_cursor(&mut self) {
-        if let Some(preview) = &mut self.doc.preview {
-            preview.scroll(self.doc.buffer.text(), self.view.selection.head);
-        }
-    }
-
-    /// Take the file's new text from disk, keeping the cursor's line and column.
+    /// Take the file's new text from disk as one undo step, the selection moving with the text.
     pub fn reload(&mut self, text: String) {
-        let (line, column) = self.cursor_position();
-        self.doc.reload(text);
+        self.view.selection = self.doc.reload(text, self.view.selection);
         self.sync();
-        self.doc.dirty = false;
-        self.view.selection = Range::point(ghostwrite_core::offset_of(self.doc.text(), line, column));
     }
 
     /// What modal editing works on.
     pub fn target(&mut self, page_rows: usize) -> Target<'_> {
-        Target { buffer: &mut self.doc.buffer, selection: &mut self.view.selection, indent: &self.doc.indent, page_rows }
+        Target { buffer: &mut self.doc.buffer, selection: &mut self.view.selection, indent: &self.doc.indent, page_rows, language: self.doc.language }
     }
 
     /// The char the block cursor is on.
@@ -80,7 +73,9 @@ impl Tab {
 
     /// The cursor as (zero-based line, char column).
     pub fn cursor_position(&self) -> (usize, usize) {
-        ghostwrite_core::line_col(self.doc.text(), self.cursor())
+        let (buffer, cursor) = (&self.doc.buffer, self.cursor());
+        let line = buffer.line_of(cursor);
+        (line, buffer.text()[buffer.line_start(line)..cursor].chars().count())
     }
 
     /// The diagnostic under the cursor, most severe first.
@@ -134,8 +129,10 @@ impl Tabs {
         self.tabs.iter_mut()
     }
 
+    /// The tab of `path`, however it's spelled (see [`ghostwrite_project::same_file`]).
     pub fn index_of_path(&self, path: &Path) -> Option<usize> {
-        self.tabs.iter().position(|t| t.doc.path.as_deref() == Some(path))
+        let exactly = self.tabs.iter().position(|t| t.doc.path.as_deref() == Some(path));
+        exactly.or_else(|| self.tabs.iter().position(|t| t.doc.path.as_deref().is_some_and(|p| ghostwrite_project::same_file(p, path))))
     }
 
     pub fn index_of_id(&self, id: DocId) -> Option<usize> {

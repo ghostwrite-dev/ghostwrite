@@ -9,16 +9,31 @@ use gpui::{Bounds, Context, EntityInputHandler, Pixels, Point, UTF16Selection, W
 use super::{Autoscroll, Editor};
 
 impl Editor {
-    /// Typed text, in insert mode (anywhere else it's ignored).
-    fn insert_text(&mut self, text: &str, replacing: Option<Bytes<usize>>, cx: &mut Context<Self>) {
+    /// `text` typed at the cursor, as if from the keyboard (a macro played back).
+    pub(super) fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.insert_text(text, None, false, cx);
+    }
+
+    /// Typed text, in insert mode (anywhere else it's ignored). Text being
+    /// composed (a dead key's accent, an input method's) goes in `as_is`:
+    /// no closing quote comes with it, nor an abbreviation.
+    fn insert_text(&mut self, text: &str, replacing: Option<Bytes<usize>>, as_is: bool, cx: &mut Context<Self>) {
         if self.modal.mode != Mode::Insert {
             return;
+        }
+        // Composed text is recorded when it's committed, as typed.
+        if replacing.is_none() || !as_is {
+            self.record_text(text);
         }
         let Some(tab) = self.project.tabs.active_mut() else { return };
         if let Some(range) = replacing {
             tab.view.selection = Range::new(range.start, range.end).clamp(tab.doc.buffer.len());
         }
-        self.modal.insert(text, &mut tab.target(1));
+        if as_is {
+            self.modal.insert_as_is(text, &mut tab.target(1));
+        } else {
+            self.modal.insert(text, &mut tab.target(1));
+        }
         tab.view.autoscroll = Some(Autoscroll::Fit);
         tab.sync();
         self.after_typing(text, cx);
@@ -49,14 +64,16 @@ impl EntityInputHandler for Editor {
     }
 
     fn replace_text_in_range(&mut self, range: Option<Bytes<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        // Committing what was being composed.
+        let composed = self.marked.is_some();
         let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.text(), &range?)));
-        self.insert_text(text, replacing, cx);
+        self.insert_text(text, replacing, composed, cx);
     }
 
     fn replace_and_mark_text_in_range(&mut self, range: Option<Bytes<usize>>, text: &str, _: Option<Bytes<usize>>, _: &mut Window, cx: &mut Context<Self>) {
         let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.text(), &range?)));
         let start = replacing.as_ref().map(|r| r.start).or_else(|| self.tab().map(|t| t.view.selection.from()));
-        self.insert_text(text, replacing, cx);
+        self.insert_text(text, replacing, true, cx);
         if self.modal.mode == Mode::Insert {
             self.marked = start.filter(|_| !text.is_empty()).map(|s| s..s + text.len());
         }

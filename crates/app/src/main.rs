@@ -18,9 +18,7 @@ mod workspace;
 use std::path::PathBuf;
 
 use futures::StreamExt as _;
-use gpui::{AppContext as _, Application, Bounds, WindowBounds, WindowOptions, px, size};
-
-use crate::workspace::Workspace;
+use gpui::Application;
 
 fn main() {
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
@@ -36,26 +34,25 @@ fn main() {
         open_tx.unbounded_send(paths).ok();
     });
 
+    // The servers and the login shell's environment, looked up while the window opens.
+    ghostwrite_lsp::warm();
     app.run(move |cx| {
         actions::install(cx);
         theme::install(cx.window_appearance(), cx);
-        cx.on_window_closed(|cx| cx.quit()).detach();
-        let bounds = Bounds::centered(None, size(px(1100.), px(780.)), cx);
-        let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
-        let window = cx
-            .open_window(options, |window, cx| {
-                theme::observe(window);
-                cx.new(|cx| Workspace::new(paths, window, cx))
-            })
-            .expect("the window opens");
+        // Closing the last window quits, as before there could be more than one.
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+        cx.on_action(|_: &actions::NewWindow, cx| {
+            workspace::open_window(vec![], cx);
+        });
+        workspace::open_window(paths, cx).expect("the window opens");
         cx.spawn(async move |cx| {
             while let Some(paths) = open_rx.next().await {
-                window
-                    .update(cx, |workspace, window, cx| {
-                        window.activate_window();
-                        workspace.open_paths(paths, window, cx);
-                    })
-                    .ok();
+                cx.update(|cx| workspace::open_anywhere(paths, cx)).ok();
             }
         })
         .detach();

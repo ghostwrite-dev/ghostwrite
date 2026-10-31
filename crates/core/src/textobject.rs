@@ -48,6 +48,14 @@ pub fn surrounding(b: &Buffer, from: usize, to: usize, (open, close): (char, cha
         let right = text[after..end].find(close)? + after;
         return Some((left, right));
     }
+    // On the pair's own bracket (a one-char selection): that pair, as in helix.
+    if b.next(from) >= to {
+        match b.char_at(from) {
+            Some(c) if c == open => return Some((from, matching_bracket(b, from)?)),
+            Some(c) if c == close => return Some((matching_bracket(b, from)?, from)),
+            _ => {}
+        }
+    }
     let mut depth = 0i32;
     let mut left = None;
     for (i, ch) in text[..from].char_indices().rev() {
@@ -81,10 +89,15 @@ pub fn text_object(b: &Buffer, r: Range, object: char, around: bool) -> Option<R
             if !is_word(b.char_at(cursor)?) {
                 return None;
             }
-            let start = text[..cursor].char_indices().rev().take_while(|(_, c)| is_word(*c)).last().map_or(cursor, |(i, _)| i);
+            let mut start = text[..cursor].char_indices().rev().take_while(|(_, c)| is_word(*c)).last().map_or(cursor, |(i, _)| i);
             let mut end = text[cursor..].char_indices().find(|(_, c)| !is_word(*c)).map_or(text.len(), |(i, _)| cursor + i);
             if around {
-                end += text[end..].len() - text[end..].trim_start_matches([' ', '\t']).len();
+                let after = text[end..].len() - text[end..].trim_start_matches([' ', '\t']).len();
+                // None after (the line's last word): the space before goes instead.
+                if after == 0 {
+                    start = text[..start].trim_end_matches([' ', '\t']).len();
+                }
+                end += after;
             }
             Some(Range::new(start, end))
         }

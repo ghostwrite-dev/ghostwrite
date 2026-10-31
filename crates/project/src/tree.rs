@@ -14,6 +14,8 @@ pub struct Row {
     pub name: String,
     pub depth: usize,
     pub is_dir: bool,
+    /// Left out by `.gitignore` (or in a folder that is): shown, but dimmed.
+    pub ignored: bool,
 }
 
 /// A story step about a file or folder, shown in the tree where it applies.
@@ -55,18 +57,18 @@ pub struct Listing {
 impl Listing {
     /// The rows, read from disk.
     pub fn list(&self) -> Vec<Row> {
-        fn walk(dir: &Path, depth: usize, expanded: &HashSet<PathBuf>, rows: &mut Vec<Row>) {
-            for (path, is_dir) in list_dir(dir) {
+        fn walk(dir: &Path, depth: usize, in_ignored: bool, expanded: &HashSet<PathBuf>, rows: &mut Vec<Row>) {
+            for (path, is_dir, ignored) in list_dir(dir) {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let open = is_dir && expanded.contains(&path);
-                rows.push(Row { path: path.clone(), name, depth, is_dir });
+                let (open, ignored) = (is_dir && expanded.contains(&path), in_ignored || ignored);
+                rows.push(Row { path: path.clone(), name, depth, is_dir, ignored });
                 if open {
-                    walk(&path, depth + 1, expanded, rows);
+                    walk(&path, depth + 1, ignored, expanded, rows);
                 }
             }
         }
         let mut rows = vec![];
-        walk(&self.root, 0, &self.expanded, &mut rows);
+        walk(&self.root, 0, false, &self.expanded, &mut rows);
         rows
     }
 }

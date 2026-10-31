@@ -1,5 +1,5 @@
 //! The project being edited, as a model: its folder, the open files, the
-//! file tree, its language servers and previews, and what the status line says. The
+//! file tree, its language servers, and what the status line says. The
 //! features (stories, completion) work on this; the editor around it
 //! adds keys, focus, prompts and drawing, and decides when to switch tabs.
 
@@ -19,8 +19,8 @@ pub struct Project {
     /// What the status line says, until something else does.
     pub status: Option<SharedString>,
     servers: ghostwrite_lsp::Registry,
-    /// Preview the files that can be (Typst), in the browser.
-    previews: bool,
+    /// Show Typst files compiled, beside them.
+    pub previews: bool,
 }
 
 /// The project's files as Claude's steps see them: open ones as they are on screen.
@@ -50,6 +50,8 @@ pub struct Reread {
 pub struct Disk {
     rows: Option<(Listing, Vec<Row>)>,
     texts: Vec<(PathBuf, String)>,
+    /// PDFs, read again.
+    pdfs: Vec<(PathBuf, ghostwrite_pdf::Pdf)>,
 }
 
 impl Reread {
@@ -59,8 +61,11 @@ impl Reread {
             let rows = listing.list();
             (listing, rows)
         });
-        let texts = self.files.into_iter().filter_map(|path| std::fs::read_to_string(&path).ok().map(|text| (path, text))).collect();
-        Disk { rows, texts }
+        let pdf = |p: &PathBuf| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+        let (pdfs, files): (Vec<PathBuf>, Vec<PathBuf>) = self.files.into_iter().partition(pdf);
+        let texts = files.into_iter().filter_map(|path| std::fs::read_to_string(&path).ok().map(|text| (path, text))).collect();
+        let pdfs = pdfs.into_iter().filter_map(|path| ghostwrite_pdf::Pdf::open(&path).ok().map(|pdf| (path, pdf))).collect();
+        Disk { rows, texts, pdfs }
     }
 }
 
@@ -108,19 +113,29 @@ impl Project {
     /// A new tab for `text` (not switched to); returns its index.
     pub fn add(&mut self, path: Option<PathBuf>, text: String) -> usize {
         let lsp = path.as_deref().and_then(|p| document::server_for(&mut self.servers, p, &text));
-        let ix = self.tabs.add(|id| Document::new(id, path, text, lsp));
-        if let Some(tab) = self.tabs.get_mut(ix).filter(|_| self.previews) {
-            preview(&mut tab.doc);
-        }
-        ix
+        self.tabs.add(|id| Document::new(id, path, text, lsp))
+    }
+
+    /// A new tab for the PDF read from `path` (not switched to); returns its index.
+    pub fn add_pdf(&mut self, path: PathBuf, pdf: ghostwrite_pdf::Pdf) -> usize {
+        self.tabs.add(|id| Document::pdf(id, path, pdf))
     }
 
     /// The tab for `path`, opening the file if it isn't open (a missing file
     /// opens empty). `None` if it can't be read; the status says why.
     pub fn open(&mut self, path: &Path) -> Option<usize> {
-        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = ghostwrite_project::clean(path);
         if let Some(ix) = self.tabs.index_of_path(&path) {
             return Some(ix);
+        }
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+            return match ghostwrite_pdf::Pdf::open(&path) {
+                Ok(pdf) => Some(self.tabs.add(|id| Document::pdf(id, path, pdf))),
+                Err(e) => {
+                    self.say(format!("couldn't open {}: {e}", path.display()));
+                    None
+                }
+            };
         }
         let max = crate::config::get().max_file_size;
         if let Ok(meta) = std::fs::metadata(&path)
@@ -140,13 +155,14 @@ impl Project {
     }
 
     /// Switch tabs. Leaving a file writes it, so disk (what Claude, `:sh`
-    /// and the language servers read) matches what you see.
+    /// and the language servers read) matches what you see; never over
+    /// changes another program made (the status says so instead).
     pub fn activate(&mut self, ix: usize) {
         let leaving = self.tabs.active_index();
         if ix != leaving
             && let Some(path) = self.tabs.get(leaving).filter(|t| t.doc.dirty).and_then(|t| t.doc.path.clone())
         {
-            self.write(leaving, path);
+            self.write(leaving, path, false);
         }
         self.tabs.set_active(ix);
         self.tree.set_active(self.active_path());
@@ -156,31 +172,31 @@ impl Project {
         }
     }
 
-    /// Write tab `ix` to `path`, saying so.
-    pub fn write(&mut self, ix: usize, path: PathBuf) {
-        let Some(tab) = self.tabs.get_mut(ix) else { return };
-        let message = match tab.doc.save(&path) {
+    /// Write tab `ix` to `path`, saying so; `force` writes over changes on
+    /// disk, or another file (see [`Document::save`]). Whether it did.
+    pub fn write(&mut self, ix: usize, path: PathBuf, force: bool) -> bool {
+        let Some(tab) = self.tabs.get_mut(ix) else { return false };
+        let saved = tab.doc.save(&path, force);
+        let message = match &saved {
             Ok(()) => {
                 let message = format!("saved {}", ghostwrite_project::display(&path, &self.root));
                 if tab.doc.path.as_ref() != Some(&path) {
                     tab.doc.moved(path, &mut self.servers);
-                    if self.previews {
-                        preview(&mut tab.doc);
-                    }
                 }
                 message
             }
-            Err(e) => format!("couldn't save {}: {e}", path.display()),
+            Err(e) => format!("couldn't save: {e}"),
         };
         self.say(message);
         self.tree.refresh();
+        saved.is_ok()
     }
 
-    /// Write every open file with unsaved changes.
+    /// Write every open file with unsaved changes (none over changes on disk).
     pub fn write_all(&mut self) {
         for ix in 0..self.tabs.len() {
             if let Some(path) = self.tabs.get(ix).filter(|t| t.doc.dirty).and_then(|t| t.doc.path.clone()) {
-                self.write(ix, path);
+                self.write(ix, path, false);
             }
         }
     }
@@ -198,9 +214,6 @@ impl Project {
             let Some(rest) = tab.doc.path.as_deref().and_then(|p| p.strip_prefix(from).ok()) else { continue };
             let moved = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
             tab.doc.moved(moved, &mut self.servers);
-            if self.previews {
-                preview(&mut tab.doc);
-            }
         }
         self.tree.renamed(from, to);
     }
@@ -235,30 +248,76 @@ impl Project {
             self.tree.listed(&listing, rows);
             changed = true;
         }
+        // A PDF that's changed (rebuilt, say): its new text and pages.
+        for (path, pdf) in disk.pdfs {
+            if let Some(tab) = self.tabs.index_of_path(&path).and_then(|ix| self.tabs.get_mut(ix)) {
+                tab.doc.pdf = Some(std::sync::Arc::new(pdf));
+                tab.reload(tab.doc.pdf.as_ref().map(|p| p.text.clone()).unwrap_or_default());
+                changed = true;
+            }
+        }
         let mut kept = vec![];
         for (path, text) in disk.texts {
             let Some(tab) = self.tabs.index_of_path(&path).and_then(|ix| self.tabs.get_mut(ix)) else { continue };
-            if text == tab.doc.text() {
+            if !tab.doc.changed_on_disk() {
+                // Our own write (typing may have gone on since), or read before it landed.
+                continue;
+            }
+            if ghostwrite_project::fs::normalize(text.clone()).0 == tab.doc.text() {
                 // Our own write, or someone wrote what's on screen.
-                changed |= std::mem::take(&mut tab.doc.dirty);
+                changed |= tab.doc.dirty;
+                tab.doc.on_disk();
             } else if tab.doc.dirty {
-                kept.push(tab.doc.name());
+                // Saving would lose theirs: it won't, until told to (:w!).
+                if !std::mem::replace(&mut tab.doc.conflict, true) {
+                    kept.push(tab.doc.name());
+                }
             } else {
                 tab.reload(text);
                 changed = true;
             }
         }
         if !kept.is_empty() {
-            self.say(format!("{} changed on disk, keeping your unsaved changes (:reload! takes the file's)", kept.join(", ")));
+            self.say(format!(
+                "{} changed on disk; your unsaved changes are kept, and won't be saved over it (:w! does, :rl! takes the file's)",
+                kept.join(", ")
+            ));
             changed = true;
         }
         changed
     }
 
-    /// Diagnostics from a server, onto the file they're for.
-    pub fn apply_diagnostics(&mut self, path: &Path, diagnostics: Vec<ghostwrite_lsp::RawDiagnostic>) -> bool {
+    /// Diagnostics from a server, onto the file they're for; not if they're
+    /// for an older version of its text (newer ones are coming, and these
+    /// would land in the wrong places).
+    pub fn apply_diagnostics(&mut self, path: &Path, version: Option<i32>, diagnostics: Vec<ghostwrite_lsp::RawDiagnostic>) -> bool {
         let Some(tab) = self.tabs.index_of_path(path).and_then(|ix| self.tabs.get_mut(ix)) else { return false };
+        if version.zip(tab.doc.lsp.as_ref()).is_some_and(|(v, lsp)| v < lsp.version()) {
+            return false;
+        }
         tab.doc.set_diagnostics(diagnostics);
+        true
+    }
+
+    /// A language server stopped: say why, and start it again for its files
+    /// (the registry gives up on one that keeps stopping).
+    pub fn server_exited(&mut self, server: &str, why: &str) {
+        let mut restarted = false;
+        for tab in self.tabs.iter_mut().filter(|t| t.doc.lsp.as_ref().is_some_and(|l| l.server() == server && !l.alive())) {
+            let path = tab.doc.path.clone();
+            tab.doc.restart_server(path.as_deref(), &mut self.servers);
+            restarted |= tab.doc.lsp.is_some();
+        }
+        let why = if why.is_empty() { String::new() } else { format!(": {}", why.trim()) };
+        let next = if restarted { "started it again" } else { "it keeps stopping, so it's off for now" };
+        self.say(format!("{server} stopped{why} ({next})"));
+    }
+
+    /// How far Lean has checked `path`: the goals pane says, and asks again once it's done.
+    pub fn apply_progress(&mut self, path: &Path, checking: Option<u32>) -> bool {
+        let Some(tab) = self.tabs.index_of_path(path).and_then(|ix| self.tabs.get_mut(ix)) else { return false };
+        let Some(goals) = tab.doc.goals.as_mut() else { return false };
+        goals.checked(checking);
         true
     }
 
@@ -284,17 +343,10 @@ impl Project {
             let at = ghostwrite_core::offset_of(tab.doc.text(), *line, *column);
             tab.select(Range::point(at), Autoscroll::Center(*line..*line + 1));
         }
-        let active = existing.get(session.active).or(existing.last()).and_then(|(p, ..)| self.tabs.index_of_path(p));
+        let active = session.files.get(session.active).filter(|(p, ..)| p.is_file()).or(existing.last().copied());
+        let active = active.and_then(|(p, ..)| self.tabs.index_of_path(p));
         if let Some(ix) = active {
             self.activate(ix);
         }
     }
-}
-
-/// tinymist's live preview of `doc`, opened in the browser, if it's Typst.
-fn preview(doc: &mut Document) {
-    let open = |url: String| {
-        std::process::Command::new("/usr/bin/open").arg(url).status().ok();
-    };
-    doc.preview = doc.lsp.as_ref().and_then(|lsp| ghostwrite_lsp::Preview::start(lsp, open));
 }

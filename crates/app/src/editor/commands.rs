@@ -10,10 +10,22 @@ use super::{Editor, EditorEvent};
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Open(Vec<String>),
-    Write(Option<String>),
+    /// `:w`, `:w!` (over changes on disk, or another file), `:wq`, `:x`.
+    Write {
+        path: Option<String>,
+        force: bool,
+        quit: bool,
+        /// `:x`: only if there's something to write.
+        changed_only: bool,
+    },
     WriteAll {
         quit: bool,
     },
+    /// Close the window (`:q`), asking about unsaved changes unless `force`d.
+    Quit {
+        force: bool,
+    },
+    /// Quit the app: every window (`:qa`).
     QuitAll {
         force: bool,
     },
@@ -42,8 +54,14 @@ pub enum Command {
     Grep(String),
     /// Show or hide the file tree.
     Tree,
+    /// Open the terminal, in terminal mode.
+    Terminal,
+    /// Show or hide a Typst file's PDF, beside it.
+    Preview,
     /// The projects page, or straight into a folder.
     Project(Option<String>),
+    /// Format the file as its language server does.
+    Format,
 }
 
 /// Names Tab completes, as typed in helix.
@@ -51,6 +69,10 @@ const NAMES: &[&str] = &[
     "open",
     "edit",
     "write",
+    "write!",
+    "write-quit",
+    "quit",
+    "quit!",
     "write-all",
     "write-quit-all",
     "quit-all",
@@ -69,7 +91,10 @@ const NAMES: &[&str] = &[
     "buffer-close",
     "buffer-close!",
     "tree",
+    "term",
+    "preview",
     "project",
+    "format",
 ];
 
 pub fn parse(line: &str) -> Result<Command, String> {
@@ -94,7 +119,13 @@ pub fn parse(line: &str) -> Result<Command, String> {
         "grep" | "g" | "search" => Ok(Command::Grep(rest.to_string())),
         "o" | "open" | "e" | "edit" if args.is_empty() => Err(format!(":{name} needs a path")),
         "o" | "open" | "e" | "edit" => Ok(Command::Open(args)),
-        "w" | "write" | "w!" | "write!" => one_path("path").map(Command::Write),
+        "w" | "write" | "w!" | "write!" | "wq" | "wq!" | "x" | "x!" | "write-quit" | "write-quit!" => {
+            let quit = matches!(name.trim_end_matches('!'), "wq" | "x" | "write-quit");
+            let changed_only = name.starts_with('x');
+            one_path("path").map(|path| Command::Write { path, force: name.ends_with('!'), quit, changed_only })
+        }
+        "q" | "quit" => no_args(Command::Quit { force: false }),
+        "q!" | "quit!" => no_args(Command::Quit { force: true }),
         "qa" | "quit-all" => no_args(Command::QuitAll { force: false }),
         "qa!" | "quit-all!" => no_args(Command::QuitAll { force: true }),
         "wa" | "write-all" => no_args(Command::WriteAll { quit: false }),
@@ -103,6 +134,9 @@ pub fn parse(line: &str) -> Result<Command, String> {
         "rl" | "reload" => no_args(Command::Reload { force: false }),
         "rl!" | "reload!" => no_args(Command::Reload { force: true }),
         "tree" | "explorer" => no_args(Command::Tree),
+        "term" | "terminal" => no_args(Command::Terminal),
+        "preview" => no_args(Command::Preview),
+        "format" | "fmt" => no_args(Command::Format),
         "project" | "projects" => one_path("folder").map(Command::Project),
         "n" | "new" => no_args(Command::New),
         "bn" | "bnext" | "buffer-next" => no_args(Command::BufferNext),
@@ -158,6 +192,8 @@ impl Editor {
         if line.is_empty() {
             return;
         }
+        // Another window may have added to it since.
+        self.history = store::command_history();
         self.history.retain(|l| l != line);
         self.history.push(line.to_string());
         store::save_command_history(&self.history);
@@ -201,29 +237,31 @@ impl Editor {
                 }
                 self.open_paths(paths, cx);
             }
-            Command::Write(path) => {
+            Command::Write { path, force, quit, changed_only } => {
                 let path = match path {
                     Some(p) => resolve(&p, &self.project.root),
                     None => self.current()?.doc.path.clone().ok_or("no file name yet: use :write <path>")?,
                 };
-                self.project.write(self.project.tabs.active_index(), path);
+                let ix = self.project.tabs.active_index();
+                let doc = &self.current()?.doc;
+                let needed = !(changed_only && doc.path.as_ref() == Some(&path) && !doc.dirty);
+                if needed && !self.project.write(ix, path, force) {
+                    return Err(self.project.status.take().map(|s| s.to_string()).unwrap_or_default());
+                }
+                if quit {
+                    cx.emit(EditorEvent::CloseWindow { force: false });
+                }
             }
-            Command::WriteAll { quit } => {
+            Command::WriteAll { quit } if quit => crate::workspace::write_all_and_quit(cx),
+            Command::WriteAll { .. } => {
                 self.project.write_all();
                 if let Some(tab) = self.project.tabs.iter().find(|t| t.doc.dirty) {
                     return Err(format!("couldn't write {}", tab.doc.name()));
                 }
                 self.project.status = Some("wrote all files".into());
-                if quit {
-                    cx.quit();
-                }
             }
-            Command::QuitAll { force } => {
-                if let Some(tab) = self.project.tabs.iter().find(|t| t.doc.dirty).filter(|_| !force) {
-                    return Err(unsaved(&tab.doc.name()));
-                }
-                cx.quit();
-            }
+            Command::Quit { force } => cx.emit(EditorEvent::CloseWindow { force }),
+            Command::QuitAll { force } => crate::workspace::quit(force, cx),
             Command::Remove { path, force } => {
                 let target = match path {
                     Some(p) => resolve(&p, &self.project.root),
@@ -231,6 +269,13 @@ impl Editor {
                 };
                 if !target.exists() {
                     return Err(format!("{} doesn't exist", target.display()));
+                }
+                let root = &self.project.root;
+                if ghostwrite_project::same_file(&target, root) || !target.starts_with(root) {
+                    return Err(format!("{} isn't in the project: :rm only removes the project's files", target.display()));
+                }
+                if target.is_dir() && !force {
+                    return Err(format!("{} is a folder (:rm! moves it and everything in it to the Trash)", ghostwrite_project::display(&target, root)));
                 }
                 let affected = |t: &super::Tab| t.doc.path.as_deref().is_some_and(|p| p.starts_with(&target));
                 if let Some(tab) = self.project.tabs.iter().find(|t| affected(t) && t.doc.dirty).filter(|_| !force) {
@@ -270,6 +315,9 @@ impl Editor {
             Command::Output => self.output_story(cx)?,
             Command::Grep(pattern) => self.start_search(&pattern, window, cx)?,
             Command::Tree => self.toggle_tree(cx),
+            Command::Terminal => self.enter_terminal(cx),
+            Command::Preview => self.toggle_preview(),
+            Command::Format => self.format(|_, _| {}, cx),
             Command::Project(path) => {
                 let path = path.map(|p| resolve(&p, &self.project.root));
                 if let Some(p) = path.as_ref().filter(|p| !p.is_dir()) {
@@ -299,9 +347,13 @@ mod tests {
     #[test]
     fn parses_helix_commands() {
         assert_eq!(parse("e src/main.rs"), Ok(Command::Open(vec!["src/main.rs".into()])));
-        assert_eq!(parse("w"), Ok(Command::Write(None)));
+        assert_eq!(parse("w"), Ok(Command::Write { path: None, force: false, quit: false, changed_only: false }));
+        assert_eq!(parse("w! a.txt"), Ok(Command::Write { path: Some("a.txt".into()), force: true, quit: false, changed_only: false }));
+        assert_eq!(parse("wq"), Ok(Command::Write { path: None, force: false, quit: true, changed_only: false }));
+        assert_eq!(parse("x!"), Ok(Command::Write { path: None, force: true, quit: true, changed_only: true }));
+        assert_eq!(parse("q"), Ok(Command::Quit { force: false }));
+        assert_eq!(parse("q!"), Ok(Command::Quit { force: true }));
         assert_eq!(parse("bc!"), Ok(Command::BufferClose { force: true }));
-        assert!(parse("q").is_err() && parse("wq").is_err());
         assert_eq!(parse("42"), Ok(Command::Goto(42)));
         assert_eq!(parse("wa"), Ok(Command::WriteAll { quit: false }));
         assert_eq!(parse("sh cargo test -- --nocapture"), Ok(Command::Shell(Some("cargo test -- --nocapture".into()))));
@@ -311,6 +363,7 @@ mod tests {
         assert_eq!(parse("rm"), Ok(Command::Remove { path: None, force: false }));
         assert_eq!(parse("rm! a.txt"), Ok(Command::Remove { path: Some("a.txt".into()), force: true }));
         assert_eq!(parse("project ~/code"), Ok(Command::Project(Some("~/code".into()))));
+        assert_eq!(parse("term"), Ok(Command::Terminal));
         assert!(parse("e").is_err());
         assert!(parse("frobnicate").is_err());
     }
@@ -323,7 +376,7 @@ mod tests {
             std::fs::write(root.join(f), "").unwrap();
         }
         assert_eq!(complete("ne", &root).0, "new ");
-        assert_eq!(complete("write-", &root), ("write-".into(), vec!["write-all".into(), "write-quit-all".into()]));
+        assert_eq!(complete("write-", &root), ("write-".into(), vec!["write-quit".into(), "write-all".into(), "write-quit-all".into()]));
         assert_eq!(complete("e R", &root), ("e README.md".into(), vec![]));
         assert_eq!(complete("e s", &root), ("e src/".into(), vec![]));
         let (line, hits) = complete("e src/m", &root);

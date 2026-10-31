@@ -11,33 +11,49 @@
 //! Every key goes through [`Editor::key_down`] as a modal [`Key`]: the
 //! completion menu gets first say in insert mode, then the mode decides.
 //! Normal, select and insert mode edit the active document; tree mode
-//! drives the file tree; AI mode reviews a story, with the review keys. Text typed in insert mode arrives through the
-//! platform's input handler.
+//! drives the file tree; AI mode reviews a story, with the review keys;
+//! terminal mode sends them to the terminal's shell. Text typed in insert
+//! mode arrives through the platform's input handler.
 //!
 //! - [`project`], [`tabs`], [`document`]: the model
 //! - [`commands`]: `:` commands, in the [`prompt`]
 //! - [`input`]: text from the platform
-//! - [`story`] (drawn by [`story_view`]), [`stops`], [`shell`], [`language`], [`tree`]: features
-//! - [`view`] and [`element`]: drawing
+//! - [`story`] (drawn by [`story_view`]), [`stops`], [`shell`], [`terminal`], [`language`], [`tree`]: features
+//! - [`typeset`]: notes about a Typst file, typeset; [`preview`]: its pages, compiled as it's typed, beside it;
+//!   [`goals`]: a Lean file's goals at the cursor, beside it; [`semantic`]: the server's colors over the grammar's
+//! - [`view`] and [`element`]: drawing; [`pdf_view`] draws a PDF's pages instead of its text; [`preview_view`] a Typst file's
 
 mod commands;
 mod document;
 mod element;
+mod find;
+mod goals;
 mod input;
+mod jumps;
 mod language;
+mod pdf_view;
+mod picker;
+mod preview;
+mod preview_view;
 mod project;
 mod prompt;
+mod repeat;
+mod semantic;
+mod server_actions;
 mod shell;
 mod stops;
 mod story;
 mod story_view;
 mod tabs;
+mod terminal;
 mod tree;
+mod typeset;
 mod view;
 
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::ops::Range as Bytes;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,15 +78,17 @@ use prompt::{Prompt, PromptKind};
 pub enum EditorEvent {
     /// `:project`: the projects page, or straight into the given folder.
     OpenProject(Option<PathBuf>),
+    /// `:q`, `:wq`: close the window, asking about unsaved changes unless `force`d.
+    CloseWindow { force: bool },
 }
 
 /// How the editor starts.
 pub struct Options {
     /// Start language servers for the files opened.
     pub language_servers: bool,
-    /// Preview Typst files in the browser, with tinymist.
+    /// Show Typst files compiled, beside them.
     pub previews: bool,
-    /// What `a` asks, the one in use first: `:model` switches between them.
+    /// What `space a` asks, the one in use first (the API with a key, else Claude Code).
     pub backends: Vec<Backend>,
 }
 
@@ -87,6 +105,8 @@ pub struct Measured {
     pub rows: usize,
     /// The cursor, in window coordinates (for the completion menu and input methods).
     pub cursor: Option<Bounds<Pixels>>,
+    /// The first line on screen (`gt`).
+    pub top_line: Option<usize>,
 }
 
 pub struct Editor {
@@ -95,18 +115,43 @@ pub struct Editor {
     modal: Modal,
     /// The yank register, shared by all documents.
     yanked: String,
+    /// Named registers (`"a y`).
+    registers: HashMap<char, String>,
     tree_pane: tree::TreePane,
     prompt: Option<Prompt>,
     /// Earlier `:` commands, oldest first, and where ↑/↓ is in them.
     history: Vec<String>,
     history_at: Option<usize>,
     cheatsheet: bool,
-    /// What `a` asks, the one in use first.
+    /// What `space a` asks, the one in use first.
     backends: Vec<Arc<Backend>>,
     story: Option<story::StoryState>,
     /// The last `:sh` command, running or done.
     shell: Option<shell::Shell>,
     last_shell: Option<String>,
+    /// The user's shell, under the code.
+    terminal: terminal::TerminalPane,
+    /// The code should take the keys back at the next draw (a field that had them went away).
+    pub(super) refocus: bool,
+    /// Completion questions asked: only the latest answer is shown.
+    completions_asked: u64,
+    /// The active file's rows, wrapped: for a version of the text and a width.
+    wrapped: Option<element::Wrapped>,
+    /// The signature of the call being typed.
+    signature: Option<server_actions::Signature>,
+    /// `.` and macros.
+    recorder: repeat::Recorder,
+    /// `space f`, `space b`.
+    picker: Option<picker::Picker>,
+    /// Where `ctrl-o` goes back to.
+    jumps: jumps::Jumps,
+    /// Searching the file (`/`, `n`).
+    find: find::Find,
+    /// The next redraw while Claude is thinking.
+    ticking: Option<gpui::Task<()>>,
+    /// A click in the code is being dragged: it selects.
+    pub(super) text_drag: bool,
+    preview_pane: preview::PreviewPane,
     completion: Option<language::CompletionMenu>,
     /// Text being composed with an input method, in the active document.
     marked: Option<Bytes<usize>>,
@@ -124,19 +169,33 @@ impl Focusable for Editor {
     }
 }
 
-/// The yank register and the clipboard, for modal commands.
+/// The registers and the clipboard, for modal commands: the yank
+/// register, `+` (and `*`) the clipboard, `_` nothing, and named ones.
 struct Regs<'a> {
     yanked: &'a mut String,
+    named: &'a mut HashMap<char, String>,
     cx: &'a mut App,
 }
 
 impl Registers for Regs<'_> {
-    fn yanked(&self) -> String {
-        self.yanked.clone()
+    fn yanked(&self, register: Option<char>) -> String {
+        match register {
+            None => self.yanked.clone(),
+            Some('+' | '*') => self.clipboard().unwrap_or_default(),
+            Some('_') => String::new(),
+            Some(name) => self.named.get(&name).cloned().unwrap_or_default(),
+        }
     }
 
-    fn yank(&mut self, text: String) {
-        *self.yanked = text;
+    fn yank(&mut self, register: Option<char>, text: String) {
+        match register {
+            None => *self.yanked = text,
+            Some('+' | '*') => self.set_clipboard(text),
+            Some('_') => {}
+            Some(name) => {
+                self.named.insert(name, text);
+            }
+        }
     }
 
     fn clipboard(&self) -> Option<String> {
@@ -157,12 +216,28 @@ impl Editor {
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = from_servers.next().await {
                 let applied = this.update_in(cx, |this, window, cx| match event {
-                    ghostwrite_lsp::Event::Diagnostics { path, diagnostics } => {
-                        if this.project.apply_diagnostics(&path, diagnostics) {
+                    ghostwrite_lsp::Event::Diagnostics { path, version, diagnostics } => {
+                        if this.project.apply_diagnostics(&path, version, diagnostics) {
                             cx.notify();
                         }
                     }
+                    ghostwrite_lsp::Event::ApplyEdit { edit } => this.apply_workspace_edit(&edit, cx),
+                    ghostwrite_lsp::Event::Exited { server, why } => {
+                        this.project.server_exited(server, &why);
+                        cx.notify();
+                    }
                     ghostwrite_lsp::Event::Show { path, selection } => this.show_document(&path, selection, window, cx),
+                    ghostwrite_lsp::Event::Recolor { server } => {
+                        for tab in this.project.tabs.iter_mut().filter(|t| t.doc.lsp.as_ref().is_some_and(|l| l.server() == server)) {
+                            tab.doc.semantic.stale();
+                        }
+                        cx.notify();
+                    }
+                    ghostwrite_lsp::Event::Progress { path, checking } => {
+                        if this.project.apply_progress(&path, checking) {
+                            cx.notify();
+                        }
+                    }
                 });
                 if applied.is_err() {
                     break;
@@ -206,6 +281,7 @@ impl Editor {
             focus,
             modal: Modal::default(),
             yanked: String::new(),
+            registers: HashMap::new(),
             tree_pane: tree::TreePane::new(),
             prompt: None,
             history: store::command_history(),
@@ -215,6 +291,18 @@ impl Editor {
             story: None,
             shell: None,
             last_shell: None,
+            terminal: terminal::TerminalPane::default(),
+            preview_pane: preview::PreviewPane::new(),
+            text_drag: false,
+            ticking: None,
+            find: Default::default(),
+            jumps: Default::default(),
+            picker: None,
+            recorder: Default::default(),
+            signature: None,
+            wrapped: None,
+            completions_asked: 0,
+            refocus: false,
             completion: None,
             marked: None,
             measured: Measured::default(),
@@ -223,8 +311,32 @@ impl Editor {
         }
     }
 
+    /// Write every file with unsaved changes; whether they all were.
+    pub fn write_all(&mut self) -> bool {
+        self.project.write_all();
+        !self.project.is_dirty()
+    }
+
+    /// How many files have unsaved changes.
+    pub fn dirty_count(&self) -> usize {
+        self.project.tabs.iter().filter(|t| t.doc.dirty).count()
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.project.is_dirty()
+    }
+
+    /// Out of select mode: going to another pane ends a selection, so coming
+    /// back (or a click there) doesn't carry it on.
+    fn stop_selecting(&mut self) {
+        if self.modal.mode == Mode::Select {
+            self.modal.mode = Mode::Normal;
+        }
+    }
+
+    /// The project's folder.
+    pub fn root(&self) -> &std::path::Path {
+        &self.project.root
     }
 
     pub fn save_session(&self) {
@@ -263,6 +375,11 @@ impl Editor {
         }
     }
 
+    /// A pane's edge is being dragged: the mouse isn't selecting.
+    fn resizing(&self) -> bool {
+        self.tree_pane.resizing || self.terminal.resizing.is_some() || self.preview_pane.resizing
+    }
+
     fn tab_mut(&mut self) -> Option<&mut Tab> {
         self.project.tab_mut()
     }
@@ -276,22 +393,33 @@ impl Editor {
     // (as one undo step) and dropping what was about the old tab.
 
     fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let from = self.before_jump();
         if ix != self.project.tabs.active_index() {
             self.leave_insert();
         }
         self.project.activate(ix);
+        // Another file is a jump, however it was got to (`ctrl-o` comes back).
+        self.note_jump(from);
         self.tab_changed(cx);
     }
 
     fn tab_changed(&mut self, cx: &mut Context<Self>) {
         self.completion = None;
         self.marked = None;
+        // So a crash loses no more than the last change of tabs.
+        self.save_session();
         cx.notify();
     }
 
     /// Open each path in its own tab, switching to it if it's already open.
     pub fn open_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         for path in paths {
+            // A PDF is read aside (a long one takes seconds), then opened.
+            let pdf = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+            if pdf && self.project.tabs.index_of_path(&path).is_none() {
+                self.open_pdf(ghostwrite_project::clean(&path), cx);
+                continue;
+            }
             if let Some(ix) = self.project.open(&path) {
                 self.activate(ix, cx);
             }
@@ -316,13 +444,50 @@ impl Editor {
         }
     }
 
+    /// ⌘S. If another program changed the file since it was read, ask
+    /// whose version to keep.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tab() else { return };
-        match tab.doc.path.clone() {
-            Some(path) => self.project.write(self.project.tabs.active_index(), path),
-            None => self.save_as(window, cx),
+        let Some(path) = tab.doc.path.clone() else { return self.save_as(window, cx) };
+        if !tab.doc.changed_on_disk() {
+            if self.formats_on_save() {
+                let id = tab.doc.id;
+                return self.format(
+                    move |this, cx| {
+                        if let Some(ix) = this.project.tabs.index_of_id(id) {
+                            this.project.write(ix, path, false);
+                        }
+                        cx.notify();
+                    },
+                    cx,
+                );
+            }
+            self.project.write(self.project.tabs.active_index(), path, false);
+            return cx.notify();
         }
-        cx.notify();
+        let message = format!("{} changed on disk since it was opened", tab.doc.name());
+        let detail = "Saving writes your version over the one on disk. Reloading takes the disk's (undo brings yours back).";
+        let answer = window.prompt(PromptLevel::Warning, &message, Some(detail), &["Save Mine", "Reload Theirs", "Cancel"], cx);
+        let id = tab.doc.id;
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await;
+            this.update(cx, |this, cx| {
+                let Some(ix) = this.project.tabs.index_of_id(id) else { return };
+                match answer {
+                    Ok(0) => {
+                        this.project.write(ix, path, true);
+                    }
+                    Ok(1) => match std::fs::read_to_string(&path) {
+                        Ok(text) => this.project.tabs.get_mut(ix).into_iter().for_each(|tab| tab.reload(text.clone())),
+                        Err(e) => this.project.say(format!("couldn't reload: {e}")),
+                    },
+                    _ => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -334,8 +499,9 @@ impl Editor {
             let Ok(Ok(Some(path))) = answer.await else { return };
             this.update(cx, |this, cx| {
                 // The tab may have moved or closed while the dialog was up.
+                // The dialog asked before writing over anything.
                 if let Some(ix) = this.project.tabs.index_of_id(id) {
-                    this.project.write(ix, path);
+                    this.project.write(ix, path, true);
                     cx.notify();
                 }
             })
@@ -349,6 +515,31 @@ impl Editor {
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             this.update(cx, |this, cx| this.open_paths(paths, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Open the PDF at `path` once it's read, off the UI thread.
+    fn open_pdf(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.project.say(format!("reading {}…", self.project.display(&path)));
+        let reading = cx.background_spawn({
+            let path = path.clone();
+            async move { ghostwrite_pdf::Pdf::open(&path) }
+        });
+        cx.spawn(async move |this, cx| {
+            let read = reading.await;
+            this.update(cx, |this, cx| {
+                match read {
+                    Ok(pdf) => {
+                        let ix = this.project.tabs.index_of_path(&path).unwrap_or_else(|| this.project.add_pdf(path, pdf));
+                        this.project.status = None;
+                        this.activate(ix, cx);
+                    }
+                    Err(e) => this.project.say(format!("couldn't open {}: {e}", path.display())),
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -386,6 +577,7 @@ impl Editor {
         }
         self.marked = None;
         self.completion = None;
+        self.signature = None;
         match self.project.tabs.active_mut() {
             Some(tab) => self.modal.to_normal(&mut tab.target(1)),
             None => self.modal.mode = Mode::Normal,
@@ -399,8 +591,30 @@ impl Editor {
             cx.notify();
             return true;
         }
+        if self.modal.mode == Mode::Terminal {
+            let handled = self.terminal_key(keystroke);
+            if handled {
+                cx.notify();
+            }
+            return handled;
+        }
         let Some(key) = key_of(keystroke) else { return false };
+        // A message lasts until the next key (which may say something new),
+        // and so do the marked matches, unless it's about searching.
+        self.project.status = None;
+        if !matches!(key, ghostwrite_core::Key::Char('n' | 'N' | '*')) {
+            self.find.shown = false;
+        }
+        let from = self.before_jump();
+        self.record_key(key);
         let handled = (self.modal.mode == Mode::Insert && self.menu_key(key, cx)) || self.mode_key(key, window, cx);
+        self.recorded_key(key);
+        if !matches!(key, ghostwrite_core::Key::Ctrl('o' | 'i')) {
+            self.note_jump(from);
+        }
+        if self.modal.take_refused() {
+            self.project.say("no editing while a story's up: tab accepts, ⏎ redirects, esc esc ends it");
+        }
         if handled {
             cx.notify();
         }
@@ -430,14 +644,23 @@ impl Editor {
     /// A key for the active document (or, with none open, for the commands that work anyway).
     fn buffer_key(&mut self, key: Key, cx: &mut Context<Self>) -> Outcome {
         let rows = self.measured.rows.max(2);
-        let mut regs = Regs { yanked: &mut self.yanked, cx };
+        let mut regs = Regs { yanked: &mut self.yanked, named: &mut self.registers, cx };
         let outcome = match self.project.tabs.active_mut() {
             Some(tab) => {
                 let before = (tab.doc.buffer.version(), tab.view.selection);
                 let outcome = self.modal.key(key, &mut regs, &mut tab.target(rows));
+                // A PDF's text can't change: no inserting, and an edit is undone as it syncs.
+                let pdf = tab.doc.pdf.is_some();
+                let refused = pdf && (self.modal.mode == Mode::Insert || tab.doc.buffer.version() != before.0);
+                if pdf && self.modal.mode == Mode::Insert {
+                    self.modal.to_normal(&mut tab.target(rows));
+                }
                 if (tab.doc.buffer.version(), tab.view.selection) != before {
                     tab.view.autoscroll = Some(Autoscroll::Fit);
                     tab.sync();
+                }
+                if refused {
+                    self.project.say("a PDF is read-only");
                 }
                 outcome
             }
@@ -445,7 +668,7 @@ impl Editor {
                 // Effects (`:`, `space e`, `?`) work with nothing open; edits go nowhere.
                 let (mut buffer, mut selection) = (Buffer::default(), Range::default());
                 let indent = Default::default();
-                let mut target = Target { buffer: &mut buffer, selection: &mut selection, indent: &indent, page_rows: rows };
+                let mut target = Target { buffer: &mut buffer, selection: &mut selection, indent: &indent, page_rows: rows, language: None };
                 let outcome = self.modal.key(key, &mut regs, &mut target);
                 if self.modal.mode == Mode::Insert {
                     self.modal.to_normal(&mut target);
@@ -469,9 +692,31 @@ impl Editor {
             Effect::Search => self.open_prompt(PromptKind::Command, "grep ", window, cx),
             Effect::Assist => self.open_story("", window, cx),
             Effect::Cheatsheet => self.cheatsheet = true,
+            Effect::Find { backward } => self.start_find(backward, window, cx),
+            Effect::FindNext { backward } => self.find_next(backward, cx),
+            Effect::PickFile => self.open_picker(picker::PickerKind::Files, window, cx),
+            Effect::References => self.references(cx),
+            Effect::Rename => self.start_rename(window, cx),
+            Effect::CodeActions => self.code_actions(window, cx),
+            Effect::Symbols => self.symbols(window, cx),
+            Effect::PickBuffer => self.open_picker(picker::PickerKind::Buffers, window, cx),
+            Effect::Repeat => self.repeat(window, cx),
+            Effect::RecordMacro => self.record_macro(),
+            Effect::PlayMacro => self.play_macro(window, cx),
+            Effect::View(place) => self.view_cursor(place, cx),
+            Effect::ScreenLine(place) => self.screen_line(place, cx),
+            Effect::Diagnostic { forward } => self.next_diagnostic(forward, cx),
+            Effect::JumpBack => self.jump(true, cx),
+            Effect::JumpForward => self.jump(false, cx),
+            Effect::FindSelection => {
+                self.find_selection(cx);
+                self.find_next(false, cx);
+            }
             Effect::GotoDefinition => self.goto_definition(window, cx),
             Effect::Hover => self.show_hover(window, cx),
+            Effect::NextProblem => self.next_problem(cx),
             Effect::Diagnostics => self.diagnostics_story(cx),
+            Effect::Terminal => self.enter_terminal(cx),
         }
     }
 }

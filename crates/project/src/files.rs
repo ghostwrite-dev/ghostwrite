@@ -1,4 +1,6 @@
-//! Listing and searching the project's files (honouring `.gitignore`).
+//! Listing and searching the project's files: all of them, but for the
+//! folders tools make (`.gitignore` says what git keeps, not what's worth
+//! reading).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -9,12 +11,17 @@ use regex::Regex;
 /// Matches a search stops at.
 pub const MAX_FOUND: usize = 2000;
 
-/// Files under `under` (honouring `.gitignore`), relative to `root`, sorted.
+/// Folders tools make and fill: dependencies, caches, build output.
+const MADE: [&str; 9] = [".git", "node_modules", ".venv", "venv", "__pycache__", "target", ".mypy_cache", ".pytest_cache", ".ruff_cache"];
+
+/// Files bigger than this aren't searched.
+const MAX_SEARCHED: u64 = 8 << 20;
+
+/// Files under `under` (but in [`MADE`] folders), relative to `root`, sorted.
 pub fn files(root: &Path, under: &Path) -> Vec<String> {
     let mut out: Vec<String> = ignore::WalkBuilder::new(under)
-        .hidden(false)
-        .require_git(false)
-        .filter_entry(|e| e.file_name() != ".git")
+        .standard_filters(false)
+        .filter_entry(|e| !(e.file_type().is_some_and(|t| t.is_dir()) && MADE.iter().any(|m| e.file_name() == *m)) && e.file_name() != ".DS_Store")
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
@@ -31,24 +38,38 @@ pub fn listing(root: &Path, max: usize) -> String {
     if all.len() > max { format!("{shown}\n… and {} more", all.len() - max) } else { shown }
 }
 
-/// One folder's entries (`.git` and `.DS_Store` left out, `.gitignore`
-/// honoured): folders first, then files, each by case-insensitive name.
-pub fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
-    let mut entries: Vec<(PathBuf, bool)> = ignore::WalkBuilder::new(dir)
+/// One folder's entries (`.git` and `.DS_Store` left out): folders first,
+/// then files, each by case-insensitive name, and whether `.gitignore`
+/// leaves each out.
+pub fn list_dir(dir: &Path) -> Vec<(PathBuf, bool, bool)> {
+    let kept: std::collections::HashSet<PathBuf> = ignore::WalkBuilder::new(dir)
         .max_depth(Some(1))
         .hidden(false)
         .require_git(false)
-        .filter_entry(|e| e.file_name() != ".git" && e.file_name() != ".DS_Store")
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.depth() == 1)
+        .map(|e| e.into_path())
+        .collect();
+    let mut entries: Vec<(PathBuf, bool, bool)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name() != ".git" && e.file_name() != ".DS_Store")
         .map(|e| {
-            let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-            (e.into_path(), is_dir)
+            let path = e.path();
+            let is_dir = path.is_dir();
+            let ignored = !kept.contains(&path);
+            (path, is_dir, ignored)
         })
         .collect();
-    entries.sort_by_cached_key(|(p, is_dir)| (!is_dir, p.file_name().map(|n| n.to_string_lossy().to_lowercase())));
+    entries.sort_by_cached_key(|(p, is_dir, _)| (!is_dir, p.file_name().map(|n| n.to_string_lossy().to_lowercase())));
     entries
+}
+
+/// A file's text to search, unless it's too big or isn't text.
+pub fn searchable(path: &Path) -> Option<String> {
+    (std::fs::metadata(path).ok()?.len() <= MAX_SEARCHED).then(|| std::fs::read_to_string(path).ok()).flatten()
 }
 
 /// What a project search looks for: a regex, smart-case like helix (ignoring
@@ -73,7 +94,7 @@ pub fn grep(root: &Path, pattern: &Regex, open: &HashMap<PathBuf, String>) -> Ve
     let mut found = vec![];
     for rel in files(root, root) {
         let path = root.join(&rel);
-        let Some(text) = open.get(&path).cloned().or_else(|| std::fs::read_to_string(&path).ok()) else { continue };
+        let Some(text) = open.get(&path).cloned().or_else(|| searchable(&path)) else { continue };
         for (line, text) in text.lines().enumerate() {
             for m in pattern.find_iter(text).filter(|m| !m.is_empty()) {
                 found.push(Found { path: path.clone(), line, bytes: m.range(), text: text.to_string() });
@@ -157,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_folders_first_and_skips_ignored() {
+    fn lists_folders_first_and_marks_ignored() {
         let dir = crate::scratch_dir("tree");
         for d in ["src", "target", ".git"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
@@ -165,8 +186,13 @@ mod tests {
         for f in ["b.rs", "A.md", ".gitignore"] {
             std::fs::write(dir.join(f), "target/\n").unwrap();
         }
-        let names: Vec<String> = list_dir(&dir).into_iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, ["src", ".gitignore", "A.md", "b.rs"]);
+        let names: Vec<(String, bool)> =
+            list_dir(&dir).into_iter().map(|(p, _, ignored)| (p.file_name().unwrap().to_string_lossy().into_owned(), ignored)).collect();
+        let names: Vec<(&str, bool)> = names.iter().map(|(n, i)| (n.as_str(), *i)).collect();
+        assert_eq!(names, [("src", false), ("target", true), (".gitignore", false), ("A.md", false), ("b.rs", false)]);
         assert_eq!(listing(&dir, 2), ".gitignore\nA.md\n… and 1 more");
+        std::fs::write(dir.join("target/junk"), "").unwrap();
+        std::fs::write(dir.join(".gitignore"), "A.md\n").unwrap();
+        assert_eq!(files(&dir, &dir), [".gitignore", "A.md", "b.rs"], "what git ignores is still listed; target isn't");
     }
 }

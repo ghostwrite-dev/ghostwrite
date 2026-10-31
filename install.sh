@@ -47,6 +47,15 @@ cat > "$APP/Contents/Info.plist" <<EOF
                 <string>net.daringfireball.markdown</string>
             </array>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>PDF</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.adobe.pdf</string>
+            </array>
+        </dict>
     </array>
 </dict>
 </plist>

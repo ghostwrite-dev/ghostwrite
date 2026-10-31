@@ -5,15 +5,17 @@
 //!
 //! The block is described as rows of text; the code view builds it with the
 //! sizes it measures as it lays out, so wrapping always fits this frame.
+//! Claude's math is typeset, once it's compiled.
 
 use ghostwrite_ai::placement;
-use ghostwrite_ai::protocol::{self, Note};
+use ghostwrite_ai::protocol::{self, FileOp, Note};
 use ghostwrite_ai::{Item, Story, lines};
-use gpui::{AnyElement, Entity, Hsla, div, prelude::*, px};
+use gpui::{AnyElement, App, Entity, Hsla, Window, div, img, prelude::*, px};
 
 use super::element::{Block, BlockSizes, Decoration};
 use super::story::{Located, StoryState};
 use super::tree::Annex;
+use super::typeset::{self, Look};
 use super::{Project, Tab};
 use crate::theme::{Theme, pt};
 use crate::ui::text_field::TextField;
@@ -33,6 +35,8 @@ struct BlockSpec {
     /// Columns of indentation for prose, hints and the prompt.
     indent: usize,
     rows: Vec<Row>,
+    /// It's about a Typst file, so prose is Typst markup.
+    typst: bool,
     /// The prompt, if it's open here, and its hint.
     prompt: Option<(Entity<TextField>, &'static str)>,
 }
@@ -44,10 +48,14 @@ impl StoryState {
         let id = story.current()?;
         let item = story.item(id)?;
         let (note, keys) = match &item {
-            Item::Step(step) if self.proposal(project, id, &item).is_some() => {
-                let first = step.new.first().map_or(String::new(), |l| format!(" It starts with: {}", l.trim()));
-                (Some(format!("{}{first}", step.say)), "⇥ create it and write · ⏎ redirect".to_string())
-            }
+            Item::Step(step) if self.proposal(project, id, &item).is_some() => match step.op {
+                Some(FileOp::Remove) => (Some(step.say.clone()), "⇥ move it to the Trash · ⏎ redirect".to_string()),
+                Some(FileOp::Rename(_)) => (Some(step.say.clone()), "⇥ rename it · ⏎ redirect".to_string()),
+                _ => {
+                    let first = step.new.first().map_or(String::new(), |l| format!(" It starts with: {}", l.trim()));
+                    (Some(format!("{}{first}", step.say)), "⇥ create it and write · ⏎ redirect".to_string())
+                }
+            },
             _ => return None,
         };
         Some(Annex { note, keys, asking })
@@ -65,6 +73,7 @@ impl StoryState {
             return (vec![], None);
         }
         let doc = &tab.doc;
+        let typst = doc.language.is_some_and(|l| l.name == "typst");
         let story = self.story.as_ref();
         let prompt = |hint| ask.clone().map(|field| (field, hint));
         let indent_of = |line: usize| {
@@ -84,8 +93,8 @@ impl StoryState {
             }
             let hint = waiting_hint(story);
             let rows = if ask.is_some() { vec![] } else { vec![Row::Hint(hint, theme.warning)] };
-            let spec =
-                BlockSpec { indent: indent_of(located.near.start), rows, prompt: prompt(if story.is_some() { "⏎ send · esc" } else { "⏎ ask · esc" }) };
+            let hint = if story.is_some() { "⏎ send · esc" } else { "⏎ ask · esc" };
+            let spec = BlockSpec { indent: indent_of(located.near.start), rows, typst, prompt: prompt(hint) };
             return (vec![], Some(block(located.near.end.saturating_sub(1), spec, theme)));
         };
 
@@ -100,7 +109,7 @@ impl StoryState {
                 let Some(view) = placement::view(doc.text(), step, located.near.clone()) else {
                     let line = located.near.end.saturating_sub(1).min(doc.buffer.last_line());
                     let rows = vec![Row::Hint(format!("{file}can't place this one · ⏎ redirect"), theme.danger)];
-                    return (vec![], Some(block(line, BlockSpec { indent: 0, rows, prompt: prompt("⏎ send · esc") }, theme)));
+                    return (vec![], Some(block(line, BlockSpec { indent: 0, rows, typst, prompt: prompt("⏎ send · esc") }, theme)));
                 };
                 let removed = view.change.removed.clone();
                 let struck = (!removed.is_empty()).then(|| Decoration {
@@ -108,20 +117,21 @@ impl StoryState {
                     background: Some(theme.danger.opacity(0.14)),
                     strike: Some(theme.danger),
                     color: Some(theme.muted_foreground),
+                    underline: None,
                 });
                 let lead = view.change.added.first().map_or(0, |l| l.len() - l.trim_start().len());
                 // Why, then the change.
                 let mut rows: Vec<Row> = (!step.say.is_empty()).then(|| Row::Prose(step.say.clone())).into_iter().collect();
                 rows.extend(view.change.added.iter().map(|l| Row::Code(l.replace('\t', "    "))));
                 rows.extend(keys(if step.complete { "⇥ accept · ⏎ redirect" } else { "…" }));
-                (struck.into_iter().collect(), Some(block(view.anchor, BlockSpec { indent: lead, rows, prompt: prompt("⏎ send · esc") }, theme)))
+                (struck.into_iter().collect(), Some(block(view.anchor, BlockSpec { indent: lead, rows, typst, prompt: prompt("⏎ send · esc") }, theme)))
             }
             Item::Note(Note { at, text, line, .. }) => {
                 let Some(lines) = lines::find(doc.text(), at, located.near.clone(), line.is_some()).map(|f| f.lines) else { return (vec![], None) };
                 let marked = Decoration::background(doc.buffer.lines_range(lines.clone()), theme.info.opacity(0.12));
                 let mut rows = vec![Row::Prose(text.clone())];
                 rows.extend(keys("⇥ next · ⏎ ask"));
-                (vec![marked], Some(block(lines.end - 1, BlockSpec { indent: indent_of(lines.end - 1), rows, prompt: prompt("⏎ send · esc") }, theme)))
+                (vec![marked], Some(block(lines.end - 1, BlockSpec { indent: indent_of(lines.end - 1), rows, typst, prompt: prompt("⏎ send · esc") }, theme)))
             }
         }
     }
@@ -153,10 +163,10 @@ fn progress(story: Option<&Story>) -> String {
 /// A block under `line` that builds `spec` once it knows its sizes.
 fn block(line: usize, spec: BlockSpec, theme: &Theme) -> Block {
     let theme = theme.clone();
-    Block { line, build: Box::new(move |sizes| build(spec, &theme, sizes)) }
+    Block { line, build: Box::new(move |sizes, window, cx| build(spec, &theme, sizes, window, cx)) }
 }
 
-fn build(spec: BlockSpec, theme: &Theme, sizes: BlockSizes) -> AnyElement {
+fn build(spec: BlockSpec, theme: &Theme, sizes: BlockSizes, window: &mut Window, cx: &mut App) -> AnyElement {
     let columns =
         |indent: usize| (((f32::from(sizes.width) - 48. * theme.zoom) / f32::from(sizes.char_width.max(px(1.)))) as usize).saturating_sub(indent).max(24);
     let indent = sizes.char_width * spec.indent as f32;
@@ -170,7 +180,20 @@ fn build(spec: BlockSpec, theme: &Theme, sizes: BlockSizes) -> AnyElement {
             Row::Code(code) => rows.extend(protocol::wrap_code(&code, columns(0)).into_iter().map(|l| line(l, theme.muted_foreground).into_any_element())),
             Row::Prose(text) => {
                 let note = div().ml(indent).pl_2().border_l_2().border_color(theme.info).bg(theme.info.opacity(0.10)).flex().flex_col();
-                rows.push(note.children(protocol::wrap(&text, columns(spec.indent + 2)).into_iter().map(|l| line(l, theme.foreground))).into_any_element())
+                let cols = columns(spec.indent + 2);
+                let look = || Look {
+                    width: sizes.char_width * cols as f32,
+                    font: theme.mono_font.clone(),
+                    font_size: theme.mono_size,
+                    line_height: sizes.line_height,
+                    color: theme.foreground,
+                    scale: window.scale_factor(),
+                };
+                let note = match typeset::markup(&text, spec.typst).and_then(|markup| typeset::note(&markup, &look(), cx)) {
+                    Some(page) => note.child(img(page.image).w(page.size.width).h(page.size.height)),
+                    None => note.children(protocol::wrap(&text, cols).into_iter().map(|l| line(l, theme.foreground))),
+                };
+                rows.push(note.into_any_element())
             }
             Row::Hint(hint, color) => rows.push(
                 div()
@@ -189,14 +212,14 @@ fn build(spec: BlockSpec, theme: &Theme, sizes: BlockSizes) -> AnyElement {
         rows.push(
             div()
                 .w_full()
-                .h(sizes.line_height)
+                .min_h(sizes.line_height)
                 .pl(indent)
                 .flex()
-                .items_center()
+                .items_start()
                 .gap_1()
                 .child(div().flex_none().text_color(theme.warning).child("✦"))
-                .child(div().flex_1().min_w_0().overflow_hidden().child(field))
-                .child(div().flex_none().ml_3().text_xs().text_color(theme.muted_foreground).child(hint))
+                .child(div().flex_1().min_w_0().child(field))
+                .child(div().flex_none().h(sizes.line_height).flex().items_center().ml_3().text_xs().text_color(theme.muted_foreground).child(hint))
                 .into_any_element(),
         );
     }

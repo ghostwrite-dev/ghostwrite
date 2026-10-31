@@ -92,21 +92,44 @@ pub struct Span {
     pub scope: usize,
 }
 
-/// A language's highlight query, compiled, and the scope each capture it
-/// reports shows as.
+/// A language's highlight query, compiled.
 pub(crate) struct Highlights {
     config: HighlightConfiguration,
-    scopes: Vec<usize>,
+}
+
+/// The capture names every query is set up with (ours, and what other
+/// editors call them), and the scope each shows as. All share them, so an
+/// injected language's highlights mean the same as its host's.
+fn names() -> &'static (Vec<&'static str>, Vec<Option<usize>>) {
+    static NAMES: OnceLock<(Vec<&'static str>, Vec<Option<usize>>)> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        let names: Vec<&str> = SCOPES.iter().copied().chain(ALIASES.iter().map(|(theirs, _)| *theirs)).collect();
+        let scopes = names.iter().map(|n| scope(n)).collect();
+        (names, scopes)
+    })
 }
 
 /// Compile `query` for `grammar`; `None` (and a complaint) if it doesn't load.
 pub(crate) fn highlights(name: &str, grammar: impl Into<tree_sitter::Language>, query: &str) -> Option<Highlights> {
-    let mut config =
-        HighlightConfiguration::new(grammar.into(), name, query, "", "").inspect_err(|e| eprintln!("the {name} highlight query doesn't load: {e}")).ok()?;
+    with_injections(name, grammar, query, "")
+}
+
+/// [`highlights`], with other languages inside it (`injections`, a query:
+/// Markdown's code blocks and inline text) highlighted as themselves.
+pub(crate) fn with_injections(name: &str, grammar: impl Into<tree_sitter::Language>, query: &str, injections: &str) -> Option<Highlights> {
+    let mut config = HighlightConfiguration::new(grammar.into(), name, query, injections, "")
+        .inspect_err(|e| eprintln!("the {name} highlight query doesn't load: {e}"))
+        .ok()?;
     // Report only the captures that show as something, each as itself.
-    let (captures, scopes): (Vec<String>, Vec<usize>) = config.names().iter().filter_map(|c| Some((c.to_string(), scope(c)?))).unzip();
-    config.configure(&captures);
-    Some(Highlights { config, scopes })
+    // tree-sitter matches a capture to the longest of these it starts with (`keyword.control` → `keyword`).
+    config.configure(&names().0);
+    Some(Highlights { config })
+}
+
+/// Markdown's inline grammar (emphasis, code, links), injected into its blocks.
+fn markdown_inline() -> Option<&'static Highlights> {
+    static INLINE: OnceLock<Option<Highlights>> = OnceLock::new();
+    INLINE.get_or_init(|| highlights("markdown_inline", tree_sitter_md::INLINE_LANGUAGE, tree_sitter_md::HIGHLIGHT_QUERY_INLINE)).as_ref()
 }
 
 /// The scope a capture shows as: its name, or what it's an alias of, or
@@ -122,19 +145,91 @@ fn scope(capture: &str) -> Option<usize> {
     }
 }
 
+/// The scope called `name` (or its alias, or a shorter form), as [`Span::scope`] numbers it.
+pub fn scope_named(name: &str) -> Option<usize> {
+    scope(name)
+}
+
+/// `top` laid over `base` (both in order, not overlapping): where a span of
+/// `top` is, it wins; `base` shows around it.
+pub fn overlay(base: &[Span], top: &[Span]) -> Vec<Span> {
+    let mut out = Vec::with_capacity(base.len() + top.len());
+    let mut tops = top.iter().peekable();
+    // Where the last `top` span ended: `base` shows only after it.
+    let mut covered = 0;
+    for span in base {
+        let mut from = span.range.start.max(covered);
+        // The spans of `top` before or inside this one.
+        while let Some(t) = tops.next_if(|t| t.range.start < span.range.end) {
+            if t.range.start > from {
+                out.push(Span { range: from..t.range.start, scope: span.scope });
+            }
+            (from, covered) = (from.max(t.range.end), t.range.end);
+            out.push(t.clone());
+        }
+        if from < span.range.end {
+            out.push(Span { range: from..span.range.end, scope: span.scope });
+        }
+    }
+    out.extend(tops.cloned());
+    out
+}
+
+/// `spans` of `old` moved onto `new`, which is `old` edited in one place:
+/// those before the edit stay, those after it move with the text, and
+/// those it touched are gone.
+pub fn follow_edit(spans: &[Span], old: &str, new: &str) -> Vec<Span> {
+    let prefix = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+    let room = old.len().min(new.len()) - prefix;
+    let suffix = old.bytes().rev().zip(new.bytes().rev()).take(room).take_while(|(a, b)| a == b).count();
+    let (edited_end, shift) = (old.len() - suffix, new.len() as isize - old.len() as isize);
+    spans
+        .iter()
+        .filter_map(|s| {
+            if s.range.end <= prefix {
+                Some(s.clone())
+            } else if s.range.start >= edited_end {
+                let moved = |b: usize| (b as isize + shift) as usize;
+                Some(Span { range: moved(s.range.start)..moved(s.range.end), scope: s.scope })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Language `ix`'s highlights, compiled the first time they're needed.
+fn loaded(ix: usize) -> Option<&'static Highlights> {
+    static LOADED: [OnceLock<Option<Highlights>>; LANGUAGES.len()] = [const { OnceLock::new() }; LANGUAGES.len()];
+    LOADED[ix].get_or_init(LANGUAGES[ix].load).as_ref()
+}
+
+/// What's injected into a language: Markdown's inline text, or a code
+/// block's language by its name (`rust`, `py`, `typescript`…).
+fn injected<'a>(name: &str) -> Option<&'a HighlightConfiguration> {
+    if name == "markdown_inline" {
+        return markdown_inline().map(|h| &h.config);
+    }
+    let ix = LANGUAGES.iter().position(|l| l.name == name || l.extensions.contains(&name) || l.id() == name)?;
+    loaded(ix).map(|h| &h.config)
+}
+
 impl Language {
     /// The spans of `text`, innermost scope wins, in order.
     pub fn highlight(&self, text: &str) -> Vec<Span> {
-        static LOADED: [OnceLock<Option<Highlights>>; LANGUAGES.len()] = [const { OnceLock::new() }; LANGUAGES.len()];
         if text.len() > MAX_HIGHLIGHT {
             return vec![];
         }
+        if let Some(lex) = self.lex {
+            return lex(text).into_iter().filter_map(|(range, name)| Some(Span { range, scope: scope(name)? })).collect();
+        }
         let Some(ix) = LANGUAGES.iter().position(|l| std::ptr::eq(l, self)) else { return vec![] };
-        let Some(Highlights { config, scopes }) = LOADED[ix].get_or_init(self.load).as_ref() else { return vec![] };
+        let Some(Highlights { config }) = loaded(ix) else { return vec![] };
+        let scopes = &names().1;
         let mut highlighter = Highlighter::new();
-        let Ok(events) = highlighter.highlight(config, text.as_bytes(), None, None, |_| None) else { return vec![] };
+        let Ok(events) = highlighter.highlight(config, text.as_bytes(), None, None, injected) else { return vec![] };
         let mut spans = vec![];
-        let mut stack: Vec<usize> = vec![];
+        let mut stack: Vec<Option<usize>> = vec![];
         for event in events {
             match event {
                 Ok(HighlightEvent::HighlightStart(h)) => stack.push(scopes[h.0]),
@@ -142,7 +237,7 @@ impl Language {
                     stack.pop();
                 }
                 Ok(HighlightEvent::Source { start, end }) => {
-                    if let Some(&scope) = stack.last() {
+                    if let Some(&Some(scope)) = stack.last() {
                         spans.push(Span { range: start..end, scope });
                     }
                 }
@@ -161,7 +256,7 @@ mod tests {
 
     #[test]
     fn every_query_loads() {
-        for language in &LANGUAGES {
+        for language in LANGUAGES.iter().filter(|l| l.lex.is_none()) {
             assert!((language.load)().is_some(), "{}", language.name);
         }
     }
@@ -184,6 +279,38 @@ mod tests {
         let text = "= Title\n#let x = 1\n*bold*";
         let at = [2, text.find("let").unwrap(), text.find("1").unwrap(), text.find("bold").unwrap()];
         assert_eq!(scopes_at("paper.typ", text, &at), [Some("text.title"), Some("keyword"), Some("number"), Some("text.strong")]);
+    }
+
+    fn spans(list: &[(Range<usize>, usize)]) -> Vec<Span> {
+        list.iter().map(|(range, scope)| Span { range: range.clone(), scope: *scope }).collect()
+    }
+
+    #[test]
+    fn the_servers_spans_win_over_the_grammars() {
+        let base = spans(&[(0..10, 1), (12..20, 2)]);
+        let top = spans(&[(2..4, 7), (8..14, 8), (25..30, 9)]);
+        assert_eq!(overlay(&base, &top), spans(&[(0..2, 1), (2..4, 7), (4..8, 1), (8..14, 8), (14..20, 2), (25..30, 9)]));
+        assert_eq!(overlay(&base, &[]), base);
+    }
+
+    #[test]
+    fn spans_follow_an_edit() {
+        let old = "let a = b;";
+        let new = "let a = xyz + b;";
+        let moved = follow_edit(&spans(&[(0..3, 1), (4..5, 2), (8..9, 3)]), old, new);
+        assert_eq!(moved, spans(&[(0..3, 1), (4..5, 2), (14..15, 3)]));
+        assert_eq!(follow_edit(&spans(&[(4..5, 2)]), old, "let xb = b;"), spans(&[]), "the edit touched it");
+        assert_eq!(follow_edit(&spans(&[(4..5, 2)]), old, "let ab = b;"), spans(&[(4..5, 2)]), "typing on after it leaves it be");
+    }
+
+    #[test]
+    fn markdown_highlights_inline_text_and_code_blocks() {
+        let text = "# Title\n\nsome **bold** and `code`\n\n```rust\nfn main() {}\n```\n";
+        let at = [text.find("bold").unwrap(), text.find("code").unwrap(), text.find("fn").unwrap()];
+        let [bold, code, keyword] = scopes_at("notes.md", text, &at)[..] else { unreachable!() };
+        assert_eq!(bold, Some("text.strong"));
+        assert_eq!(code, Some("text.literal"));
+        assert_eq!(keyword, Some("keyword"), "the code block is Rust");
     }
 
     #[test]

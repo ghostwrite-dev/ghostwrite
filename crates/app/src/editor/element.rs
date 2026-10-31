@@ -15,26 +15,29 @@ use ghostwrite_core::{Mode, Range};
 use ghostwrite_lsp::Severity;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, FocusHandle, Font, GlobalElementId,
-    Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString,
-    StrikethroughStyle, Style, TextRun, UnderlineStyle, Window, fill, font, point, px, relative,
+    Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent,
+    ShapedLine, SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle, Window, fill, font, point, px, relative,
 };
 
+use gpui::{InteractiveElement as _, ParentElement as _};
+
 use super::tabs::{Autoscroll, Tab};
-use super::{Editor, Measured};
+use super::{DocId, Editor, Measured};
 use crate::theme::{Theme, theme};
 
-/// A mark on some text: a background, a strike, or a different color.
-#[derive(Clone, Debug)]
+/// A mark on some text: a background, a strike, an underline, or a different color.
+#[derive(Clone, Debug, Default)]
 pub struct Decoration {
     pub range: Bytes<usize>,
     pub background: Option<Hsla>,
     pub strike: Option<Hsla>,
+    pub underline: Option<Hsla>,
     pub color: Option<Hsla>,
 }
 
 impl Decoration {
     pub fn background(range: Bytes<usize>, color: Hsla) -> Self {
-        Self { range, background: Some(color), strike: None, color: None }
+        Self { range, background: Some(color), ..Self::default() }
     }
 }
 
@@ -47,11 +50,14 @@ pub struct BlockSizes {
     pub width: Pixels,
 }
 
+/// Builds a block's element for its sizes.
+pub type BuildBlock = Box<dyn FnOnce(BlockSizes, &mut Window, &mut App) -> AnyElement>;
+
 /// Something folded out under `line`, as wide as the text area. It's built
 /// when the view knows its sizes, so it fits the frame it's drawn in.
 pub struct Block {
     pub line: usize,
-    pub build: Box<dyn FnOnce(BlockSizes) -> AnyElement>,
+    pub build: BuildBlock,
 }
 
 pub struct CodeView {
@@ -80,6 +86,9 @@ struct Snapshot {
     /// Where the cursor is drawn: the block's char, or the insert bar's gap.
     cursor: usize,
     cursor_line: usize,
+    /// The keys are elsewhere (the PDF beside it, the tree, the terminal),
+    /// and the selection with them.
+    elsewhere: bool,
 }
 
 impl Snapshot {
@@ -93,22 +102,23 @@ impl Snapshot {
             scroll_top: tab.view.scroll_top,
             cursor,
             cursor_line: tab.doc.buffer.line_of(cursor),
+            elsewhere: false,
         }
     }
 }
 
 /// The editor font's sizes.
-struct Metrics {
-    font: Font,
-    size: Pixels,
-    line_height: Pixels,
-    char_width: Pixels,
+pub(super) struct Metrics {
+    pub(super) font: Font,
+    pub(super) size: Pixels,
+    pub(super) line_height: Pixels,
+    pub(super) char_width: Pixels,
     /// Between the line numbers and the text.
     gap: Pixels,
 }
 
 impl Metrics {
-    fn measure(theme: &Theme, window: &Window) -> Self {
+    pub(super) fn measure(theme: &Theme, window: &Window) -> Self {
         let font = font(theme.mono_font.clone());
         let size = theme.mono_size;
         let font_id = window.text_system().resolve_font(&font);
@@ -116,27 +126,41 @@ impl Metrics {
         Self { font, size, line_height: (size * 1.5).round(), char_width, gap: px(8.) * theme.zoom }
     }
 
-    fn run(&self, len: usize, color: Hsla) -> TextRun {
+    pub(super) fn run(&self, len: usize, color: Hsla) -> TextRun {
         TextRun { len, font: self.font.clone(), color, background_color: None, underline: None, strikethrough: None }
     }
 }
+
+/// A file's rows, wrapped: for which file, version of its text and width,
+/// the rows above each line, and the total last.
+pub(super) type Wrapped = ((DocId, u64, usize), std::sync::Arc<Vec<usize>>);
 
 /// Where lines are, top to bottom, with the block pushing those below it down.
 struct Geometry {
     line_height: Pixels,
     /// Rows above each line (wrapped lines take several), and the total last.
-    rows: Vec<usize>,
+    rows: std::sync::Arc<Vec<usize>>,
     block: Option<(usize, Pixels)>,
+    /// Which of its line's rows the cursor is on (a long line wraps onto many).
+    cursor_row: usize,
 }
 
 impl Geometry {
+    /// `line` if there is one, else the last (what asks may be from before
+    /// the text got shorter: a block, a story's lines).
+    fn line(&self, line: usize) -> usize {
+        line.min(self.rows.len().saturating_sub(2))
+    }
+
     fn top(&self, line: usize) -> Pixels {
+        let line = self.line(line);
         let pushed = self.block.filter(|(at, _)| line > *at).map_or(px(0.), |(_, height)| height);
         self.line_height * self.rows[line] as f32 + pushed
     }
 
     /// The bottom of `line`, including the block if it hangs from it.
     fn bottom(&self, line: usize) -> Pixels {
+        let line = self.line(line);
         let hanging = self.block.filter(|(at, _)| line == *at).map_or(px(0.), |(_, height)| height);
         self.top(line) + self.line_height * (self.rows[line + 1] - self.rows[line]) as f32 + hanging
     }
@@ -161,13 +185,17 @@ impl Geometry {
         match &snap.autoscroll {
             Some(Autoscroll::Fit) => {
                 let margin = (self.line_height * crate::config::get().margin_lines).min(view_height / 3.);
-                let (from, to) = (self.top(snap.cursor_line), self.bottom(snap.cursor_line));
+                // The cursor's row, not its whole line: a paragraph can be taller than the view.
+                let from = self.top(snap.cursor_line) + self.line_height * self.cursor_row as f32;
+                let to = from + self.line_height;
                 if from - margin < top {
                     top = from - margin;
                 } else if to + margin > top + view_height {
                     top = to + margin - view_height;
                 }
             }
+            Some(Autoscroll::Top) => top = self.top(snap.cursor_line) + self.line_height * self.cursor_row as f32,
+            Some(Autoscroll::Bottom) => top = self.top(snap.cursor_line) + self.line_height * (self.cursor_row + 1) as f32 - view_height,
             Some(Autoscroll::Center(lines)) => {
                 let last = lines.end.max(lines.start + 1) - 1;
                 let (from, to) = (self.top(lines.start), self.bottom(last));
@@ -175,7 +203,9 @@ impl Geometry {
             }
             None => {}
         }
-        let max = (self.top(snap.line_count.saturating_sub(1)) + self.block_height() - self.line_height * 2.).max(px(0.));
+        // Down to the last rows (of a long last line too) at the top.
+        let total = self.line_height * self.rows.last().copied().unwrap_or(0) as f32 + self.block_height();
+        let max = (total - self.line_height * 2.).max(px(0.));
         top.clamp(px(0.), max)
     }
 }
@@ -223,6 +253,8 @@ impl LaidLine {
 type Glyph = (ShapedLine, Point<Pixels>);
 
 pub struct Prepainted {
+    /// Where the mouse is the code's: not where something's drawn over it.
+    hitbox: Hitbox,
     lines: Vec<LaidLine>,
     quads: Vec<PaintQuad>,
     cursor_glyph: Option<Glyph>,
@@ -269,13 +301,17 @@ impl Element for CodeView {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepainted {
+        // Before the block, which is drawn over the code (later hitboxes are in front).
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         let theme = theme(cx).clone();
         let metrics = Metrics::measure(&theme, window);
-        let focused = self.focus.is_focused(window);
         let snap = {
             let editor = self.editor.read(cx);
-            Snapshot::take(editor.project.tabs.active().expect("a code view shows the active tab"), editor.modal.mode)
+            let mut snap = Snapshot::take(editor.project.tabs.active().expect("a code view shows the active tab"), editor.modal.mode);
+            snap.elsewhere = matches!(editor.modal.mode, Mode::Tree | Mode::Terminal);
+            snap
         };
+        let focused = self.focus.is_focused(window) && !snap.elsewhere;
         let gutter_width = metrics.char_width * (snap.line_count.to_string().len().max(3) + 2) as f32;
         let text_bounds = Bounds::from_corners(point(bounds.left() + gutter_width + metrics.gap, bounds.top()), bounds.bottom_right());
         let gutter_bounds = Bounds::from_corners(bounds.origin, point(text_bounds.left(), bounds.bottom()));
@@ -283,17 +319,14 @@ impl Element for CodeView {
         let sizes = BlockSizes { line_height: metrics.line_height, char_width: metrics.char_width, width: text_bounds.size.width };
         let fits = ((f32::from(text_bounds.size.width) / f32::from(metrics.char_width)).floor() as usize).saturating_sub(1).max(1);
         let cols = fits.min(crate::config::get().wrap_column);
-        let offsets = {
+        let offsets = self.editor.update(cx, |editor, _| editor.row_offsets(cols));
+        let cursor_row = {
             let doc = &self.editor.read(cx).project.tabs.active().expect("checked above").doc;
-            let text = doc.text();
-            let mut offsets = vec![0];
-            for line in 0..snap.line_count {
-                let count = wrap_rows(&text[doc.buffer.line_start(line)..doc.buffer.line_end(line)], cols).len();
-                offsets.push(offsets[line] + count);
-            }
-            offsets
+            let start = doc.buffer.line_start(snap.cursor_line);
+            let rows = wrap_rows(&doc.text()[start..doc.buffer.line_end(snap.cursor_line)], cols);
+            rows.iter().position(|r| snap.cursor - start < r.end).unwrap_or(rows.len() - 1)
         };
-        let geometry = Geometry { line_height: metrics.line_height, rows: offsets, block: self.lay_out_block(sizes, window, cx) };
+        let geometry = Geometry { line_height: metrics.line_height, rows: offsets, block: self.lay_out_block(sizes, window, cx), cursor_row };
         let scroll_top = geometry.scroll(&snap, bounds.size.height);
         let (lines, gutter) = self.shape_lines(&snap, &metrics, &geometry, &theme, bounds, gutter_bounds, scroll_top, cols, window, cx);
         // Lines wrap, so there's no scrolling sideways.
@@ -306,13 +339,14 @@ impl Element for CodeView {
         };
 
         if let Some((line, element)) = &mut self.built {
-            let rows = geometry.rows[*line + 1] - geometry.rows[*line];
-            let y = bounds.top() + geometry.top(*line) + metrics.line_height * rows as f32 - scroll_top;
+            let line = geometry.line(*line);
+            let rows = geometry.rows[line + 1] - geometry.rows[line];
+            let y = bounds.top() + geometry.top(line) + metrics.line_height * rows as f32 - scroll_top;
             element.prepaint_at(point(text_bounds.left(), y), window, cx);
         }
 
         let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height)).floor() as usize;
-        let measured = Measured { rows, cursor: cursor_bounds };
+        let measured = Measured { rows, cursor: cursor_bounds, top_line: Some(geometry.first_below(scroll_top, snap.line_count)) };
         self.editor.update(cx, |editor, _| {
             editor.measured = measured;
             if let Some(tab) = editor.project.tabs.active_mut() {
@@ -321,7 +355,7 @@ impl Element for CodeView {
                 tab.view.autoscroll = None;
             }
         });
-        Prepainted { lines, quads, cursor_glyph, gutter, text_bounds, gutter_bounds, line_height: metrics.line_height, scroll_left }
+        Prepainted { hitbox, lines, quads, cursor_glyph, gutter, text_bounds, gutter_bounds, line_height: metrics.line_height, scroll_left }
     }
 
     fn paint(
@@ -366,7 +400,8 @@ impl CodeView {
     /// Build the block for these sizes and lay it out: its line and height.
     fn lay_out_block(&mut self, sizes: BlockSizes, window: &mut Window, cx: &mut App) -> Option<(usize, Pixels)> {
         let block = self.block.take()?;
-        let mut element = (block.build)(sizes);
+        // Clicks and the wheel over it are its own, not the code's under it.
+        let mut element = gpui::div().occlude().child((block.build)(sizes, window, cx)).into_any_element();
         let size = element.layout_as_root(gpui::size(AvailableSpace::Definite(sizes.width), AvailableSpace::MinContent), window, cx);
         self.built = Some((block.line, element));
         Some((block.line, size.height))
@@ -391,6 +426,9 @@ impl CodeView {
         let doc = &editor.project.tabs.active().expect("a code view shows the active tab").doc;
         let text = doc.text();
         let first = geometry.first_below(scroll_top, snap.line_count);
+        // Only the diagnostics near what's on screen are looked through, line by line.
+        let (near_start, near_end) = (doc.buffer.line_start(first), doc.buffer.line_end(first + 400));
+        let near: Vec<&ghostwrite_lsp::Diagnostic> = doc.diagnostics.iter().filter(|d| d.range.end >= near_start && d.range.start <= near_end).collect();
         let mut lines = vec![];
         let mut gutter = vec![];
         for line in first..snap.line_count {
@@ -404,12 +442,12 @@ impl CodeView {
             for (i, row) in rows.into_iter().enumerate() {
                 let (from, to) = (start + row.start, start + row.end);
                 let (shown, map) = expand_tabs(&text[from..to]);
-                let runs = line_runs(from..to, &map, doc.cached_highlights(), &self.decorations, &doc.diagnostics, theme, &metrics.font);
+                let runs = line_runs(from..to, &map, doc.cached_highlights(), &self.decorations, &near, theme, &metrics.font);
                 let shaped = window.text_system().shape_line(SharedString::from(shown), metrics.size, &runs, None);
                 lines.push(LaidLine { start: from, end: to, last: i == last, y: y + metrics.line_height * i as f32, shaped, map });
             }
             // The line number, right-aligned; colored by a diagnostic on the line.
-            let worst = doc.diagnostics.iter().filter(|d| doc.buffer.line_of(d.range.start) == line).map(|d| d.severity).min();
+            let worst = near.iter().filter(|d| doc.buffer.line_of(d.range.start) == line).map(|d| d.severity).min();
             let color = match worst {
                 Some(Severity::Error) => theme.danger,
                 Some(Severity::Warning) => theme.warning,
@@ -461,7 +499,7 @@ impl CodeView {
             }
         }
         let selected = if snap.mode == Mode::Insert { !snap.selection.is_empty() } else { snap.selection.is_wide(text) };
-        if selected {
+        if selected && !snap.elsewhere {
             span(&snap.selection.bytes(), theme.selection, &mut quads);
         }
         quads
@@ -478,33 +516,64 @@ impl CodeView {
                 .or_else(|| if position.y < bounds.top() { lines.first() } else { lines.last() })?;
             Some(laid.byte_at_x(position.x - text_bounds.left() + scroll_left))
         };
-        let hit_drag = hit.clone();
-        let (editor, focus) = (self.editor.clone(), self.focus.clone());
+        let hit = std::rc::Rc::new(hit);
+        let (editor, focus, hitbox, on) = (self.editor.clone(), self.focus.clone(), state.hitbox.clone(), hit.clone());
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left || !text_bounds.contains(&event.position) {
+            let ours = hitbox.is_hovered(window) && text_bounds.contains(&event.position);
+            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left || !ours {
                 return;
             }
-            let Some(at) = hit(event.position) else { return };
+            let Some(at) = on(event.position) else { return };
             window.focus(&focus);
             editor.update(cx, |editor, cx| editor.click(at, event.modifiers.shift, event.click_count, cx));
         });
-        let editor = self.editor.clone();
+        // Dragging from a click selects to where the mouse is, also above or below the view.
+        let (editor, on) = (self.editor.clone(), hit.clone());
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-            if phase != DispatchPhase::Bubble || event.pressed_button != Some(MouseButton::Left) {
+            if phase != DispatchPhase::Bubble || !editor.read(cx).text_drag {
                 return;
             }
-            let Some(at) = hit_drag(event.position) else { return };
+            if event.pressed_button != Some(MouseButton::Left) {
+                editor.update(cx, |editor, _| editor.text_drag = false);
+                return;
+            }
+            let Some(at) = on(event.position) else { return };
             editor.update(cx, |editor, cx| editor.drag_to(at, cx));
         });
         let editor = self.editor.clone();
-        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
-            if phase != DispatchPhase::Bubble || !bounds.contains(&event.position) {
+        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble && editor.read(cx).text_drag {
+                editor.update(cx, |editor, _| editor.text_drag = false);
+            }
+        });
+        let (editor, hitbox) = (self.editor.clone(), state.hitbox.clone());
+        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble || !hitbox.should_handle_scroll(window) {
                 return;
             }
             let delta = event.delta.pixel_delta(line_height);
             editor.update(cx, |editor, cx| editor.scroll_by(delta, cx));
         });
     }
+}
+
+/// Where a click at `at` leaves `selection`, and the mode. It puts the
+/// cursor there; with shift, or in select mode (`v`), it extends the
+/// selection to there instead. A double click selects the word, a triple
+/// click the line. The mode stays as it was.
+pub(super) fn clicked(buffer: &ghostwrite_core::Buffer, selection: Range, mode: Mode, at: usize, extend: bool, clicks: usize) -> (Range, Mode) {
+    let text = buffer.text();
+    let to = |anchor: usize| Range::new(anchor, if mode == Mode::Insert || at < anchor { at } else { ghostwrite_core::next_char(text, at) });
+    if clicks >= 3 {
+        let line = buffer.line_of(at);
+        let lines = buffer.lines_range(line..line + 1);
+        return (Range::new(lines.start, lines.end), mode);
+    }
+    if clicks == 2 {
+        let word = ghostwrite_core::textobject::text_object(buffer, Range::point(at), 'w', false).unwrap_or(Range::point(at));
+        return (word, mode);
+    }
+    if extend || mode == Mode::Select { (to(selection.anchor), mode) } else { (Range::point(at), mode) }
 }
 
 /// The cursor: a filled cell with its char redrawn on top, or a bar in
@@ -527,7 +596,7 @@ fn cursor(
     let next = ghostwrite_core::next_char(text, snap.cursor).min(laid.end);
     let width = if next > snap.cursor { (origin_x + laid.x(next) - x).max(metrics.char_width * 0.5) } else { metrics.char_width };
     let cell = Bounds::new(point(x, laid.y), gpui::size(width, metrics.line_height));
-    if !focused || snap.mode == Mode::Tree {
+    if !focused || matches!(snap.mode, Mode::Tree | Mode::Terminal) {
         return (Some(cell), None);
     }
     let color = match snap.mode {
@@ -551,10 +620,11 @@ fn cursor(
 /// `text` cut into rows of at most `cols` columns, tabs counted from each row's start.
 fn wrap_rows(text: &str, cols: usize) -> Vec<Bytes<usize>> {
     let tab_width = crate::config::get().tab_width;
-    let width = |c: char, column: usize| if c == '\t' { tab_width - column % tab_width } else { 1 };
+    // Wide characters (CJK, most emoji) take two columns; marks that combine take none.
+    let width = |c: char, column: usize| if c == '\t' { tab_width - column % tab_width } else { unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) };
     let (mut rows, mut from, mut column) = (vec![], 0, 0);
     for (i, c) in text.char_indices() {
-        if column > 0 && column + width(c, column) > cols {
+        if column > 0 && column + width(c, column) > cols && width(c, column) > 0 {
             rows.push(from..i);
             (from, column) = (i, 0);
         }
@@ -596,7 +666,7 @@ fn line_runs(
     map: &Option<Vec<usize>>,
     spans: &[ghostwrite_core::syntax::Span],
     decorations: &[Decoration],
-    diagnostics: &[ghostwrite_lsp::Diagnostic],
+    diagnostics: &[&ghostwrite_lsp::Diagnostic],
     theme: &Theme,
     base: &Font,
 ) -> Vec<TextRun> {
@@ -605,7 +675,7 @@ fn line_runs(
     }
     let first_span = spans.partition_point(|s| s.range.end <= line.start);
     let spans = spans[first_span..].iter().take_while(|s| s.range.start < line.end);
-    let styling: Vec<&Decoration> = decorations.iter().filter(|d| d.strike.is_some() || d.color.is_some()).collect();
+    let styling: Vec<&Decoration> = decorations.iter().filter(|d| d.strike.is_some() || d.underline.is_some() || d.color.is_some()).collect();
     let mut cuts: Vec<usize> = vec![line.start, line.end];
     let ranges = spans.clone().map(|s| &s.range).chain(styling.iter().map(|d| &d.range)).chain(diagnostics.iter().map(|d| &d.range));
     for r in ranges {
@@ -626,18 +696,23 @@ fn line_runs(
             if syntax.is_some_and(|s| s.italic) {
                 font.style = gpui::FontStyle::Italic;
             }
-            let underline = diag.map(|d| match d.severity {
+            let wavy = diag.map(|d| match d.severity {
                 Severity::Error => theme.danger,
                 Severity::Warning => theme.warning,
                 Severity::Info => theme.info,
                 Severity::Hint => theme.hint,
             });
+            let straight = deco.and_then(|d| d.underline);
             TextRun {
                 len: shown(w[1]) - shown(w[0]),
                 font,
                 color: deco.and_then(|d| d.color).or(syntax.and_then(|s| s.color)).unwrap_or(theme.foreground),
                 background_color: None,
-                underline: underline.map(|color| UnderlineStyle { color: Some(color), thickness: px(1.), wavy: true }),
+                underline: wavy.map(|color| UnderlineStyle { color: Some(color), thickness: px(1.), wavy: true }).or(straight.map(|color| UnderlineStyle {
+                    color: Some(color),
+                    thickness: px(1.),
+                    wavy: false,
+                })),
                 strikethrough: deco.and_then(|d| d.strike).map(|color| StrikethroughStyle { thickness: px(1.), color: Some(color) }),
             }
         })
@@ -646,35 +721,61 @@ fn line_runs(
 }
 
 impl Editor {
-    /// A click in the text: put the cursor there (shift extends; a double click selects the word).
-    fn click(&mut self, at: usize, extend: bool, clicks: usize, cx: &mut gpui::Context<Self>) {
+    /// Rows above each line of the active file wrapped at `cols`, and the
+    /// total last: worked out once per version of the text and width, not
+    /// every frame.
+    fn row_offsets(&mut self, cols: usize) -> std::sync::Arc<Vec<usize>> {
+        let Some(doc) = self.project.tabs.active().map(|t| &t.doc) else { return Default::default() };
+        let key = (doc.id, doc.buffer.version(), cols);
+        if let Some((cached, offsets)) = &self.wrapped
+            && *cached == key
+        {
+            return offsets.clone();
+        }
+        let text = doc.text();
+        let mut offsets = Vec::with_capacity(doc.buffer.line_count() + 1);
+        offsets.push(0);
+        for line in 0..doc.buffer.line_count() {
+            let count = wrap_rows(&text[doc.buffer.line_start(line)..doc.buffer.line_end(line)], cols).len();
+            offsets.push(offsets[line] + count);
+        }
+        let offsets = std::sync::Arc::new(offsets);
+        self.wrapped = Some((key, offsets.clone()));
+        offsets
+    }
+
+    /// A click in the text: see [`clicked`].
+    pub(super) fn click(&mut self, at: usize, extend: bool, clicks: usize, cx: &mut gpui::Context<Self>) {
+        if self.resizing() {
+            return;
+        }
         if self.modal.mode == Mode::Tree {
             self.modal.mode = Mode::Normal;
         }
-        let insert = self.modal.mode == Mode::Insert;
+        self.modal.leave(Mode::Terminal);
+        let mode = self.modal.mode;
         let Some(tab) = self.tab_mut() else { return };
-        let text = tab.doc.text();
-        tab.view.selection = if clicks >= 2 {
-            ghostwrite_core::textobject::text_object(&tab.doc.buffer, Range::point(at), 'w', false).unwrap_or(Range::point(at))
-        } else if extend {
-            Range::new(tab.view.selection.anchor, if insert { at } else { ghostwrite_core::next_char(text, at) })
-        } else {
-            Range::point(at)
-        };
+        let (selection, mode) = clicked(&tab.doc.buffer, tab.view.selection, mode, at, extend, clicks);
+        tab.select(selection, Autoscroll::Fit);
+        self.modal.mode = mode;
         self.completion = None;
+        self.text_drag = clicks == 1;
         cx.notify();
     }
 
-    fn drag_to(&mut self, at: usize, cx: &mut gpui::Context<Self>) {
-        let insert = self.modal.mode == Mode::Insert;
+    /// The mouse dragged, from a click, to `at`: select from where it was pressed.
+    pub(super) fn drag_to(&mut self, at: usize, cx: &mut gpui::Context<Self>) {
+        let mode = self.modal.mode;
         let Some(tab) = self.tab_mut() else { return };
-        let anchor = tab.view.selection.anchor;
-        let head = if insert || at < anchor { at } else { ghostwrite_core::next_char(tab.doc.text(), at) };
-        tab.select(Range::new(anchor, head), Autoscroll::Fit);
-        cx.notify();
+        let (selection, _) = clicked(&tab.doc.buffer, tab.view.selection, Mode::Select, at, true, 1);
+        let selection = if mode == Mode::Insert { Range::new(selection.anchor, at) } else { selection };
+        if selection != tab.view.selection {
+            tab.select(selection, Autoscroll::Fit);
+            cx.notify();
+        }
     }
 
-    fn scroll_by(&mut self, delta: Point<Pixels>, cx: &mut gpui::Context<Self>) {
+    pub(super) fn scroll_by(&mut self, delta: Point<Pixels>, cx: &mut gpui::Context<Self>) {
         let Some(tab) = self.tab_mut() else { return };
         tab.view.scroll_top = (tab.view.scroll_top - delta.y).max(px(0.));
         cx.notify();
@@ -683,8 +784,15 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Geometry, expand_tabs};
+    use super::{Autoscroll, Geometry, Mode, Range, Snapshot, expand_tabs};
     use gpui::px;
+
+    #[test]
+    fn wide_characters_wrap_at_two_columns_each() {
+        let rows = super::wrap_rows("日本語のテキスト", 6);
+        assert_eq!(rows.len(), 3, "{rows:?}: three wide characters a row");
+        assert_eq!(super::wrap_rows("e\u{301}e\u{301}e\u{301}", 3).len(), 1, "accents take no room");
+    }
 
     #[test]
     fn tabs_expand_to_stops() {
@@ -696,9 +804,29 @@ mod tests {
 
     #[test]
     fn the_block_pushes_lines_below_it_down() {
-        let g = Geometry { line_height: px(20.), rows: (0..=5).collect(), block: Some((2, px(50.))) };
+        let g = Geometry { line_height: px(20.), rows: std::sync::Arc::new((0..=5).collect()), block: Some((2, px(50.))), cursor_row: 0 };
         assert_eq!(g.top(2), px(40.));
         assert_eq!(g.bottom(2), px(110.), "the block hangs from its line");
         assert_eq!(g.top(3), px(110.));
+    }
+
+    #[test]
+    fn a_line_taller_than_the_view_scrolls_to_the_cursors_row() {
+        // One line of 80 rows (a long paragraph), the cursor on row 50, a 10-row view.
+        let g = Geometry { line_height: px(20.), rows: std::sync::Arc::new(vec![0, 80]), block: None, cursor_row: 50 };
+        let snap = |scroll_top| Snapshot {
+            mode: Mode::Normal,
+            line_count: 1,
+            selection: Range::point(0),
+            autoscroll: Some(Autoscroll::Fit),
+            scroll_top,
+            cursor: 0,
+            cursor_line: 0,
+            elsewhere: false,
+        };
+        let top = g.scroll(&snap(px(0.)), px(200.));
+        assert!(top <= px(1000.) && top + px(200.) >= px(1020.), "row 50 is in view: {top:?}");
+        let end = Snapshot { autoscroll: None, ..snap(px(1e6)) };
+        assert_eq!(g.scroll(&end, px(200.)), px(1560.), "and the line's last rows can be scrolled to");
     }
 }

@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 ghostwrite-project.workspace = true
+libc.workspace = true
 regex.workspace = true
 serde_json.workspace = true
 ureq.workspace = true

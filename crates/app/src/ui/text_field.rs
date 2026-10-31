@@ -1,13 +1,15 @@
-//! A single-line text field, for prompts: the `:` line, asking Claude, and
-//! naming files. It takes the font of where it's placed, and tells its owner
-//! about Enter, Esc, ↑/↓ and Tab through [`TextFieldEvent`]s.
+//! A one-paragraph text field, for prompts: the `:` line, asking Claude, and
+//! naming files. It takes the font of where it's placed, wraps at its width
+//! (growing a line at a time, or scrolling to the cursor where its height is
+//! fixed), and tells its owner about Enter, Esc, ↑/↓ and Tab through
+//! [`TextFieldEvent`]s.
 
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
+    App, AvailableSpace, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
 };
 
 use crate::theme::theme;
@@ -87,8 +89,8 @@ pub struct TextField {
     selected: Range<usize>,
     reversed: bool,
     marked: Option<Range<usize>>,
-    last_layout: Option<ShapedLine>,
-    last_bounds: Option<Bounds<Pixels>>,
+    /// As last drawn: the text's lines, where its top left was, and how tall a line is.
+    last_layout: Option<(WrappedLine, Point<Pixels>, Pixels)>,
     selecting: bool,
 }
 
@@ -112,7 +114,6 @@ impl TextField {
             reversed: false,
             marked: None,
             last_layout: None,
-            last_bounds: None,
             selecting: false,
         }
     }
@@ -292,14 +293,17 @@ impl TextField {
     }
 
     fn index_for_mouse(&self, position: Point<Pixels>) -> usize {
-        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref()) else { return 0 };
-        if self.text.is_empty() || position.y < bounds.top() {
-            return 0;
-        }
-        if position.y > bounds.bottom() {
-            return self.text.len();
-        }
-        line.closest_index_for_x(position.x - bounds.left()).min(self.text.len())
+        let Some((line, origin, line_height)) = self.last_layout.as_ref().filter(|_| !self.text.is_empty()) else { return 0 };
+        let rows = line.wrap_boundaries().len() + 1;
+        let local = position - *origin;
+        let local = point(local.x.max(px(0.)), local.y.clamp(px(0.), *line_height * rows as f32 - px(1.)));
+        line.closest_index_for_position(local, *line_height).unwrap_or_else(|at| at).min(self.text.len())
+    }
+
+    /// Where byte `at` is drawn, as of the last time: the top of its line.
+    fn position_of(&self, at: usize) -> Option<Point<Pixels>> {
+        let (line, origin, line_height) = self.last_layout.as_ref()?;
+        Some(*origin + line.position_for_index(at, *line_height)?)
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -372,18 +376,16 @@ impl EntityInputHandler for TextField {
         cx.notify();
     }
 
-    fn bounds_for_range(&mut self, range: Range<usize>, bounds: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
-        let layout = self.last_layout.as_ref()?;
+    fn bounds_for_range(&mut self, range: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range);
-        Some(Bounds::from_corners(
-            point(bounds.left() + layout.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + layout.x_for_index(range.end), bounds.bottom()),
-        ))
+        let line_height = self.last_layout.as_ref()?.2;
+        let (from, to) = (self.position_of(range.start)?, self.position_of(range.end)?);
+        Some(Bounds::from_corners(from, point(if to.y > from.y { from.x } else { to.x }, from.y + line_height)))
     }
 
     fn character_index_for_point(&mut self, point: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
-        let local = self.last_bounds?.localize(&point)?;
-        let index = self.last_layout.as_ref()?.index_for_x(local.x)?;
+        let (line, origin, line_height) = self.last_layout.as_ref()?;
+        let index = line.index_for_position(point - *origin, *line_height).ok()?;
         Some(self.offset_to_utf16(index))
     }
 }
@@ -429,9 +431,11 @@ struct TextFieldElement {
 }
 
 struct Prepainted {
-    line: ShapedLine,
+    line: WrappedLine,
+    /// Where the first line is drawn: up from the top, to keep the cursor in a short field.
+    origin: Point<Pixels>,
     cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+    selection: Vec<PaintQuad>,
 }
 
 impl IntoElement for TextFieldElement {
@@ -440,6 +444,31 @@ impl IntoElement for TextFieldElement {
     fn into_element(self) -> Self::Element {
         self
     }
+}
+
+/// What the field shows, in what runs: its text (newlines as spaces, so
+/// it's one paragraph) or the placeholder, with what's being composed underlined.
+fn shown(field: &TextField, window: &Window, cx: &App) -> (SharedString, Vec<TextRun>, Pixels) {
+    let style = window.text_style();
+    let (shown, color) =
+        if field.text.is_empty() { (field.placeholder.clone(), theme(cx).muted_foreground) } else { (field.text.replace('\n', " ").into(), style.color) };
+    let run = TextRun { len: shown.len(), font: style.font(), color, background_color: None, underline: None, strikethrough: None };
+    let runs = match field.marked.as_ref().filter(|_| !field.text.is_empty()) {
+        Some(marked) => [
+            TextRun { len: marked.start, ..run.clone() },
+            TextRun { len: marked.len(), underline: Some(UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false }), ..run.clone() },
+            TextRun { len: shown.len() - marked.end, ..run },
+        ]
+        .into_iter()
+        .filter(|r| r.len > 0)
+        .collect(),
+        None => vec![run],
+    };
+    (shown, runs, style.font_size.to_pixels(window.rem_size()))
+}
+
+fn shape(shown: SharedString, runs: &[TextRun], font_size: Pixels, width: Pixels, window: &Window) -> WrappedLine {
+    window.text_system().shape_text(shown, font_size, runs, Some(width), None).ok().and_then(|lines| lines.into_iter().next()).unwrap_or_default()
 }
 
 impl Element for TextFieldElement {
@@ -455,10 +484,25 @@ impl Element for TextFieldElement {
     }
 
     fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+        let (shown, runs, font_size) = shown(self.field.read(cx), window, cx);
+        let line_height = window.line_height();
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
-        (window.request_layout(style, [], cx), ())
+        let layout = window.request_measured_layout(style, move |known, available, window, _| {
+            let width = known.width.or(match available.width {
+                AvailableSpace::Definite(width) => Some(width),
+                _ => None,
+            });
+            let rows = width.map_or(1, |width| shape(shown.clone(), &runs, font_size, width, window).wrap_boundaries().len() + 1);
+            let height = line_height * rows as f32;
+            // Where its height is fixed, it scrolls instead.
+            let room = match available.height {
+                AvailableSpace::Definite(room) => room.max(line_height),
+                _ => height,
+            };
+            size(width.unwrap_or_default(), height.min(room))
+        });
+        (layout, ())
     }
 
     fn prepaint(
@@ -471,31 +515,28 @@ impl Element for TextFieldElement {
         cx: &mut App,
     ) -> Prepainted {
         let field = self.field.read(cx);
-        let style = window.text_style();
         let theme = theme(cx);
-        let (shown, color) = if field.text.is_empty() { (field.placeholder.clone(), theme.muted_foreground) } else { (field.text.clone().into(), style.color) };
-        let run = TextRun { len: shown.len(), font: style.font(), color, background_color: None, underline: None, strikethrough: None };
-        let runs = match field.marked.as_ref().filter(|_| !field.text.is_empty()) {
-            Some(marked) => [
-                TextRun { len: marked.start, ..run.clone() },
-                TextRun { len: marked.len(), underline: Some(UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false }), ..run.clone() },
-                TextRun { len: shown.len() - marked.end, ..run },
-            ]
-            .into_iter()
-            .filter(|r| r.len > 0)
-            .collect(),
-            None => vec![run],
-        };
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window.text_system().shape_line(shown, font_size, &runs, None);
+        let line_height = window.line_height();
+        let (shown, runs, font_size) = shown(field, window, cx);
+        let line = shape(shown, &runs, font_size, bounds.size.width, window);
+        let at = |index: usize| line.position_for_index(index, line_height).unwrap_or_default();
+        let cursor = if field.text.is_empty() { point(px(0.), px(0.)) } else { at(field.cursor()) };
+        let scroll = (cursor.y + line_height - bounds.size.height).max(px(0.));
+        let origin = bounds.origin - point(px(0.), scroll);
         let (cursor, selection) = if field.selected.is_empty() {
-            let x = if field.text.is_empty() { px(0.) } else { line.x_for_index(field.cursor()) };
-            (Some(fill(Bounds::new(point(bounds.left() + x, bounds.top()), size(px(2.), bounds.size.height)), theme.cursor_insert)), None)
+            (Some(fill(Bounds::new(origin + cursor, size(px(2.), line_height)), theme.cursor_insert)), vec![])
         } else {
-            let (from, to) = (line.x_for_index(field.selected.start), line.x_for_index(field.selected.end));
-            (None, Some(fill(Bounds::from_corners(point(bounds.left() + from, bounds.top()), point(bounds.left() + to, bounds.bottom())), theme.selection)))
+            let (from, to) = (at(field.selected.start), at(field.selected.end));
+            let rows = ((to.y - from.y) / line_height).round() as usize;
+            let quads = (0..=rows).map(|row| {
+                let y = from.y + line_height * row as f32;
+                let left = if row == 0 { from.x } else { px(0.) };
+                let right = if row == rows { to.x } else { bounds.size.width };
+                fill(Bounds::from_corners(origin + point(left, y), origin + point(right, y + line_height)), theme.selection)
+            });
+            (None, quads.collect())
         };
-        Prepainted { line, cursor, selection }
+        Prepainted { line, origin, cursor, selection }
     }
 
     fn paint(
@@ -509,20 +550,20 @@ impl Element for TextFieldElement {
         cx: &mut App,
     ) {
         let focus = self.field.read(cx).focus.clone();
+        let line_height = window.line_height();
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.field.clone()), cx);
-        if let Some(selection) = prepainted.selection.take() {
-            window.paint_quad(selection);
-        }
-        prepainted.line.paint(bounds.origin, window.line_height(), window, cx).ok();
-        if focus.is_focused(window)
-            && let Some(cursor) = prepainted.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
-        let line = prepainted.line.clone();
-        self.field.update(cx, |field, _| {
-            field.last_layout = Some(line);
-            field.last_bounds = Some(bounds);
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            for quad in prepainted.selection.drain(..) {
+                window.paint_quad(quad);
+            }
+            prepainted.line.paint(prepainted.origin, line_height, TextAlign::Left, None, window, cx).ok();
+            if focus.is_focused(window)
+                && let Some(cursor) = prepainted.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
         });
+        let layout = (prepainted.line.clone(), prepainted.origin, line_height);
+        self.field.update(cx, |field, _| field.last_layout = Some(layout));
     }
 }

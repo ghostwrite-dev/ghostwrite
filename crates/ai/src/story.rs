@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use crate::protocol::{self, Note, Reply, Step};
+use crate::protocol::{self, FileOp, Note, Reply, Step};
 
 /// Corrections the model gets in a row before an item is left for the user to redirect.
 pub const MAX_REVISIONS: usize = 3;
@@ -60,7 +60,9 @@ impl Item {
     pub fn describe(&self) -> String {
         match self {
             Item::Note(note) => format!("a note: {}", note.text),
-            Item::Step(step) if step.create => format!("creating {}", step.file.as_deref().unwrap_or("a file")),
+            Item::Step(step) if step.creates() => format!("creating {}", step.file.as_deref().unwrap_or("a file")),
+            Item::Step(Step { op: Some(FileOp::Remove), file, .. }) => format!("removing {}", file.as_deref().unwrap_or("a file")),
+            Item::Step(Step { op: Some(FileOp::Rename(to)), file, .. }) => format!("renaming {} to {to}", file.as_deref().unwrap_or("a file")),
             Item::Step(step) => {
                 let file = step.file.as_ref().map_or(String::new(), |f| format!(" in {f}"));
                 format!("an edit{file}, replacing\n{}\nwith\n{}", step.old.join("\n"), step.new.join("\n"))
@@ -101,6 +103,8 @@ pub struct FollowUp {
     pub correction: bool,
     /// A `:sh` command the user ran since that reply, with its output.
     pub command: Option<String>,
+    /// The user's terminal, if it's changed since that reply.
+    pub terminal: Option<String>,
 }
 
 /// A reply asked for ahead of time, assuming everything before it is accepted.
@@ -206,6 +210,12 @@ impl Story {
         Some(story)
     }
 
+    /// Whether Claude is in it (asked, or handed over to), not only items
+    /// the editor gave.
+    pub fn involves_model(&self) -> bool {
+        self.replies.iter().any(|turn| turn.given.is_none())
+    }
+
     /// A story that starts with a note already there (docs from `space k`),
     /// and ends with it unless the user asks about it.
     pub fn answered(instruction: impl Into<String>, answer: &str) -> Self {
@@ -294,6 +304,11 @@ impl Story {
         self.revise(protocol::misplaced(file, text, quoted, near));
     }
 
+    /// The current item is about a PDF, which can't have items.
+    pub fn about_a_pdf(&mut self, file: &str) {
+        self.revise(protocol::about_a_pdf(file));
+    }
+
     /// The current item names a file that isn't in the project.
     pub fn file_missing(&mut self, file: &str) {
         self.revise(protocol::missing_file(file));
@@ -351,7 +366,7 @@ impl Story {
         self.anchor = None;
         self.queued.clear();
         let reply = self.replies.last().map(|t| t.text.clone()).unwrap_or_default();
-        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), said, correction, command: None });
+        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), said, correction, command: None, terminal: None });
         self.replies.push(Turn { text: String::new(), about, given: None });
         self.error = None;
         self.current = None;
@@ -364,6 +379,13 @@ impl Story {
     pub fn ran(&mut self, command: String) {
         if let Some(followup) = self.history.last_mut() {
             followup.command = Some(command);
+        }
+    }
+
+    /// The user's terminal has changed since the last reply: the newest turn shows it.
+    pub fn saw_terminal(&mut self, terminal: String) {
+        if let Some(followup) = self.history.last_mut() {
+            followup.terminal = Some(terminal);
         }
     }
 
@@ -455,7 +477,14 @@ impl Story {
     fn reveal(&mut self) {
         let Some(item) = self.queued.pop_front() else { return };
         let reply = self.replies.last().map(|t| t.text.clone()).unwrap_or_default();
-        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), said: String::new(), correction: false, command: None });
+        self.history.push(FollowUp {
+            reply,
+            decided: std::mem::take(&mut self.decided),
+            said: String::new(),
+            correction: false,
+            command: None,
+            terminal: None,
+        });
         self.replies.push(Turn { text: render(&item), about: None, given: Some(item) });
     }
 
@@ -513,6 +542,7 @@ impl Story {
                     said: String::new(),
                     correction: false,
                     command: None,
+                    terminal: None,
                 });
                 accepted.push(item);
             }

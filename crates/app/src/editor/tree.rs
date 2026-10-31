@@ -22,7 +22,7 @@ pub(super) struct TreePane {
     width: f32,
     scroll: UniformListScrollHandle,
     /// Dragging its edge.
-    resizing: bool,
+    pub(super) resizing: bool,
 }
 
 impl TreePane {
@@ -67,6 +67,14 @@ pub(super) struct Annex {
 impl Editor {
     pub(super) fn enter_tree(&mut self, cx: &mut Context<Self>) {
         self.leave_insert();
+        // From the terminal: back to what it was over first, and a review
+        // stays a review (the tree only shows), its keys still its own.
+        self.modal.leave(Mode::Terminal);
+        if self.modal.mode.reviewing() {
+            self.tree_pane.shown = true;
+            return cx.notify();
+        }
+        self.stop_selecting();
         self.modal.to_tree();
         self.tree_pane.shown = true;
         self.project.tree.set_active(self.project.active_path());
@@ -77,7 +85,12 @@ impl Editor {
         cx.notify();
     }
 
+    /// ⌘B, `:tree`: as ⌘J for the terminal, into the tree (showing it), or
+    /// out of it, hiding it. During a review it only shows or hides.
     pub(super) fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        if self.modal.mode != Mode::Tree && !self.modal.mode.reviewing() {
+            return self.enter_tree(cx);
+        }
         self.tree_pane.shown = !self.tree_pane.shown;
         if !self.tree_pane.shown && self.modal.mode == Mode::Tree {
             self.modal.mode = Mode::Normal;
@@ -220,6 +233,7 @@ impl Editor {
             if self.modal.mode == Mode::Tree {
                 self.modal.mode = Mode::Normal;
             }
+            self.stop_selecting();
             self.open_paths(vec![row.path], cx);
         }
         cx.notify();
@@ -256,7 +270,8 @@ impl Editor {
                     .child(div().px_1().rounded_sm().bg(theme.background).child(p.field.clone())),
             )
         });
-        let rows: Vec<(PathBuf, String, usize, bool)> = self.project.tree.rows().iter().map(|r| (r.path.clone(), r.name.clone(), r.depth, r.is_dir)).collect();
+        let rows: Vec<(PathBuf, String, usize, bool, bool)> =
+            self.project.tree.rows().iter().map(|r| (r.path.clone(), r.name.clone(), r.depth, r.is_dir, r.ignored)).collect();
         let (cursor, active) = (self.project.tree.cursor(), self.project.tree.active().map(Path::to_path_buf));
         let proposal = self.project.tree.proposal().cloned();
         // Files a story is waiting in, marked on the deepest row that shows
@@ -299,7 +314,7 @@ impl Editor {
                                 .child(div().w(pt(12.)).flex_none().text_color(theme.warning).child("+"))
                                 .child(div().italic().child(name)),
                             Line::Row(ix) => {
-                                let (path, name, depth, is_dir) = rows[ix].clone();
+                                let (path, name, depth, is_dir, ignored) = rows[ix].clone();
                                 let arrow = match (is_dir, expanded[ix]) {
                                     (true, true) => "▾",
                                     (true, false) => "▸",
@@ -319,7 +334,7 @@ impl Editor {
                                     .map(|d| match (focused && ix == cursor, is_active) {
                                         (true, _) => d.bg(theme.accent).text_color(theme.accent_foreground),
                                         (false, true) => d.bg(theme.muted),
-                                        (false, false) => d.hover(|s| s.bg(theme.muted)),
+                                        (false, false) => d.hover(|s| s.bg(theme.muted)).when(ignored, |d| d.text_color(theme.muted_foreground)),
                                     })
                                     .child(div().w(pt(12.)).flex_none().text_color(theme.muted_foreground).child(arrow))
                                     .map(|d| match (doomed, renamed_to) {
@@ -368,6 +383,19 @@ impl Editor {
             )
             .children(naming)
             .child(list)
+            // While it has the keys, what they do to the row.
+            .when(focused, |d| {
+                d.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("a add · r rename · d trash · esc back"),
+                )
+            })
             // The edge drags to resize.
             .child(div().id("tree-edge").absolute().top_0().right(pt(-3.)).w(pt(6.)).h_full().cursor_col_resize().on_mouse_down(
                 MouseButton::Left,

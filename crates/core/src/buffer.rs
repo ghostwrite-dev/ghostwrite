@@ -21,6 +21,18 @@ struct Transaction {
     after: Range,
 }
 
+/// An edit as a language server takes it: the lines and UTF-16 columns it
+/// replaced, in the text as it was then, and what went there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    pub text: String,
+}
+
+/// Edits recorded for a language server at most; more, and it's sent the whole text.
+const MAX_EDITS: usize = 1_000;
+
 #[derive(Debug)]
 pub struct Buffer {
     text: String,
@@ -31,6 +43,8 @@ pub struct Buffer {
     undo: Vec<Transaction>,
     redo: Vec<Transaction>,
     open: Option<Transaction>,
+    /// The edits since [`Buffer::take_edits`], or `None` if it's simpler to send the whole text.
+    edits: Option<Vec<Edit>>,
 }
 
 impl Default for Buffer {
@@ -42,7 +56,7 @@ impl Default for Buffer {
 impl Buffer {
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
-        let mut buffer = Self { line_starts: vec![], text, version: 0, undo: vec![], redo: vec![], open: None };
+        let mut buffer = Self { line_starts: vec![], text, version: 0, undo: vec![], redo: vec![], open: None, edits: Some(vec![]) };
         buffer.reindex();
         buffer
     }
@@ -152,11 +166,10 @@ impl Buffer {
         }
         self.begin(Range::point(range.start));
         let removed = self.text[range.clone()].to_string();
-        self.text.replace_range(range.clone(), text);
+        self.replace(range.start, removed.len(), text);
         let change = Change { at: range.start, removed, inserted: text.to_string() };
         self.open.as_mut().expect("begun above").changes.push(change);
         self.redo.clear();
-        self.changed();
     }
 
     /// Close the open transaction: one undo step, unless it changed nothing.
@@ -181,9 +194,8 @@ impl Buffer {
         }
         let tx = self.undo.pop()?;
         for change in tx.changes.iter().rev() {
-            self.text.replace_range(change.at..change.at + change.inserted.len(), &change.removed);
+            self.replace(change.at, change.inserted.len(), &change.removed);
         }
-        self.changed();
         let before = tx.before;
         self.redo.push(tx);
         Some(before)
@@ -193,16 +205,72 @@ impl Buffer {
     pub fn redo(&mut self) -> Option<Range> {
         let tx = self.redo.pop()?;
         for change in &tx.changes {
-            self.text.replace_range(change.at..change.at + change.removed.len(), &change.inserted);
+            self.replace(change.at, change.removed.len(), &change.inserted);
         }
-        self.changed();
         let after = tx.after;
         self.undo.push(tx);
         Some(after)
     }
 
-    /// Replace everything (a reload from disk), forgetting the history.
+    /// Become `text` (a reload from disk) as one undo step: only the part
+    /// that differs is replaced, so undo takes it back. Returns where
+    /// `selection` is in the new text.
+    pub fn replace_all(&mut self, text: &str, selection: Range) -> Range {
+        let old = self.text.as_str();
+        let mut prefix = old.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
+        while !old.is_char_boundary(prefix) || !text.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+        let room = old.len().min(text.len()) - prefix;
+        let mut suffix = old.bytes().rev().zip(text.bytes().rev()).take(room).take_while(|(a, b)| a == b).count();
+        while !old.is_char_boundary(old.len() - suffix) || !text.is_char_boundary(text.len() - suffix) {
+            suffix -= 1;
+        }
+        let (end, new_end) = (old.len() - suffix, text.len() - suffix);
+        if prefix == end && prefix == new_end {
+            return selection;
+        }
+        // Where a byte of the old text is now: before the change, the same;
+        // after it, moved; in it, as far into what replaced it (or its end).
+        let inside = |at: usize| {
+            let mut at = at.min(new_end);
+            while !text.is_char_boundary(at) {
+                at -= 1;
+            }
+            at
+        };
+        let map = |at: usize| {
+            if at <= prefix {
+                at
+            } else if at >= end {
+                at - end + new_end
+            } else {
+                inside(at)
+            }
+        };
+        let after = Range::new(map(selection.anchor), map(selection.head));
+        self.commit(selection);
+        self.begin(selection);
+        self.edit(prefix..end, &text[prefix..new_end]);
+        self.commit(after);
+        after
+    }
+
+    /// The edits since this was last asked, in order, for a language server;
+    /// `None` if the whole text should be sent instead.
+    pub fn take_edits(&mut self) -> Option<Vec<Edit>> {
+        self.edits.replace(vec![])
+    }
+
+    /// Where `at` is as a language server counts: its line, and UTF-16 units into it.
+    fn lsp_position(&self, at: usize) -> (usize, usize) {
+        let line = self.line_of(at);
+        (line, self.text[self.line_starts[line]..at].encode_utf16().count())
+    }
+
+    /// Replace everything, forgetting the history.
     pub fn reset(&mut self, text: impl Into<String>) {
+        self.edits = None;
         self.text = text.into();
         self.undo.clear();
         self.redo.clear();
@@ -215,6 +283,28 @@ impl Buffer {
         self.reindex();
     }
 
+    /// Replace `len` bytes at `at` with `text`, keeping the line index up
+    /// to date by what changed (not by reading the whole text again).
+    fn replace(&mut self, at: usize, len: usize, text: &str) {
+        if self.edits.as_ref().is_some_and(|e| e.len() < MAX_EDITS) {
+            let (start, end) = (self.lsp_position(at), self.lsp_position(at + len));
+            self.edits.get_or_insert_default().push(Edit { start, end, text: text.to_string() });
+        } else {
+            self.edits = None;
+        }
+        self.text.replace_range(at..at + len, text);
+        // Lines starting inside what was replaced go; those after move; the new text's come in.
+        let (from, to) = (self.line_starts.partition_point(|&s| s <= at), self.line_starts.partition_point(|&s| s <= at + len));
+        let new: Vec<usize> = text.match_indices('\n').map(|(i, _)| at + i + 1).collect();
+        let added = new.len();
+        self.line_starts.splice(from..to, new);
+        let shift = text.len() as isize - len as isize;
+        for start in &mut self.line_starts[from + added..] {
+            *start = (*start as isize + shift) as usize;
+        }
+        self.version += 1;
+    }
+
     fn reindex(&mut self) {
         self.line_starts.clear();
         self.line_starts.push(0);
@@ -225,6 +315,55 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_everything_is_one_undo_step() {
+        let mut b = Buffer::new("one\ntwo\nthree\n");
+        let at = Range::point(b.text().find("three").unwrap());
+        let after = b.replace_all("one\n2\nthree\n", at);
+        assert_eq!(b.text(), "one\n2\nthree\n");
+        assert_eq!(after, Range::point(6), "the cursor stays on its word");
+        assert_eq!(b.undo(), Some(at));
+        assert_eq!(b.text(), "one\ntwo\nthree\n");
+        assert_eq!(b.replace_all("one\ntwo\nthree\n", at), at, "the same text: nothing to undo");
+        assert_eq!(b.replace_all("é", Range::point(0)), Range::point(0));
+        assert_eq!(b.replace_all("è", Range::point(0)), Range::point(0), "never inside a char");
+    }
+
+    #[test]
+    fn the_line_index_follows_every_edit() {
+        let mut b = Buffer::new("one\ntwo\nthree\n");
+        let check = |b: &Buffer| {
+            let fresh = Buffer::new(b.text().to_string());
+            assert_eq!(b.line_starts, fresh.line_starts, "{:?}", b.text());
+        };
+        for (range, text) in [(4..7, "2\n2\n"), (0..0, "\n"), (3..9, ""), (0..0, "x"), (2..2, "a\nb\nc"), (0..1, "")] {
+            let range = range.start.min(b.len())..range.end.min(b.len());
+            b.edit(range, text);
+            check(&b);
+        }
+        b.commit(Range::point(0));
+        while b.undo().is_some() {
+            check(&b);
+        }
+        while b.redo().is_some() {
+            check(&b);
+        }
+    }
+
+    #[test]
+    fn edits_are_recorded_as_a_language_server_counts() {
+        let mut b = Buffer::new("aé\nb\n");
+        b.edit(3..3, "😀");
+        b.edit(0..1, "");
+        assert_eq!(
+            b.take_edits(),
+            Some(vec![Edit { start: (0, 2), end: (0, 2), text: "😀".into() }, Edit { start: (0, 0), end: (0, 1), text: String::new() }])
+        );
+        assert_eq!(b.take_edits(), Some(vec![]));
+        b.reset("x");
+        assert_eq!(b.take_edits(), None, "everything's new: send it whole");
+    }
 
     #[test]
     fn lines() {

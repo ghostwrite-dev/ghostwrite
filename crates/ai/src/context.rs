@@ -1,8 +1,8 @@
 //! What Claude is told. A story is a conversation: the first message carries
 //! the context (Claude's own notes from earlier sessions, the user's recent
 //! interactions and what Claude said in them, the project's files, the
-//! editor around the request, the last `:sh` command and its output,
-//! uncommitted changes), then the file with the lines marked and the
+//! editor around the request, the last `:sh` command and its output, the
+//! user's terminal, uncommitted changes), then the file with the lines marked and the
 //! request. Each reply is one item; each turn after it says what the user
 //! did with it and what they said, if anything (or, when Ghostwrite couldn't
 //! use the reply, why), and asks for the next item. The newest turn also
@@ -41,6 +41,8 @@ pub struct Surroundings {
     pub diagnostics: Vec<String>,
     /// The last command run with `:sh`: `$ command`, how it went, and its output.
     pub command: Option<String>,
+    /// The user's terminal: its scrollback and screen, as text.
+    pub terminal: Option<String>,
 }
 
 pub struct Request {
@@ -80,6 +82,9 @@ pub enum Role {
     User,
     Assistant,
 }
+
+/// How the terminal is introduced: Claude can read it, not type in it.
+const TERMINAL: &str = "The user's terminal in the editor (you can read it; nothing you say is typed into it), as it is";
 
 /// A reminder with each turn (the system prompt has the rules).
 const FOLLOW_UP_GUIDE: &str = "What the user accepted is in the files as shown here, which are the editor's copies: the \
@@ -141,6 +146,9 @@ impl Request {
         if let Some(command) = &followup.command {
             out.push_str(&format!("Since your reply, the user ran a command (`:sh`):\n<output>\n{}\n</output>\n\n", command.trim_end()));
         }
+        if let Some(terminal) = &followup.terminal {
+            out.push_str(&format!("{TERMINAL} now (it has changed since your reply):\n<terminal>\n{}\n</terminal>\n\n", terminal.trim_end()));
+        }
         if followup.correction {
             out.push_str(&format!("Ghostwrite couldn't use your reply: {}", followup.said.trim()));
         } else if followup.said.trim().is_empty() {
@@ -179,6 +187,9 @@ impl Request {
         }
         if let Some(command) = &s.command {
             out.push_str(&format!("The user's last command in the editor (`:sh`), for context:\n<output>\n{}\n</output>\n\n", command.trim_end()));
+        }
+        if let Some(terminal) = &s.terminal {
+            out.push_str(&format!("{TERMINAL}, for context:\n<terminal>\n{}\n</terminal>\n\n", terminal.trim_end()));
         }
         if let Some(diff) = self.root.as_deref().and_then(|root| files::uncommitted(root, crate::settings().max_diff)) {
             out.push_str(&format!("Uncommitted changes in the project:\n<diff>\n{}\n</diff>\n\n", diff.trim_end()));
@@ -310,6 +321,7 @@ mod tests {
             said: "keep the old name".into(),
             correction: false,
             command: None,
+            terminal: None,
         };
         let req = Request { followups: vec![followup.clone(), FollowUp { decided: vec![], said: String::new(), ..followup.clone() }], ..request(None) };
         let turns = req.messages();
@@ -328,16 +340,23 @@ mod tests {
         assert_eq!(req.latest(), turns[4].1, "resuming a session sends only that");
         let flat = req.prompt();
         assert!(flat.contains("Your reply:\n<earlier>\n<file>…</new>\n</earlier>") && flat.ends_with(&turns[4].1));
-        let fix = FollowUp { said: "its <at> lines aren't in lib.rs".into(), correction: true, command: Some("$ make (✗ exit 2)\nboom".into()), ..followup };
+        let fix = FollowUp {
+            said: "its <at> lines aren't in lib.rs".into(),
+            correction: true,
+            command: Some("$ make (✗ exit 2)\nboom".into()),
+            terminal: Some("$ ls\nsrc".into()),
+            ..followup
+        };
         let turns = Request { followups: vec![fix], ..request(None) }.messages();
         assert!(turns[2].1.contains("Ghostwrite couldn't use your reply: its <at> lines aren't in lib.rs"), "{}", turns[2].1);
         assert!(turns[2].1.contains("the user ran a command (`:sh`):\n<output>\n$ make (✗ exit 2)\nboom\n</output>"), "{}", turns[2].1);
+        assert!(turns[2].1.contains("as it is now (it has changed since your reply):\n<terminal>\n$ ls\nsrc\n</terminal>"), "{}", turns[2].1);
     }
 
     #[test]
     fn the_newest_turn_shows_the_other_files_in_the_story() {
         let other = Shown { path: "util.rs".into(), text: "pub fn one() {}\npub fn two() {}\n".into(), focus: 1..2 };
-        let followup = FollowUp { reply: "<file>…</new>".into(), decided: vec![], said: String::new(), correction: false, command: None };
+        let followup = FollowUp { reply: "<file>…</new>".into(), decided: vec![], said: String::new(), correction: false, command: None, terminal: None };
         let req = Request { followups: vec![followup.clone(), followup], others: vec![other], ..request(None) };
         let turns = req.messages();
         assert!(turns[4].1.contains("<contents path=\"util.rs\">\n1│pub fn one() {}\n2│pub fn two() {}\n</contents>"), "{}", turns[4].1);
@@ -361,6 +380,7 @@ mod tests {
             open_files: vec!["lib.rs".into(), "main.rs".into()],
             diagnostics: vec!["line 2: error: unused".into()],
             command: Some("$ cargo check (✗ exit 101)\nerror: oops".into()),
+            terminal: Some("$ git status\nclean".into()),
         };
         let prompt = Request { surroundings, ..request(Some(root.clone())) }.prompt();
         assert!(prompt.contains("<memory>\nThe user likes early returns.\n</memory>"), "{prompt}");
@@ -372,6 +392,7 @@ mod tests {
         );
         assert!(prompt.contains("Open in the editor: lib.rs, main.rs") && prompt.contains("Diagnostics near the marked lines:\n- line 2: error: unused"));
         assert!(prompt.contains("<output>\n$ cargo check (✗ exit 101)\nerror: oops\n</output>"), "{prompt}");
+        assert!(prompt.contains("nothing you say is typed into it), as it is, for context:\n<terminal>\n$ git status\nclean\n</terminal>"), "{prompt}");
         assert!(prompt.contains("File: lib.rs (rust)"));
     }
 }

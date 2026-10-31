@@ -4,13 +4,15 @@
 # top. Nothing below `app` knows about the UI.
 #
 #   core     text, selections, motions, text objects, modal keys, syntax
-#   project  files, search, shell runs, file operations, persisted state
+#   project  files, search, shell runs, the terminal, file operations, persisted state
+#   pdf      PDFs through PDFKit: their text, where it is on the page, pages drawn
+#   typst    Typst compiled in-process: a file's pages, live, mapped to its source
 #   lsp      language-server client
 #   ai       Claude: prompts, reply parsing, backends, the review story
 #   app      the gpui application (binary `ghostwrite`)
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/project", "crates/lsp", "crates/ai", "crates/app"]
+members = ["crates/core", "crates/project", "crates/pdf", "crates/typst", "crates/lsp", "crates/ai", "crates/app"]
 default-members = ["crates/app"]
 
 [workspace.package]
@@ -19,16 +21,25 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+nucleo-matcher = "0.3"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+libc = "0.2"
 ghostwrite-core = { path = "crates/core" }
 ghostwrite-project = { path = "crates/project" }
 ghostwrite-lsp = { path = "crates/lsp" }
+ghostwrite-pdf = { path = "crates/pdf" }
+ghostwrite-typst = { path = "crates/typst" }
 ghostwrite-ai = { path = "crates/ai" }
 
+alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1"
 futures = "0.3"
 # Shaders compile at launch: building them needs the Metal toolchain.
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 ignore = "0.4"
+# What gpui draws images from.
+image = { version = "0.25", default-features = false }
 notify-debouncer-mini = "0.7"
 lsp-types = { version = "0.97", features = ["proposed"] }
 regex = "1"
