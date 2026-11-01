@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+ghostwrite-project.workspace = true
 ghostwrite-core.workspace = true
 futures.workspace = true
 lsp-types.workspace = true

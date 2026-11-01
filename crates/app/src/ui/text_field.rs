@@ -47,22 +47,22 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("alt-backspace", DeleteWord, ctx),
-        KeyBinding::new("cmd-backspace", DeleteToStart, ctx),
+        KeyBinding::new(&crate::keys::in_field("cmd-backspace"), DeleteToStart, ctx),
         KeyBinding::new("left", Left, ctx),
         KeyBinding::new("right", Right, ctx),
         KeyBinding::new("alt-left", WordLeft, ctx),
         KeyBinding::new("alt-right", WordRight, ctx),
         KeyBinding::new("shift-left", SelectLeft, ctx),
         KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("cmd-a", SelectAll, ctx),
-        KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-c", Copy, ctx),
-        KeyBinding::new("cmd-x", Cut, ctx),
+        KeyBinding::new(&crate::keys::in_field("cmd-a"), SelectAll, ctx),
+        KeyBinding::new(&crate::keys::in_field("cmd-v"), Paste, ctx),
+        KeyBinding::new(&crate::keys::in_field("cmd-c"), Copy, ctx),
+        KeyBinding::new(&crate::keys::in_field("cmd-x"), Cut, ctx),
         KeyBinding::new("home", Home, ctx),
-        KeyBinding::new("cmd-left", Home, ctx),
+        KeyBinding::new(&crate::keys::in_field("cmd-left"), Home, ctx),
         KeyBinding::new("ctrl-a", Home, ctx),
         KeyBinding::new("end", End, ctx),
-        KeyBinding::new("cmd-right", End, ctx),
+        KeyBinding::new(&crate::keys::in_field("cmd-right"), End, ctx),
         KeyBinding::new("ctrl-e", End, ctx),
         KeyBinding::new("enter", Submit, ctx),
         KeyBinding::new("escape", Cancel, ctx),
@@ -367,10 +367,19 @@ impl EntityInputHandler for TextField {
         let range = range.as_ref().map(|r| self.range_from_utf16(r)).or(self.marked.clone()).unwrap_or(self.selected.clone());
         self.text.replace_range(range.clone(), text);
         self.marked = (!text.is_empty()).then(|| range.start..range.start + text.len());
+        // The selection is in the composed `text`, in UTF-16 units.
+        let in_text = |units: usize| {
+            let mut counted = 0;
+            for (i, c) in text.char_indices() {
+                if counted >= units {
+                    return i;
+                }
+                counted += c.len_utf16();
+            }
+            text.len()
+        };
         self.selected = new_selected
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .map(|r| range.start + r.start..range.start + r.end)
+            .map(|r| range.start + in_text(r.start)..range.start + in_text(r.end))
             .unwrap_or_else(|| range.start + text.len()..range.start + text.len());
         cx.emit(TextFieldEvent::Changed);
         cx.notify();

@@ -17,37 +17,48 @@
 //!
 //! - [`project`], [`tabs`], [`document`]: the model
 //! - [`commands`]: `:` commands, in the [`prompt`]
-//! - [`input`]: text from the platform
-//! - [`story`] (drawn by [`story_view`]), [`stops`], [`shell`], [`terminal`], [`language`], [`tree`]: features
-//! - [`typeset`]: notes about a Typst file, typeset; [`preview`]: its pages, compiled as it's typed, beside it;
-//!   [`goals`]: a Lean file's goals at the cursor, beside it; [`semantic`]: the server's colors over the grammar's
-//! - [`view`] and [`element`]: drawing; [`pdf_view`] draws a PDF's pages instead of its text; [`preview_view`] a Typst file's
+//! - [`input`]: text from the platform; [`pointer`]: the mouse in the code
+//! - [`story`], [`stops`], [`shell`], [`terminal`], [`tree`], [`find`], [`picker`], [`jumps`], [`repeat`]: features
+//! - [`language`], [`server_actions`], [`semantic`]: what language servers do
+//! - [`rendered`]: a document's pages, whatever makes them
+//! - [`aside`]: what's beside a file, from a plugin
+//! - [`plugin_host`]: plugins' commands and events, and `:plugin`
+//! - drawing: [`view`] (the window) and [`element`] (the code), and for
+//!   each feature that draws, its `_view`: [`story_view`],
+//!   [`terminal_view`], [`page_view`]
+//!   draws a document's pages instead of its text
 
+mod aside;
+pub(crate) mod attention;
 mod commands;
+mod cursors;
+mod debug;
 mod document;
 mod element;
 mod find;
-mod goals;
 mod input;
 mod jumps;
 mod language;
-mod pdf_view;
+mod page_view;
 mod picker;
-mod preview;
-mod preview_view;
+mod plugin_host;
+mod pointer;
 mod project;
 mod prompt;
+mod recovery;
+mod rendered;
 mod repeat;
 mod semantic;
 mod server_actions;
-mod shell;
+mod split;
 mod stops;
 mod story;
 mod story_view;
 mod tabs;
 mod terminal;
+mod terminal_view;
 mod tree;
-mod typeset;
+mod update;
 mod view;
 
 #[cfg(test)]
@@ -60,7 +71,7 @@ use std::sync::Arc;
 
 use futures::StreamExt as _;
 use ghostwrite_ai::Backend;
-use ghostwrite_core::modal::{Outcome, Registers, Target};
+use ghostwrite_core::modal::{self, Outcome, Target};
 use ghostwrite_core::{Buffer, Effect, Key, Modal, Mode, Range, Review};
 use ghostwrite_project::store::{self, Session};
 use gpui::{
@@ -86,15 +97,15 @@ pub enum EditorEvent {
 pub struct Options {
     /// Start language servers for the files opened.
     pub language_servers: bool,
-    /// Show Typst files compiled, beside them.
-    pub previews: bool,
-    /// What `space a` asks, the one in use first (the API with a key, else Claude Code).
-    pub backends: Vec<Backend>,
+    /// Show what's beside files.
+    pub asides: bool,
+    /// What `space a` asks (the API with a key, else Claude Code), if anything.
+    pub backend: Option<Backend>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { language_servers: true, previews: true, backends: Backend::available() }
+        Self { language_servers: true, asides: true, backend: Backend::available() }
     }
 }
 
@@ -110,52 +121,64 @@ pub struct Measured {
 }
 
 pub struct Editor {
+    // The model, and how keys edit it.
     project: Project,
-    focus: FocusHandle,
     modal: Modal,
-    /// The yank register, shared by all documents.
-    yanked: String,
-    /// Named registers (`"a y`).
-    registers: HashMap<char, String>,
-    tree_pane: tree::TreePane,
-    prompt: Option<Prompt>,
-    /// Earlier `:` commands, oldest first, and where ↑/↓ is in them.
-    history: Vec<String>,
-    history_at: Option<usize>,
-    cheatsheet: bool,
-    /// What `space a` asks, the one in use first.
-    backends: Vec<Arc<Backend>>,
-    story: Option<story::StoryState>,
-    /// The last `:sh` command, running or done.
-    shell: Option<shell::Shell>,
-    last_shell: Option<String>,
-    /// The user's shell, under the code.
-    terminal: terminal::TerminalPane,
-    /// The code should take the keys back at the next draw (a field that had them went away).
-    pub(super) refocus: bool,
-    /// Completion questions asked: only the latest answer is shown.
-    completions_asked: u64,
-    /// The active file's rows, wrapped: for a version of the text and a width.
-    wrapped: Option<element::Wrapped>,
-    /// The signature of the call being typed.
-    signature: Option<server_actions::Signature>,
-    /// `.` and macros.
+    registers: Registers,
     recorder: repeat::Recorder,
-    /// `space f`, `space b`.
-    picker: Option<picker::Picker>,
-    /// Where `ctrl-o` goes back to.
     jumps: jumps::Jumps,
-    /// Searching the file (`/`, `n`).
-    find: find::Find,
-    /// The next redraw while Claude is thinking.
-    ticking: Option<gpui::Task<()>>,
-    /// A click in the code is being dragged: it selects.
-    pub(super) text_drag: bool,
-    preview_pane: preview::PreviewPane,
-    completion: Option<language::CompletionMenu>,
+
+    // Typing: the `:` line and other prompts, the platform's input, and
+    // what language servers say while typing.
+    prompt: Option<Prompt>,
+    history: commands::History,
     /// Text being composed with an input method, in the active document.
     marked: Option<Bytes<usize>>,
+    completion: Option<language::CompletionMenu>,
+    completions_asked: language::Latest,
+    /// The signature of the call being typed.
+    signature: Option<server_actions::Signature>,
+    signature_asked: language::Latest,
+
+    // Features.
+    /// What `space a` asks, if Claude can be reached.
+    backend: Option<Arc<Backend>>,
+    story: Option<story::StoryState>,
+    find: find::Find,
+    picker: Option<picker::Picker>,
+    cheatsheet: bool,
+    /// Where the cheatsheet is scrolled to.
+    cheatsheet_scroll: gpui::ScrollHandle,
+
+    // The panes around the code.
+    tree_pane: tree::TreePane,
+    terminal: terminal::TerminalPane,
+    aside_width: crate::ui::pane::Resizable,
+
+    // On screen.
+    focus: FocusHandle,
+    /// The code should take the keys back at the next draw (a field that had them went away).
+    refocus: bool,
+    pointer: pointer::Pointer,
+    /// The active file's rows, wrapped: for a version of the text and a width.
+    wrapped: Option<element::Wrapped>,
+    /// The same for what's in the other pane.
+    wrapped_other: Option<element::Wrapped>,
+    /// What's lit up, for the eye to go to.
+    attention: attention::Attention,
+    /// Where `:plugin` keeps plugins.
+    plugins_at: Option<PathBuf>,
+    /// Breakpoints, and what's being debugged.
+    debug: debug::DebugPane,
+    /// A second pane beside the one with the keys.
+    split: Option<split::Split>,
     measured: Measured,
+    /// The next redraw while Claude is thinking.
+    ticking: Option<gpui::Task<()>>,
+    /// What the last story changed: each document, its steps, and its version when the story ended.
+    last_story: Vec<(DocId, usize, u64)>,
+    /// Copies of unsaved changes, for after a crash.
+    recovery: recovery::Recovery,
     /// Watches the project for changes made by other programs.
     _watcher: Option<ghostwrite_project::watch::Watcher>,
     _subscriptions: Vec<Subscription>,
@@ -169,31 +192,37 @@ impl Focusable for Editor {
     }
 }
 
+/// The yank register, shared by all documents, and the named ones (`"a y`).
+#[derive(Default)]
+struct Registers {
+    yanked: String,
+    named: HashMap<char, String>,
+}
+
 /// The registers and the clipboard, for modal commands: the yank
 /// register, `+` (and `*`) the clipboard, `_` nothing, and named ones.
 struct Regs<'a> {
-    yanked: &'a mut String,
-    named: &'a mut HashMap<char, String>,
+    registers: &'a mut Registers,
     cx: &'a mut App,
 }
 
-impl Registers for Regs<'_> {
+impl modal::Registers for Regs<'_> {
     fn yanked(&self, register: Option<char>) -> String {
         match register {
-            None => self.yanked.clone(),
+            None => self.registers.yanked.clone(),
             Some('+' | '*') => self.clipboard().unwrap_or_default(),
             Some('_') => String::new(),
-            Some(name) => self.named.get(&name).cloned().unwrap_or_default(),
+            Some(name) => self.registers.named.get(&name).cloned().unwrap_or_default(),
         }
     }
 
     fn yank(&mut self, register: Option<char>, text: String) {
         match register {
-            None => *self.yanked = text,
+            None => self.registers.yanked = text,
             Some('+' | '*') => self.set_clipboard(text),
             Some('_') => {}
             Some(name) => {
-                self.named.insert(name, text);
+                self.registers.named.insert(name, text);
             }
         }
     }
@@ -209,6 +238,7 @@ impl Registers for Regs<'_> {
 
 impl Editor {
     pub fn new(root: PathBuf, options: Options, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::plugins::install();
         let (events, mut from_servers) = futures::channel::mpsc::unbounded();
         let servers =
             if options.language_servers { ghostwrite_lsp::Registry::new(root.clone(), events) } else { ghostwrite_lsp::Registry::disabled(root.clone()) };
@@ -233,11 +263,7 @@ impl Editor {
                         }
                         cx.notify();
                     }
-                    ghostwrite_lsp::Event::Progress { path, checking } => {
-                        if this.project.apply_progress(&path, checking) {
-                            cx.notify();
-                        }
-                    }
+                    ghostwrite_lsp::Event::Notification { method, params, .. } => this.server_notification(&method, &params, cx),
                 });
                 if applied.is_err() {
                     break;
@@ -270,45 +296,55 @@ impl Editor {
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.project.tree.refresh();
+                    this.forget_git_base();
                     cx.notify();
                 }
             }),
         ];
         let focus = cx.focus_handle();
         window.focus(&focus);
-        Self {
-            project: Project::new(root, servers, options.previews),
-            focus,
+        let mut editor = Self {
+            project: Project::new(root, servers, options.asides),
             modal: Modal::default(),
-            yanked: String::new(),
-            registers: HashMap::new(),
-            tree_pane: tree::TreePane::new(),
-            prompt: None,
-            history: store::command_history(),
-            history_at: None,
-            cheatsheet: false,
-            backends: options.backends.into_iter().map(Arc::new).collect(),
-            story: None,
-            shell: None,
-            last_shell: None,
-            terminal: terminal::TerminalPane::default(),
-            preview_pane: preview::PreviewPane::new(),
-            text_drag: false,
-            ticking: None,
-            find: Default::default(),
-            jumps: Default::default(),
-            picker: None,
+            registers: Registers::default(),
             recorder: Default::default(),
-            signature: None,
-            wrapped: None,
-            completions_asked: 0,
-            refocus: false,
-            completion: None,
+            jumps: Default::default(),
+            prompt: None,
+            history: commands::History::load(),
             marked: None,
+            completion: None,
+            completions_asked: Default::default(),
+            signature: None,
+            signature_asked: Default::default(),
+            backend: options.backend.map(Arc::new),
+            story: None,
+            find: Default::default(),
+            picker: None,
+            cheatsheet: false,
+            cheatsheet_scroll: gpui::ScrollHandle::new(),
+            tree_pane: tree::TreePane::new(),
+            terminal: terminal::TerminalPane::default(),
+            aside_width: aside::width(),
+            focus,
+            refocus: false,
+            pointer: Default::default(),
+            wrapped: None,
+            wrapped_other: None,
+            split: None,
+            attention: Default::default(),
+            // A test says where, not to touch what's really installed.
+            plugins_at: if cfg!(test) { None } else { crate::plugins::folder() },
+            debug: Default::default(),
             measured: Measured::default(),
+            ticking: None,
+            last_story: vec![],
+            recovery: Default::default(),
             _watcher: watcher,
             _subscriptions: subscriptions,
-        }
+        };
+        editor.start_recovery(cx);
+        editor.check_for_update(false, cx);
+        editor
     }
 
     /// Write every file with unsaved changes; whether they all were.
@@ -352,8 +388,18 @@ impl Editor {
         self.project.tab()
     }
 
+    /// A commit may have moved what the files are compared with.
+    fn forget_git_base(&mut self) {
+        for tab in self.project.tabs.iter_mut() {
+            tab.doc.git.asked = false;
+        }
+    }
+
     /// Another program changed `paths`: read them again in the background.
     fn disk_changed(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if paths.iter().any(|path| path.components().any(|part| part.as_os_str() == ".git")) {
+            self.forget_git_base();
+        }
         let reread = self.project.to_reread(paths);
         let read = cx.background_spawn(async move { reread.read() });
         cx.spawn(async move |this, cx| {
@@ -375,11 +421,6 @@ impl Editor {
         }
     }
 
-    /// A pane's edge is being dragged: the mouse isn't selecting.
-    fn resizing(&self) -> bool {
-        self.tree_pane.resizing || self.terminal.resizing.is_some() || self.preview_pane.resizing
-    }
-
     fn tab_mut(&mut self) -> Option<&mut Tab> {
         self.project.tab_mut()
     }
@@ -393,6 +434,7 @@ impl Editor {
     // (as one undo step) and dropping what was about the old tab.
 
     fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.split_follows(ix);
         let from = self.before_jump();
         if ix != self.project.tabs.active_index() {
             self.leave_insert();
@@ -414,12 +456,6 @@ impl Editor {
     /// Open each path in its own tab, switching to it if it's already open.
     pub fn open_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         for path in paths {
-            // A PDF is read aside (a long one takes seconds), then opened.
-            let pdf = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
-            if pdf && self.project.tabs.index_of_path(&path).is_none() {
-                self.open_pdf(ghostwrite_project::clean(&path), cx);
-                continue;
-            }
             if let Some(ix) = self.project.open(&path) {
                 self.activate(ix, cx);
             }
@@ -435,6 +471,30 @@ impl Editor {
         self.leave_insert();
         self.project.close(self.project.tabs.active_index());
         self.tab_changed(cx);
+    }
+
+    /// Move the tab at `from` to where `to` is.
+    fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from != to {
+            self.project.tabs.move_tab(from, to);
+            self.tab_changed(cx);
+        }
+    }
+
+    /// Move the active tab `places` along, as far as there are.
+    fn nudge_tab(&mut self, right: bool, places: usize, cx: &mut Context<Self>) {
+        let (at, n) = (self.project.tabs.active_index(), self.project.tabs.len());
+        let to = if right { at.saturating_add(places).min(n.saturating_sub(1)) } else { at.saturating_sub(places) };
+        self.move_tab(at, to, cx);
+    }
+
+    /// `steps` tabs along, round the ends.
+    fn step_tab(&mut self, forward: bool, steps: usize, cx: &mut Context<Self>) {
+        let (n, at) = (self.project.tabs.len(), self.project.tabs.active_index());
+        if n > 0 {
+            let steps = steps % n;
+            self.activate(if forward { (at + steps) % n } else { (at + n - steps) % n }, cx);
+        }
     }
 
     fn cycle_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -477,7 +537,7 @@ impl Editor {
                     Ok(0) => {
                         this.project.write(ix, path, true);
                     }
-                    Ok(1) => match std::fs::read_to_string(&path) {
+                    Ok(1) => match ghostwrite_project::fs::read_text(&path).map(|(text, _)| text) {
                         Ok(text) => this.project.tabs.get_mut(ix).into_iter().for_each(|tab| tab.reload(text.clone())),
                         Err(e) => this.project.say(format!("couldn't reload: {e}")),
                     },
@@ -515,31 +575,6 @@ impl Editor {
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             this.update(cx, |this, cx| this.open_paths(paths, cx)).ok();
-        })
-        .detach();
-    }
-
-    /// Open the PDF at `path` once it's read, off the UI thread.
-    fn open_pdf(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.project.say(format!("reading {}…", self.project.display(&path)));
-        let reading = cx.background_spawn({
-            let path = path.clone();
-            async move { ghostwrite_pdf::Pdf::open(&path) }
-        });
-        cx.spawn(async move |this, cx| {
-            let read = reading.await;
-            this.update(cx, |this, cx| {
-                match read {
-                    Ok(pdf) => {
-                        let ix = this.project.tabs.index_of_path(&path).unwrap_or_else(|| this.project.add_pdf(path, pdf));
-                        this.project.status = None;
-                        this.activate(ix, cx);
-                    }
-                    Err(e) => this.project.say(format!("couldn't open {}: {e}", path.display())),
-                }
-                cx.notify();
-            })
-            .ok();
         })
         .detach();
     }
@@ -586,13 +621,17 @@ impl Editor {
 
     /// Every key in the editor comes here first (a prompt takes its own keys).
     fn key_down(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // j k scroll the cheatsheet; any other key closes it.
+        if self.cheatsheet && !keystroke.modifiers.platform && self.scroll_cheatsheet(keystroke, cx) {
+            return true;
+        }
         if self.cheatsheet && !keystroke.modifiers.platform {
             self.cheatsheet = false;
             cx.notify();
             return true;
         }
         if self.modal.mode == Mode::Terminal {
-            let handled = self.terminal_key(keystroke);
+            let handled = self.terminal_key(keystroke, cx);
             if handled {
                 cx.notify();
             }
@@ -630,6 +669,16 @@ impl Editor {
 
     /// A key for the current mode.
     fn mode_key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.cursor_key(key, window, cx) {
+            return true;
+        }
+        if let Some(command) = self.plugin_key(key) {
+            self.modal.cancel_pending();
+            if let Err(why) = self.run_command(command, window, cx) {
+                self.project.say(why);
+            }
+            return true;
+        }
         let outcome = if self.modal.mode == Mode::Tree { self.modal.tree_key(key) } else { self.buffer_key(key, cx) };
         match outcome {
             Outcome::Ignored => return false,
@@ -641,18 +690,49 @@ impl Editor {
         true
     }
 
+    /// The language keys go by: the file's, or for a view of a file, that file's.
+    fn active_language(&self) -> Option<&'static ghostwrite_core::Language> {
+        let doc = &self.tab()?.doc;
+        match &doc.view_of {
+            Some((file, _)) => self.project.tabs.by_id(*file)?.doc.language,
+            None => doc.language,
+        }
+    }
+
+    /// The command a plugin binds this key to, the keys so far included.
+    fn plugin_key(&self, key: Key) -> Option<&'static str> {
+        if !matches!(self.modal.mode, Mode::Normal | Mode::Select) {
+            return None;
+        }
+        let name = match key {
+            Key::Char(c) => c.to_string(),
+            Key::Ctrl(c) => format!("ctrl-{c}"),
+            _ => return None,
+        };
+        let pending = self.modal.pending_keys();
+        let typed = if pending.is_empty() { name } else { format!("{pending} {name}") };
+        // Yours come first.
+        if let Some((_, command)) = crate::config::get().keys.iter().find(|(keys, _)| *keys == typed) {
+            return Some(command);
+        }
+        ghostwrite_plugin::keys(self.active_language()).into_iter().find(|binding| binding.keys == typed).map(|binding| binding.command)
+    }
+
     /// A key for the active document (or, with none open, for the commands that work anyway).
     fn buffer_key(&mut self, key: Key, cx: &mut Context<Self>) -> Outcome {
+        if self.page_key(&key, cx) {
+            return Outcome::Handled;
+        }
         let rows = self.measured.rows.max(2);
-        let mut regs = Regs { yanked: &mut self.yanked, named: &mut self.registers, cx };
+        let mut regs = Regs { registers: &mut self.registers, cx };
         let outcome = match self.project.tabs.active_mut() {
             Some(tab) => {
                 let before = (tab.doc.buffer.version(), tab.view.selection);
-                let outcome = self.modal.key(key, &mut regs, &mut tab.target(rows));
-                // A PDF's text can't change: no inserting, and an edit is undone as it syncs.
-                let pdf = tab.doc.pdf.is_some();
-                let refused = pdf && (self.modal.mode == Mode::Insert || tab.doc.buffer.version() != before.0);
-                if pdf && self.modal.mode == Mode::Insert {
+                let outcome = cursors::key_at_each(&mut self.modal, key, &mut regs, tab, rows);
+                // What's read-only: no inserting, and an edit is undone as it syncs.
+                let read_only = tab.doc.read_only();
+                let refused = read_only && (self.modal.mode == Mode::Insert || tab.doc.buffer.version() != before.0);
+                if read_only && self.modal.mode == Mode::Insert {
                     self.modal.to_normal(&mut tab.target(rows));
                 }
                 if (tab.doc.buffer.version(), tab.view.selection) != before {
@@ -660,7 +740,7 @@ impl Editor {
                     tab.sync();
                 }
                 if refused {
-                    self.project.say("a PDF is read-only");
+                    self.project.say("this is read-only");
                 }
                 outcome
             }
@@ -685,13 +765,25 @@ impl Editor {
     /// Carry out what a key asked for beyond the buffer.
     fn effect(&mut self, effect: Effect, window: &mut Window, cx: &mut Context<Self>) {
         match effect {
-            Effect::NextBuffer => self.cycle_tab(true, cx),
-            Effect::PrevBuffer => self.cycle_tab(false, cx),
+            Effect::NextBuffer(steps) => self.step_tab(true, steps, cx),
+            Effect::PrevBuffer(steps) => self.step_tab(false, steps, cx),
+            Effect::MoveBufferNext(places) => self.nudge_tab(true, places, cx),
+            Effect::MoveBufferPrev(places) => self.nudge_tab(false, places, cx),
             Effect::FocusTree => self.enter_tree(cx),
+            Effect::SplitRight => {
+                if let Err(why) = self.split_right(cx) {
+                    self.project.say(why);
+                }
+            }
+            Effect::OtherPane => self.other_pane(cx),
+            Effect::CloseSplit => self.close_split(cx),
             Effect::CommandLine => self.open_prompt(PromptKind::Command, "", window, cx),
             Effect::Search => self.open_prompt(PromptKind::Command, "grep ", window, cx),
             Effect::Assist => self.open_story("", window, cx),
-            Effect::Cheatsheet => self.cheatsheet = true,
+            Effect::Cheatsheet => {
+                self.cheatsheet = true;
+                self.cheatsheet_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+            }
             Effect::Find { backward } => self.start_find(backward, window, cx),
             Effect::FindNext { backward } => self.find_next(backward, cx),
             Effect::PickFile => self.open_picker(picker::PickerKind::Files, window, cx),

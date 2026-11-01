@@ -2,27 +2,30 @@
 //! language per project on first use; a [`Document`] keeps one open file in
 //! sync with its server and asks it things; [`convert`] turns the answers
 //! into byte offsets and plain text. Diagnostics arrive as [`Event`]s.
+//!
+//! What's kept for later is as the server sent it (the `Raw` types): its
+//! positions are placed in the text as it is when they're used, which
+//! may have changed since.
 
 pub mod client;
 pub mod convert;
 pub mod document;
 mod python;
 pub mod registry;
+mod shell;
 
 pub use client::{Client, Event};
 pub use document::Document;
 pub use registry::{Registry, warm};
 
-/// `name` on the login shell's PATH (a Finder-launched app's is minimal).
-pub fn which(name: &str) -> Option<std::path::PathBuf> {
-    python::which_all(&[name]).pop().flatten()
-}
-
 /// A diagnostic as the server sends it, before [`convert::diagnostics`] places it.
 pub use lsp_types::Diagnostic as RawDiagnostic;
 
-/// A range as the server sends it, before [`convert::range`] places it.
+/// A range as the server sends it, before [`convert::Lines`] places it.
 pub use lsp_types::Range as RawRange;
+
+/// A position as the server sends it (line, UTF-16 column).
+pub use lsp_types::Position as RawPosition;
 
 /// How bad a diagnostic is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,7 +67,7 @@ pub struct Completion {
 }
 
 /// An edit to a file a server asks for: where (as the server counts) and what goes there.
-pub type TextEdit = (lsp_types::Range, String);
+pub type TextEdit = (RawRange, String);
 
 /// A symbol in a file (`space s`): its name, what it is, and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +76,7 @@ pub struct Symbol {
     pub kind: &'static str,
     /// Its container's names, outermost first (`impl Editor`).
     pub within: Vec<String>,
-    pub range: lsp_types::Range,
+    pub range: RawRange,
 }
 
 /// A change the server offers at the cursor (`space .`): a quick fix, a refactoring.

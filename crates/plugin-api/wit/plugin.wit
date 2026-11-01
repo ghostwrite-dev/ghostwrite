@@ -1,0 +1,99 @@
+// What a plugin and the editor say to each other. Once released, version 1 only
+// grows in ways plugins built against it can't notice; anything else is version 2.
+package ghostwrite:plugin@1.0.0;
+
+interface types {
+    // The file a plugin is asked about, as it is now. Offsets are bytes into `text`.
+    record context {
+        root: string,
+        path: option<string>,
+        language: option<string>,
+        text: string,
+        cursor: u64,
+        selection-start: u64,
+        selection-end: u64,
+    }
+
+    enum event {
+        opened,
+        saved,
+        closed,
+    }
+
+    // Replace `start..end` of the text it was shown. All of a reply's edits are about
+    // that same text, and are one undo step.
+    record edit {
+        start: u64,
+        end: u64,
+        text: string,
+    }
+
+    variant action {
+        // A line for the status bar.
+        say(string),
+        edit(edit),
+        // Open a file of the project, relative to its root.
+        open(string),
+    }
+
+    // Part of a file to color: `scope` is `keyword`, `string`, `text.title` and so on.
+    record span {
+        start: u32,
+        end: u32,
+        scope: string,
+    }
+
+    // A glyph's box on a page, in points from its top left, and the bytes of the
+    // text it came from, if it did.
+    record glyph {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        source: option<tuple<u32, u32>>,
+    }
+
+    // A page laid out. Its key says what's on it: the same key, the same drawing.
+    record page {
+        width: f32,
+        height: f32,
+        key-high: u64,
+        key-low: u64,
+        glyphs: list<glyph>,
+    }
+
+    // A page drawn: a row at a time, four bytes a pixel, blue, green, red and
+    // alpha (premultiplied).
+    record drawing {
+        width: u32,
+        height: u32,
+        bgra: list<u8>,
+    }
+}
+
+// What the editor does for a plugin, as far as its manifest says it may.
+interface host {
+    // Download from a host its `access.network` lists, over https.
+    fetch: func(url: string) -> result<list<u8>, string>;
+}
+
+world plugin {
+    use types.{context, event, action, span, page, drawing};
+
+    import host;
+
+    // Run one of the commands its manifest lists.
+    export run: func(name: string, args: list<string>, context: context) -> result<list<action>, string>;
+    // Something it asked for in its manifest has happened.
+    export on-event: func(event: event, context: context) -> result<list<action>, string>;
+    // What to color in this text, in order, if its manifest's `"highlights"` says it does.
+    export highlight: func(text: string) -> list<span>;
+    // Get ready to make pages of the file at `path`, in the project (mounted at
+    // /project if `access.project` says so). Local time is `utc-offset-minutes` from UTC.
+    export open-pages: func(path: string, utc-offset-minutes: s32) -> result<_, string>;
+    // Pages from the file's text as it is now.
+    export make-pages: func(text: string) -> result<list<page>, string>;
+    // Draw the page with this key, of the last pages made or the ones before,
+    // about `pixels` wide.
+    export draw-page: func(key-high: u64, key-low: u64, pixels: u32) -> option<drawing>;
+}

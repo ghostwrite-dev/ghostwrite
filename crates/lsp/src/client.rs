@@ -9,7 +9,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -27,9 +27,9 @@ pub enum Event {
     },
     /// The server wants `path` shown, at `selection` (`window/showDocument`).
     Show { path: PathBuf, selection: Option<lsp_types::Range> },
-    /// Lean's `$/lean/fileProgress`: the first line of `path` it's still
-    /// checking, or none once it's done.
-    Progress { path: PathBuf, checking: Option<u32> },
+    /// A notification of the server's own (a `$/` method), for the
+    /// editor's part for that language to make sense of.
+    Notification { server: &'static str, method: String, params: Value },
     /// The server's semantic tokens changed (`workspace/semanticTokens/refresh`):
     /// ask it again, for each of its files.
     Recolor { server: &'static str },
@@ -40,6 +40,9 @@ pub enum Event {
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
+
+/// The largest message read from a server.
+const MAX_MESSAGE: usize = 256 << 20;
 
 /// How many lines of a server's stderr are kept, to say why it stopped.
 const STDERR_LINES: usize = 40;
@@ -73,7 +76,7 @@ pub struct Launch<'a> {
 
 impl Client {
     pub fn start(launch: Launch, events: mpsc::UnboundedSender<Event>) -> std::io::Result<Arc<Client>> {
-        let mut child = Command::new(&launch.binary)
+        let mut child = ghostwrite_project::platform::command(&launch.binary)
             .args(launch.args)
             .envs(launch.env)
             .current_dir(launch.root)
@@ -131,7 +134,7 @@ impl Client {
                     Read::Garbled => continue,
                     Read::End => break,
                 };
-                // Our requests' ids are numbers; a server's may be anything (Lean's are strings too).
+                // Our requests' ids are numbers; a server's may be anything (strings too).
                 let id = message.get("id").filter(|id| !id.is_null()).map(|id| id.as_i64().unwrap_or(-1));
                 let method = message.get("method").and_then(Value::as_str);
                 match (id, method) {
@@ -186,7 +189,7 @@ impl Client {
                             | "workspace/inlayHint/refresh"
                             | "workspace/codeLens/refresh"
                             | "workspace/diagnostic/refresh" => Ok(Value::Null),
-                            // Anything else (`workspace/applyEdit`, …) we don't do, and say so.
+                            // Anything else we don't do, and say so.
                             _ => Err(json!({ "code": -32601, "message": format!("{method} isn't supported") })),
                         };
                         send(match result {
@@ -203,21 +206,18 @@ impl Client {
                             let _ = events.unbounded_send(Event::Diagnostics { path, version, diagnostics });
                         }
                     }
-                    (None, Some("$/lean/fileProgress")) => {
-                        let params = &message["params"];
-                        let path = params["textDocument"]["uri"].as_str().and_then(path_of);
-                        let processing = params["processing"].as_array().into_iter().flatten();
-                        let checking = processing.filter_map(|p| p["range"]["start"]["line"].as_u64()).min().map(|line| line as u32);
-                        if let Some(path) = path {
-                            let _ = events.unbounded_send(Event::Progress { path, checking });
-                        }
+                    (None, Some(method)) if method.starts_with("$/") && method != "$/progress" => {
+                        let (method, params) = (method.to_string(), message["params"].clone());
+                        let _ = events.unbounded_send(Event::Notification { server: name, method, params });
                     }
                     _ => {}
                 }
             }
             // The server is gone: what's pending fails (its senders drop), and nothing more is sent.
+            let mut waiting = pending.lock().unwrap();
             alive.store(false, Ordering::SeqCst);
-            pending.lock().unwrap().clear();
+            waiting.clear();
+            drop(waiting);
             queue.lock().unwrap().clear();
             // Give its stderr a moment to arrive.
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -328,11 +328,15 @@ impl Client {
 
     fn send_request(&self, id: i64, method: &str, params: Value) -> oneshot::Receiver<Result<Value, String>> {
         let (tx, rx) = oneshot::channel();
+        // Checked under the lock the reader clears pending under when the
+        // server exits, so a request can't slip in after and wait forever.
+        let mut pending = self.pending.lock().unwrap();
         if !self.alive() {
             let _ = tx.send(Err(format!("{} isn't running", self.name)));
             return rx;
         }
-        self.pending.lock().unwrap().insert(id, tx);
+        pending.insert(id, tx);
+        drop(pending);
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         rx
     }
@@ -433,7 +437,8 @@ fn read_message(reader: &mut impl std::io::BufRead) -> Read {
             length = n.trim().parse::<usize>().ok();
         }
     }
-    let Some(length) = length else { return Read::Garbled };
+    // A length past any real message is a broken stream, not a reason to run out of memory.
+    let Some(length) = length.filter(|&n| n <= MAX_MESSAGE) else { return Read::End };
     let mut body = vec![0; length];
     if reader.read_exact(&mut body).is_err() {
         return Read::End;

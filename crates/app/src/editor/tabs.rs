@@ -11,6 +11,7 @@ use ghostwrite_lsp::Diagnostic;
 use gpui::{Pixels, px};
 
 use super::document::{DocId, Document};
+use super::rendered::PagesScroll;
 
 /// Where the view should move to show the cursor (or some lines), next time it's drawn.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,14 +27,18 @@ pub enum Autoscroll {
 
 pub struct View {
     pub selection: Range,
+    /// More cursors, besides the main one that's `selection`.
+    pub others: Vec<Range>,
     pub scroll_top: Pixels,
     pub scroll_left: Pixels,
     pub autoscroll: Option<Autoscroll>,
+    /// Where its pages are scrolled to.
+    pub pages: PagesScroll,
 }
 
 impl Default for View {
     fn default() -> Self {
-        Self { selection: Range::point(0), scroll_top: px(0.), scroll_left: px(0.), autoscroll: None }
+        Self { selection: Range::point(0), others: vec![], scroll_top: px(0.), scroll_left: px(0.), autoscroll: None, pages: PagesScroll::default() }
     }
 }
 
@@ -45,6 +50,7 @@ pub struct Tab {
 impl Tab {
     /// Select `range` and bring it into view.
     pub fn select(&mut self, range: Range, scroll: Autoscroll) {
+        self.view.others.clear();
         self.view.selection = range.within(self.doc.text());
         self.view.autoscroll = Some(scroll);
     }
@@ -161,6 +167,17 @@ impl Tabs {
         }
         self.tabs.push(Tab { doc, view: View::default() });
         self.tabs.len() - 1
+    }
+
+    /// Move the tab at `from` to be at `to`; the active tab stays the active one.
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        if from >= self.tabs.len() {
+            return;
+        }
+        let active = self.active().map(|t| t.doc.id);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to.min(self.tabs.len()), tab);
+        self.active = active.and_then(|id| self.index_of_id(id)).unwrap_or(self.active);
     }
 
     pub fn set_active(&mut self, ix: usize) {

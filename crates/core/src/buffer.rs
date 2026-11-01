@@ -43,6 +43,8 @@ pub struct Buffer {
     undo: Vec<Transaction>,
     redo: Vec<Transaction>,
     open: Option<Transaction>,
+    /// Commits wait: several edits, each committing as it goes, are to be one undo.
+    held: bool,
     /// The edits since [`Buffer::take_edits`], or `None` if it's simpler to send the whole text.
     edits: Option<Vec<Edit>>,
 }
@@ -56,7 +58,7 @@ impl Default for Buffer {
 impl Buffer {
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
-        let mut buffer = Self { line_starts: vec![], text, version: 0, undo: vec![], redo: vec![], open: None, edits: Some(vec![]) };
+        let mut buffer = Self { line_starts: vec![], text, version: 0, undo: vec![], redo: vec![], open: None, held: false, edits: Some(vec![]) };
         buffer.reindex();
         buffer
     }
@@ -121,6 +123,12 @@ impl Buffer {
         self.line_starts.get(line + 1).map_or(self.len(), |next| next - 1)
     }
 
+    /// Char `column` of `line` (as a session keeps the cursor), clamped to the line.
+    pub fn at_line_col(&self, line: usize, column: usize) -> usize {
+        let start = self.line_start(line);
+        self.line(line).char_indices().nth(column).map_or(self.line_end(line), |(i, _)| start + i)
+    }
+
     /// `line` without its line break.
     pub fn line(&self, line: usize) -> &str {
         &self.text[self.line_start(line)..self.line_end(line)]
@@ -172,8 +180,27 @@ impl Buffer {
         self.redo.clear();
     }
 
+    /// Until [`Buffer::release`], commits wait, and all that's done is one undo step.
+    pub fn hold(&mut self) {
+        self.held = true;
+    }
+
+    /// Commit what's been held.
+    pub fn release(&mut self, selection: Range) {
+        self.held = false;
+        self.commit(selection);
+    }
+
+    /// Stop holding, leaving the transaction open (typing goes on).
+    pub fn hold_no_longer(&mut self) {
+        self.held = false;
+    }
+
     /// Close the open transaction: one undo step, unless it changed nothing.
     pub fn commit(&mut self, selection: Range) {
+        if self.held {
+            return;
+        }
         if let Some(mut tx) = self.open.take()
             && !tx.changes.is_empty()
         {
@@ -401,5 +428,28 @@ mod tests {
         assert!(b.has_uncommitted());
         b.undo();
         assert_eq!(b.text(), "abc");
+    }
+}
+
+#[cfg(test)]
+mod speed {
+    use super::*;
+
+    /// `cargo test -p ghostwrite-core --release speed -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn how_long_an_edit_takes() {
+        for mb in [1, 5, 20, 100] {
+            let text = "a line of about forty characters of code\n".repeat(mb * 1024 * 1024 / 41);
+            let mut buffer = Buffer::new(text);
+            let middle = buffer.len() / 2;
+            let start = std::time::Instant::now();
+            for i in 0..100 {
+                buffer.begin(Range::point(middle));
+                buffer.edit(middle + i..middle + i, "x");
+                buffer.commit(Range::point(middle));
+            }
+            println!("{mb} MB: {:?} an edit", start.elapsed() / 100);
+        }
     }
 }

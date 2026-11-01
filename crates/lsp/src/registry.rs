@@ -2,50 +2,79 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use futures::channel::mpsc;
 
+use serde_json::Value;
+
 use crate::client::{Client, Event, Launch};
-use crate::python;
+use crate::{python, shell};
 
 /// A language server Ghostwrite knows how to start. Which languages each
-/// serves is in `ghostwrite_core`'s language table, by `name`.
+/// serves is in `ghostwrite_core`'s language table, by `name`; what's
+/// particular to a server is here, as its hooks.
 pub struct Spec {
     pub name: &'static str,
-    command: &'static [&'static str],
+    pub command: &'static [&'static str],
     /// Files that mark the folder it's started in, nearest the file up
-    /// (a Lake project's); without them, or none found, the project's.
-    roots: &'static [&'static str],
+    /// (a build tool's, say); without them, or none found, the project's.
+    pub roots: &'static [&'static str],
+    /// Environment variables it starts with, for the folder it's started
+    /// in, over the login shell's.
+    pub env: fn(&Path) -> Vec<(String, String)>,
+    /// Its answer to `workspace/configuration` for a section, in that folder.
+    pub settings: fn(&str, &Path) -> Value,
 }
 
+impl Spec {
+    pub const DEFAULT: Spec = Spec { name: "", command: &[], roots: &[], env: |_| vec![], settings: |_, _| Value::Null };
+}
+
+/// Python's servers see the project's virtualenv, and are told its interpreter.
+const PYTHON: Spec = Spec { env: python::server_env, settings: python::settings, ..Spec::DEFAULT };
+
 const SPECS: &[Spec] = &[
-    Spec { name: "rust-analyzer", command: &["rust-analyzer"], roots: &[] },
-    Spec { name: "basedpyright", command: &["basedpyright-langserver", "--stdio"], roots: &[] },
-    Spec { name: "pyright", command: &["pyright-langserver", "--stdio"], roots: &[] },
-    Spec { name: "pylsp", command: &["pylsp"], roots: &[] },
-    Spec { name: "typescript-language-server", command: &["typescript-language-server", "--stdio"], roots: &[] },
-    Spec { name: "gopls", command: &["gopls"], roots: &[] },
-    Spec { name: "clangd", command: &["clangd"], roots: &[] },
-    Spec { name: "tinymist", command: &["tinymist"], roots: &[] },
-    // Lake picks the project's Lean (elan reads its lean-toolchain) and its packages.
-    Spec { name: "lean", command: &["lake", "serve"], roots: &["lakefile.lean", "lakefile.toml", "lean-toolchain"] },
+    Spec { name: "rust-analyzer", command: &["rust-analyzer"], ..Spec::DEFAULT },
+    Spec { name: "basedpyright", command: &["basedpyright-langserver", "--stdio"], ..PYTHON },
+    Spec { name: "pyright", command: &["pyright-langserver", "--stdio"], ..PYTHON },
+    Spec { name: "pylsp", command: &["pylsp"], ..PYTHON },
+    Spec { name: "typescript-language-server", command: &["typescript-language-server", "--stdio"], ..Spec::DEFAULT },
+    Spec { name: "gopls", command: &["gopls"], ..Spec::DEFAULT },
+    Spec { name: "clangd", command: &["clangd"], ..Spec::DEFAULT },
 ];
 
-const PYTHON_SERVERS: &[&str] = &["basedpyright", "pyright", "pylsp"];
+/// Servers plugins added.
+static REGISTERED: RwLock<Vec<&'static Spec>> = RwLock::new(Vec::new());
+
+/// Add a server a plugin knows.
+pub fn register(spec: &'static Spec) {
+    REGISTERED.write().unwrap_or_else(|e| e.into_inner()).push(spec);
+}
+
+/// A server a plugin knew is gone (those running go on until they're done with).
+pub fn unregister(spec: &'static Spec) {
+    REGISTERED.write().unwrap_or_else(|e| e.into_inner()).retain(|known| !std::ptr::eq(*known, spec));
+}
+
+/// Every server.
+fn specs() -> Vec<&'static Spec> {
+    SPECS.iter().chain(REGISTERED.read().unwrap_or_else(|e| e.into_inner()).iter().copied()).collect()
+}
 
 /// Where each server's binary is, looked up once.
 fn installed() -> &'static HashMap<&'static str, PathBuf> {
     static FOUND: OnceLock<HashMap<&'static str, PathBuf>> = OnceLock::new();
     FOUND.get_or_init(|| {
-        let names: Vec<&str> = SPECS.iter().map(|s| s.command[0]).collect();
-        SPECS.iter().zip(python::which_all(&names)).filter_map(|(spec, path)| Some((spec.name, path?))).collect()
+        let specs = specs();
+        let names: Vec<&str> = specs.iter().map(|s| s.command[0]).collect();
+        specs.iter().zip(shell::which_all(&names)).filter_map(|(spec, path)| Some((spec.name, path?))).collect()
     })
 }
 
 /// The first of `servers` that's installed.
 fn first_installed(servers: &[&str]) -> Option<&'static Spec> {
-    servers.iter().find_map(|name| SPECS.iter().find(|spec| spec.name == *name && installed().contains_key(spec.name)))
+    servers.iter().find_map(|name| specs().into_iter().find(|spec| spec.name == *name && installed().contains_key(spec.name)))
 }
 
 /// Look up the servers and the login shell's environment now, off the UI
@@ -53,7 +82,7 @@ fn first_installed(servers: &[&str]) -> Option<&'static Spec> {
 pub fn warm() {
     std::thread::spawn(|| {
         installed();
-        python::login_env();
+        shell::env();
     });
 }
 
@@ -102,19 +131,14 @@ impl Registry {
         self.clients
             .entry(key)
             .or_insert_with(|| {
-                let settings_root = root.clone();
-                // The login shell's environment; a Python server's has the project's virtualenv on top.
-                let mut env = python::login_env().to_vec();
-                if PYTHON_SERVERS.contains(&spec.name) {
-                    env.extend(python::server_env(&root));
-                }
+                let (settings, settings_root) = (spec.settings, root.clone());
                 let launch = Launch {
                     name: spec.name,
                     binary: installed()[spec.name].clone(),
                     args: &spec.command[1..],
                     root: &root,
-                    env,
-                    settings: Box::new(move |section| python::settings(section, &settings_root)),
+                    env: [shell::env().to_vec(), (spec.env)(&root)].concat(),
+                    settings: Box::new(move |section| settings(section, &settings_root)),
                 };
                 Client::start(launch, self.events.clone()).inspect_err(|e| eprintln!("couldn't start {}: {e}", spec.name)).ok()
             })

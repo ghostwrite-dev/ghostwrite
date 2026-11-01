@@ -1,6 +1,8 @@
 //! What Ghostwrite remembers between launches, in its Application Support
-//! folder: recent projects, each project's open files, the `:` history, the
-//! file tree's width, and the last exchange with Claude.
+//! folder. Here are the recent projects and each project's open files; the
+//! rest is kept by what it belongs to, through [`read`] and [`write`] (a
+//! project's own under [`project_dir`]): the editor's `:` history and pane
+//! sizes, Claude's notes and log.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -8,7 +10,6 @@ use std::sync::OnceLock;
 use serde_json::{Value, json};
 
 static MAX_RECENT: OnceLock<usize> = OnceLock::new();
-const MAX_HISTORY: usize = 200;
 
 static REDIRECT: OnceLock<PathBuf> = OnceLock::new();
 
@@ -33,18 +34,20 @@ pub fn support_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("GHOSTWRITE_SUPPORT_DIR") {
         return Some(PathBuf::from(dir));
     }
-    Some(std::env::home_dir()?.join("Library/Application Support/Ghostwrite"))
+    crate::platform::data_dir()
 }
 
 fn path_of(name: &str) -> Option<PathBuf> {
     Some(support_dir()?.join(name))
 }
 
-fn read(name: &str) -> Option<String> {
+/// What's kept as `name` (a path in the folder), if anything.
+pub fn read(name: &str) -> Option<String> {
     std::fs::read_to_string(path_of(name)?).ok()
 }
 
-fn write(name: &str, text: &str) {
+/// Keep `text` as `name`, never half-written.
+pub fn write(name: &str, text: &str) {
     let Some(path) = path_of(name) else { return };
     let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| crate::fs::write_atomic(&path, text.as_bytes()));
     if let Err(e) = saved {
@@ -52,11 +55,29 @@ fn write(name: &str, text: &str) {
     }
 }
 
-fn lines(name: &str) -> Vec<String> {
+/// Stop keeping `name`.
+pub fn remove(name: &str) {
+    if let Some(path) = path_of(name) {
+        std::fs::remove_file(path).ok();
+    }
+}
+
+/// The files kept in the folder `dir`, by name in the folder.
+pub fn listed(dir: &str) -> Vec<String> {
+    let Some(entries) = path_of(dir).and_then(|path| std::fs::read_dir(path).ok()) else { return vec![] };
+    let mut names: Vec<String> = entries.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|name| !name.starts_with('.')).collect();
+    names.sort();
+    names
+}
+
+/// What's kept as `name`, as lines.
+pub fn lines(name: &str) -> Vec<String> {
     read(name).unwrap_or_default().lines().filter(|l| !l.is_empty()).map(str::to_string).collect()
 }
 
-fn write_lines(name: &str, lines: &[String]) {
+/// Keep `lines` as `name`, the last `max` of them.
+pub fn write_lines(name: &str, lines: &[String], max: usize) {
+    let lines = &lines[lines.len().saturating_sub(max)..];
     write(name, &lines.iter().map(|l| format!("{l}\n")).collect::<String>());
 }
 
@@ -72,12 +93,12 @@ pub fn touch_project(project: &Path) {
     projects.retain(|p| p != project);
     projects.insert(0, project.to_path_buf());
     projects.truncate(*MAX_RECENT.get_or_init(|| 20));
-    write_lines("projects", &projects.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
+    write_lines("projects", &projects.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), usize::MAX);
 }
 
 pub fn forget_project(project: &Path) {
     let projects: Vec<String> = recent_projects().into_iter().filter(|p| p != project).map(|p| p.display().to_string()).collect();
-    write_lines("projects", &projects);
+    write_lines("projects", &projects, usize::MAX);
 }
 
 // Sessions: a project's open files.
@@ -108,82 +129,16 @@ pub fn save_session(root: &Path, session: &Session) {
     write("sessions.json", &all.to_string());
 }
 
-// The `:` command history, oldest first.
+// What's kept for one project: in its own folder, rather than in the
+// project, so nothing lands in the user's repository.
 
-pub fn command_history() -> Vec<String> {
-    lines("command-history")
-}
-
-pub fn save_command_history(history: &[String]) {
-    write_lines("command-history", &history[history.len().saturating_sub(MAX_HISTORY)..]);
-}
-
-// The file tree's width.
-
-pub fn tree_width() -> Option<f32> {
-    read("tree-width")?.trim().parse().ok()
-}
-
-pub fn save_tree_width(width: f32) {
-    write("tree-width", &width.to_string());
-}
-
-pub fn preview_width() -> Option<f32> {
-    read("preview-width")?.trim().parse().ok()
-}
-
-pub fn save_preview_width(width: f32) {
-    write("preview-width", &width.to_string());
-}
-
-pub fn terminal_height() -> Option<f32> {
-    read("terminal-height")?.trim().parse().ok()
-}
-
-pub fn save_terminal_height(height: f32) {
-    write("terminal-height", &height.to_string());
-}
-
-/// The last request to Claude and its replies, kept for when a step won't place.
-pub fn save_transcript(text: &str) {
-    write("last-reply.txt", text);
-}
-
-// Claude's context for a project: its own condensed notes, and a log of
-// recent interactions. Kept here rather than in the project, so nothing
-// lands in the user's repository.
-
-/// `project-state/<folder name>-<hash of its path>`, stable across launches.
-fn project_key(root: &Path) -> String {
+/// The folder kept for the project at `root`: `project-state/<folder
+/// name>-<hash of its path>`, stable across launches.
+pub fn project_dir(root: &Path) -> String {
     // FNV-1a: std's hasher isn't guaranteed stable between Rust releases.
     let hash = root.to_string_lossy().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
     let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     format!("project-state/{name}-{hash:016x}")
-}
-
-/// Claude's notes about the project and the user, as it last condensed them.
-pub fn load_memory(root: &Path) -> String {
-    read(&format!("{}/memory.md", project_key(root))).unwrap_or_default()
-}
-
-pub fn save_memory(root: &Path, notes: &str) {
-    write(&format!("{}/memory.md", project_key(root)), notes);
-}
-
-/// Add an interaction to the project's log.
-pub fn log_interaction(root: &Path, entry: &Value) {
-    let name = format!("{}/interactions.jsonl", project_key(root));
-    let mut entries: Vec<String> = lines(&name);
-    entries.push(entry.to_string());
-    // The log is for recent context; older knowledge lives in the notes.
-    let keep = entries.len().saturating_sub(MAX_HISTORY);
-    write_lines(&name, &entries[keep..]);
-}
-
-/// The last `n` interactions, oldest first.
-pub fn recent_interactions(root: &Path, n: usize) -> Vec<Value> {
-    let entries = lines(&format!("{}/interactions.jsonl", project_key(root)));
-    entries[entries.len().saturating_sub(n)..].iter().filter_map(|l| serde_json::from_str(l).ok()).collect()
 }
 
 #[cfg(test)]
@@ -208,15 +163,10 @@ mod tests {
     }
 
     #[test]
-    fn keeps_claudes_notes_and_log_per_project() {
-        let root = PathBuf::from("/tmp/ghostwrite-memory-test");
-        save_memory(&root, "Prefers small steps.");
-        assert_eq!(load_memory(&root), "Prefers small steps.");
-        assert_eq!(load_memory(Path::new("/tmp/elsewhere")), "");
-        for i in 0..3 {
-            log_interaction(&root, &json!({ "request": i }));
-        }
-        let last: Vec<Value> = recent_interactions(&root, 2);
-        assert_eq!(last, [json!({ "request": 1 }), json!({ "request": 2 })]);
+    fn keeps_lines_and_a_folder_per_project() {
+        let name = format!("{}/log", project_dir(Path::new("/tmp/ghostwrite-store-test")));
+        write_lines(&name, &["a".into(), "b".into(), "c".into()], 2);
+        assert_eq!(lines(&name), ["b", "c"]);
+        assert_ne!(project_dir(Path::new("/a/x")), project_dir(Path::new("/b/x")), "same name, other folder");
     }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "ghostwrite-model"
+description = "A local model, run with llama.cpp in a process of its own"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+# llama.cpp itself, which takes cmake and a C++ compiler to build. Without it, the
+# editor works as ever, and asking a local model says this build can't.
+llama = ["dep:llama-cpp-2"]
+
+[dependencies]
+ghostwrite-project.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+
+# On the GPU on a Mac; on the CPU elsewhere, where there's no one GPU interface to count on.
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "0.1.160", default-features = false, features = ["metal"], optional = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+llama-cpp-2 = { version = "0.1.160", default-features = false, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }

@@ -7,7 +7,14 @@ publish.workspace = true
 
 [dependencies]
 ghostwrite-project.workspace = true
-libc.workspace = true
+base64.workspace = true
+image = { workspace = true, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 regex.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }

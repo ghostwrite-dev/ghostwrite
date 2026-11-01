@@ -159,7 +159,19 @@ impl Render for ProjectsPage {
                         ),
                     )
                     .child(if rows.is_empty() {
-                        div().text_color(theme.muted_foreground).child("No recent projects. Open a folder to start.").into_any_element()
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .text_color(theme.muted_foreground)
+                            .child(div().text_color(theme.foreground).child("Welcome to Ghostwrite."))
+                            .child("A modal editor where a model's changes come as small steps you accept, one at a time.")
+                            .child("Open a folder to start. Then:")
+                            .child(":tutor        learn the keys, in a few minutes")
+                            .child(":api-key      give it a Claude API key, or use Claude Code if it's installed")
+                            .child(":model        see which models can be asked, and choose one")
+                            .child("space ?       see every key, at any time")
+                            .into_any_element()
                     } else {
                         div().id("recent").flex().flex_col().gap_1().overflow_y_scroll().children(rows).into_any_element()
                     }),

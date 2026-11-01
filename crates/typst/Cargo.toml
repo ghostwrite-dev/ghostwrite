@@ -6,9 +6,17 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-comemo = "0.5"
-parking_lot = "0.12"
-typst = "0.15.1"
-typst-kit = { version = "0.15.1", features = ["datetime", "embedded-fonts", "scan-fonts", "system-downloader", "system-files"] }
-typst-layout = "0.15.1"
-typst-render = "0.15.1"
+ghostwrite-core.workspace = true
+ghostwrite-lsp.workspace = true
+ghostwrite-page.workspace = true
+ghostwrite-plugin.workspace = true
+codebook-tree-sitter-typst.workspace = true
+comemo.workspace = true
+typst.workspace = true
+typst-kit.workspace = true
+typst-layout.workspace = true
+typst-render.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+serde_json.workspace = true

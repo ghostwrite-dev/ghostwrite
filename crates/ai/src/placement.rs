@@ -139,7 +139,7 @@ impl Placer {
 /// Where an item's quoted line numbers (or the editor, for a note it gave) point.
 fn pointed_at(item: &Item) -> Option<Range<usize>> {
     let line = item.line()?;
-    Some(line..line + item.quoted().len().max(1))
+    Some(line..line.saturating_add(item.quoted().len().max(1)))
 }
 
 /// The files with steps not yet accepted applied: the one asked about, and

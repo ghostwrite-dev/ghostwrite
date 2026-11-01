@@ -6,10 +6,13 @@
 //! - [`ui`]: shared widgets
 //! - [`theme`], [`actions`], [`keys`]: look, menus, and keystrokes as modal keys
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod actions;
 mod config;
 mod editor;
 mod keys;
+mod plugins;
 mod projects_page;
 mod theme;
 mod ui;
@@ -21,9 +24,21 @@ use futures::StreamExt as _;
 use gpui::Application;
 
 fn main() {
+    // Started by itself to run the local model: no window, and it never returns.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("--model-worker") {
+        ghostwrite_model::worker(&args.next().unwrap_or_default());
+    }
+    plugins::install();
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let config = config::get();
-    ghostwrite_ai::configure(ghostwrite_ai::Settings { model: config.model.clone(), context_bytes: config.context_bytes, max_diff: config.max_diff });
+    ghostwrite_ai::configure(ghostwrite_ai::Settings {
+        model: config.model.clone(),
+        local_model: config.local_model.clone(),
+        prompt_rules: ghostwrite_plugin::prompt_rules(),
+        context_bytes: config.context_bytes,
+        max_diff: config.max_diff,
+    });
     ghostwrite_project::store::set_max_recent(config.max_recent_projects);
 
     // Finder hands files over as file:// URLs, at launch or while running.

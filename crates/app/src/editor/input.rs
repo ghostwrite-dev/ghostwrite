@@ -30,10 +30,16 @@ impl Editor {
             tab.view.selection = Range::new(range.start, range.end).clamp(tab.doc.buffer.len());
         }
         if as_is {
+            // Being composed, by an input method: at the one cursor it's asking about.
             self.modal.insert_as_is(text, &mut tab.target(1));
-        } else {
+        } else if tab.view.others.is_empty() {
             self.modal.insert(text, &mut tab.target(1));
+        } else {
+            self.typed_at_each(|modal, tab| {
+                modal.insert(text, &mut tab.target(1));
+            });
         }
+        let Some(tab) = self.project.tabs.active_mut() else { return };
         tab.view.autoscroll = Some(Autoscroll::Fit);
         tab.sync();
         self.after_typing(text, cx);

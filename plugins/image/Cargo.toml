@@ -1,0 +1,21 @@
+# Viewing images as a plugin, built for WebAssembly: scripts/build-plugins.sh.
+[package]
+name = "ghostwrite-image-plugin"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ghostwrite-plugin-api = { path = "../../crates/plugin-api" }
+wit-bindgen = "0.57"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+[workspace]

@@ -1,0 +1,16 @@
+{
+  "name": "image",
+  "version": "0.1.0",
+  "api": 1,
+  "code": "image.wasm",
+  "pages": true,
+  "only_pages": true,
+  "pages_at_own_size": true,
+  "extensions": ["png", "PNG", "jpg", "JPG", "jpeg", "JPEG", "gif", "GIF", "webp", "WEBP", "bmp", "BMP", "tif", "TIF", "tiff", "TIFF", "ico", "ICO"],
+  "rules": "- An image can be read, but can't have items about it.",
+  "access": {
+    "project": true,
+    "memory_mb": 4096,
+    "seconds": 60
+  }
+}

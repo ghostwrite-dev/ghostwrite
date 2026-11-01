@@ -1,5 +1,6 @@
-//! Normal and select mode: motions, selections and edits. AI and tour mode
-//! use the same motions to look around, but every edit is refused.
+//! Normal and select mode: motions, selections and edits. AI mode uses the
+//! same motions to look around, but every edit is refused, and the keys
+//! under `space` that would start something else wait for the review.
 
 use super::{Effect, Key, Modal, Mode, Outcome, Pending, Place, Registers, Target};
 use crate::indent::unindent;
@@ -16,10 +17,7 @@ impl Modal {
             let count = self.count.take().unwrap_or(1);
             return self.pending_key(pending, key, count, sel, extend, regs, t);
         }
-        if let Key::Char(c @ '0'..='9') = key
-            && (c != '0' || self.count.is_some())
-        {
-            self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(c as usize - '0' as usize).min(super::MAX_COUNT));
+        if self.count_digit(key) {
             return Outcome::Handled;
         }
         let explicit_count = self.count.take();
@@ -92,6 +90,7 @@ impl Modal {
             // A count before them is for the key after (`5gg`, `2fx`).
             Key::Char('g') => (self.pending, self.count) = (Some(Pending::Goto), explicit_count),
             Key::Char(' ') => (self.pending, self.count) = (Some(Pending::Space), explicit_count),
+            Key::Ctrl('w') => self.pending = Some(Pending::Pane),
             Key::Char('r') => (self.pending, self.count) = (Some(Pending::Replace), explicit_count),
             Key::Char('m') => (self.pending, self.count) = (Some(Pending::Match), explicit_count),
             Key::Char(c @ ('f' | 't' | 'F' | 'T')) => {
@@ -228,6 +227,8 @@ impl Modal {
                 let after = same_shape(sel, target.from(), swapped.len());
                 self.edit(t, target.bytes(), &swapped, after, self.mode);
             }
+            // Other ctrl keys aren't modal editing's: the app may have them.
+            Key::Ctrl(_) => return Outcome::Ignored,
             _ => {}
         }
         Outcome::Handled
@@ -251,10 +252,15 @@ impl Modal {
             (Pending::Goto, 'h') => Some(b.line_start_at(cursor)),
             (Pending::Goto, 'l') => Some(line_last_char(b, cursor)),
             (Pending::Goto, 's') => Some(b.first_non_blank_at(cursor)),
-            (Pending::Goto, 'n') => return Outcome::Effect(Effect::NextBuffer),
-            (Pending::Goto, 'p') => return Outcome::Effect(Effect::PrevBuffer),
+            (Pending::Goto, 'n') => return Outcome::Effect(Effect::NextBuffer(count)),
+            (Pending::Goto, 'p') => return Outcome::Effect(Effect::PrevBuffer(count)),
+            (Pending::Goto, 'N') => return Outcome::Effect(Effect::MoveBufferNext(count)),
+            (Pending::Goto, 'P') => return Outcome::Effect(Effect::MoveBufferPrev(count)),
             (Pending::Goto, 'd') => return Outcome::Effect(Effect::GotoDefinition),
             (Pending::Goto, 'r') => return Outcome::Effect(Effect::References),
+            (Pending::Goto, 't') => return Outcome::Effect(Effect::ScreenLine(Place::Top)),
+            (Pending::Goto, 'c') => return Outcome::Effect(Effect::ScreenLine(Place::Middle)),
+            (Pending::Goto, 'b') => return Outcome::Effect(Effect::ScreenLine(Place::Bottom)),
             (Pending::Find { forward, till }, ch) => {
                 if let Some(r) = movement::find_char(b, sel, ch, forward, till, count, extend) {
                     *t.selection = r;
@@ -335,12 +341,17 @@ impl Modal {
                 self.edit(t, target.bytes(), &replaced, after, self.mode);
                 return Outcome::Handled;
             }
-            // Ghostwrite's own keys are under space. Starting something else
-            // waits until the review is done.
+            (Pending::Pane, 'v') => return Outcome::Effect(Effect::SplitRight),
+            (Pending::Pane, 'w' | 'h' | 'l') => return Outcome::Effect(Effect::OtherPane),
+            (Pending::Pane, 'q') => return Outcome::Effect(Effect::CloseSplit),
+            (Pending::Pane, _) => return Outcome::Handled,
+            // Ghostwrite's own keys are under space. While reviewing, `space a`
+            // asks about what's under review, and starting anything else (but
+            // the terminal, copying and the cheatsheet) waits until it's done.
             (Pending::Space, 'a') if self.mode.reviewing() => return Outcome::Review(super::Review::Ask),
+            (Pending::Space, c) if self.mode.reviewing() && !matches!(c, 't' | 'y' | 'p' | '?') => return Outcome::Handled,
             (Pending::Space, 'a') => return Outcome::Effect(Effect::Assist),
             (Pending::Space, 't') => return Outcome::Effect(Effect::Terminal),
-            (Pending::Space, 'e' | 'k' | 'd' | '/' | 'j') if self.mode.reviewing() => return Outcome::Handled,
             (Pending::Space, 'j') => return Outcome::Effect(Effect::NextProblem),
             (Pending::Space, 'e') => {
                 self.to_tree();
@@ -350,6 +361,11 @@ impl Modal {
             (Pending::Space, 'd') => return Outcome::Effect(Effect::Diagnostics),
             (Pending::Space, '/') => return Outcome::Effect(Effect::Search),
             (Pending::Space, '?') => return Outcome::Effect(Effect::Cheatsheet),
+            (Pending::Space, 'f') => return Outcome::Effect(Effect::PickFile),
+            (Pending::Space, 'r') => return Outcome::Effect(Effect::Rename),
+            (Pending::Space, '.') => return Outcome::Effect(Effect::CodeActions),
+            (Pending::Space, 's') => return Outcome::Effect(Effect::Symbols),
+            (Pending::Space, 'b') => return Outcome::Effect(Effect::PickBuffer),
             (Pending::Register, name) => {
                 self.register = Some(name);
                 return Outcome::Handled;
@@ -358,14 +374,6 @@ impl Modal {
             (Pending::View, 't') => return Outcome::Effect(Effect::View(Place::Top)),
             (Pending::View, 'b') => return Outcome::Effect(Effect::View(Place::Bottom)),
             (Pending::Next(forward), 'd') => return Outcome::Effect(Effect::Diagnostic { forward }),
-            (Pending::Goto, 't') => return Outcome::Effect(Effect::ScreenLine(Place::Top)),
-            (Pending::Goto, 'c') => return Outcome::Effect(Effect::ScreenLine(Place::Middle)),
-            (Pending::Goto, 'b') => return Outcome::Effect(Effect::ScreenLine(Place::Bottom)),
-            (Pending::Space, 'f') => return Outcome::Effect(Effect::PickFile),
-            (Pending::Space, 'r') => return Outcome::Effect(Effect::Rename),
-            (Pending::Space, '.') => return Outcome::Effect(Effect::CodeActions),
-            (Pending::Space, 's') => return Outcome::Effect(Effect::Symbols),
-            (Pending::Space, 'b') => return Outcome::Effect(Effect::PickBuffer),
             (Pending::Space, 'y') => {
                 regs.set_clipboard(b.slice(sel.min_width_1(text).bytes()).to_string());
                 return Outcome::Handled;
@@ -458,15 +466,17 @@ fn number_at(line: &str, at: usize) -> Option<(usize, usize, i128)> {
 /// `lines` commented out with `token` (at the least indent), or, if they
 /// all are, back in. Blank lines are left be.
 fn toggle_comment(lines: &str, token: &str) -> String {
+    // Indentation is spaces and tabs (one byte each), so it's sliced on char boundaries.
+    let lead = |l: &str| l.len() - l.trim_start_matches([' ', '\t']).len();
     let filled = || lines.split('\n').filter(|l| !l.trim().is_empty());
-    let commented = filled().all(|l| l.trim_start().starts_with(token));
-    let indent = filled().map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
+    let commented = filled().all(|l| l[lead(l)..].starts_with(token));
+    let indent = filled().map(lead).min().unwrap_or(0);
     lines
         .split('\n')
         .map(|line| match () {
             _ if line.trim().is_empty() => line.to_string(),
             _ if commented => {
-                let at = line.len() - line.trim_start().len();
+                let at = lead(line);
                 let rest = &line[at + token.len()..];
                 format!("{}{}", &line[..at], rest.strip_prefix(' ').unwrap_or(rest))
             }
@@ -478,6 +488,14 @@ fn toggle_comment(lines: &str, token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn commenting_lines_indented_with_odd_spaces_doesnt_split_a_char() {
+        // A non-breaking space isn't indentation: it stays in the text.
+        let out = super::toggle_comment(" a\n\u{a0}b", "//");
+        assert_eq!(out, "//  a\n// \u{a0}b");
+        assert_eq!(super::toggle_comment(&out, "//"), " a\n\u{a0}b", "and back");
+    }
     #[test]
     fn comments_go_in_at_the_least_indent_and_come_back_out() {
         let code = "fn f() {\n    x();\n\n    y();\n}";

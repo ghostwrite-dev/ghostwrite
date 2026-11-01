@@ -5,29 +5,35 @@ use std::path::{Path, PathBuf};
 
 use ghostwrite_core::Mode;
 use ghostwrite_core::modal::TreeCommand;
-use ghostwrite_project::{fs, store};
+use ghostwrite_project::fs;
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, PromptLevel, ScrollStrategy, SharedString, UniformListScrollHandle, Window,
-    div, prelude::*, uniform_list,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, PromptLevel, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*,
+    uniform_list,
 };
 
 use super::story::Waiting;
 use super::{Editor, PromptKind};
 use crate::theme::{pt, theme};
+use crate::ui::pane::{Edge, Resizable};
 
-/// The tree's side of the window: shown or not, how wide (in points at
-/// 100%, so it zooms with its text), and where it's scrolled.
+/// The tree's side of the window: shown or not, how wide, and where it's scrolled.
 pub(super) struct TreePane {
     pub(super) shown: bool,
-    width: f32,
+    pub(super) width: Resizable,
     scroll: UniformListScrollHandle,
-    /// Dragging its edge.
-    pub(super) resizing: bool,
 }
+
+/// How wide it starts, and can be dragged.
+const WIDTH: f32 = 240.;
+pub(super) const WIDTHS: std::ops::RangeInclusive<f32> = 140.0..=640.0;
 
 impl TreePane {
     pub(super) fn new() -> Self {
-        Self { shown: true, width: store::tree_width().unwrap_or(240.), scroll: UniformListScrollHandle::new(), resizing: false }
+        Self { shown: true, width: Resizable::new("tree-width", Edge::Right, Some(WIDTH)), scroll: UniformListScrollHandle::new() }
+    }
+
+    fn width(&self) -> f32 {
+        self.width.size.unwrap_or(WIDTH)
     }
 }
 
@@ -189,9 +195,9 @@ impl Editor {
     /// The panel's lines: the rows, with a proposal's ghost row and what goes under it.
     fn tree_lines(&self, annex: Option<&Annex>) -> Vec<Line> {
         let rows = self.project.tree.rows();
-        let ghost = self.project.tree.ghost();
+        let ghost = self.project.tree.new_entry();
         let proposed = self.project.tree.proposal().and_then(|p| p.row_path());
-        let cols = |depth: usize| ((self.tree_pane.width - (8. + INDENT * depth as f32 + 16.) - 8.) / 7.).max(20.) as usize;
+        let cols = |depth: usize| ((self.tree_pane.width() - (8. + INDENT * depth as f32 + 16.) - 8.) / 7.).max(20.) as usize;
         let under = |depth: usize| -> Vec<Line> {
             let Some(annex) = annex else { return vec![] };
             if annex.asking {
@@ -361,7 +367,7 @@ impl Editor {
         div()
             .relative()
             .flex_none()
-            .w(pt(self.tree_pane.width))
+            .w(pt(self.tree_pane.width()))
             .h_full()
             .flex()
             .flex_col()
@@ -396,28 +402,14 @@ impl Editor {
                         .child("a add · r rename · d trash · esc back"),
                 )
             })
-            // The edge drags to resize.
-            .child(div().id("tree-edge").absolute().top_0().right(pt(-3.)).w(pt(6.)).h_full().cursor_col_resize().on_mouse_down(
+            .child(self.tree_pane.width.handle("tree-edge").on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.tree_pane.resizing = true;
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    let width = this.tree_pane.width();
+                    this.tree_pane.width.grab(event.position, width);
                     cx.stop_propagation();
                 }),
             ))
             .into_any_element()
-    }
-
-    /// While dragging the tree's edge.
-    pub(super) fn drag_tree_edge(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if self.tree_pane.resizing {
-            self.tree_pane.width = (f32::from(event.position.x) / theme(cx).zoom).clamp(140., 640.);
-            cx.notify();
-        }
-    }
-
-    pub(super) fn end_tree_drag(&mut self) {
-        if std::mem::take(&mut self.tree_pane.resizing) {
-            store::save_tree_width(self.tree_pane.width);
-        }
     }
 }

@@ -25,6 +25,8 @@ pub(super) enum PromptKind {
     Pick,
     /// A new name for what's under the cursor (`space r`).
     Rename,
+    /// A regex: a cursor on each match in the selection (`s`).
+    SelectIn,
 }
 
 /// The one open prompt: it has the keyboard until it closes.
@@ -37,22 +39,23 @@ pub(super) struct Prompt {
 impl Editor {
     pub(super) fn open_prompt(&mut self, kind: PromptKind, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match kind {
-            PromptKind::Ask => "Ask Claude, or tell it what to change…",
-            PromptKind::Command => "",
-            PromptKind::TreeAdd(_) => "name, or name/ for a folder",
-            PromptKind::TreeRename(_) => "new name",
-            PromptKind::Find { .. } => "",
-            PromptKind::Pick => "type to narrow down",
-            PromptKind::Rename => "new name",
+            PromptKind::Ask => format!("Ask {}, or tell it what to change…", self.backend.as_ref().map_or("Claude", |b| b.name())),
+            PromptKind::Command => String::new(),
+            PromptKind::TreeAdd(_) => "name, or name/ for a folder".into(),
+            PromptKind::TreeRename(_) => "new name".into(),
+            PromptKind::Find { .. } => String::new(),
+            PromptKind::Pick => "type to narrow down".into(),
+            PromptKind::Rename => "new name".into(),
+            PromptKind::SelectIn => "select what, in the selection (or the file)".into(),
         };
-        let field = cx.new(|cx| TextField::new(text, placeholder, cx));
+        let field = cx.new(|cx| TextField::new(text, &placeholder, cx));
         let subscription = cx.subscribe_in(&field, window, |this, field, event, window, cx| {
             let text = field.read(cx).text().to_string();
             this.prompt_event(*event, text, window, cx);
         });
         field.read(cx).focus(window);
         if kind == PromptKind::Command {
-            self.history_at = None;
+            self.history.rewind();
             self.project.status = None;
         }
         self.prompt = Some(Prompt { kind, field, _subscription: subscription });
@@ -79,7 +82,9 @@ impl Editor {
         match (event, kind) {
             (TextFieldEvent::Submit, PromptKind::Command) => {
                 self.close_prompt(window, cx);
-                self.remember_command(&text);
+                if !super::commands::is_secret(&text) {
+                    self.history.remember(&text);
+                }
                 if let Err(e) = self.run_command(&text, window, cx) {
                     self.project.status = (!e.is_empty()).then(|| e.into());
                 }
@@ -97,6 +102,11 @@ impl Editor {
                 self.close_prompt(window, cx);
                 self.rename_to(text.trim(), cx);
             }
+            (TextFieldEvent::Submit, PromptKind::SelectIn) => {
+                self.close_prompt(window, cx);
+                self.select_matches(&text);
+            }
+            (TextFieldEvent::Changed, PromptKind::Command) => self.suggest_model(&text, cx),
             (TextFieldEvent::Changed, PromptKind::Pick) => self.picker_typed(&text, cx),
             (TextFieldEvent::Up | TextFieldEvent::Down, PromptKind::Pick) => self.picker_move(event == TextFieldEvent::Down, cx),
             (TextFieldEvent::Submit, PromptKind::Pick) => self.picker_open(window, cx),

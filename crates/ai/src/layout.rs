@@ -1,7 +1,8 @@
 //! Where a story's items show: an edit where its lines are, a note at the
 //! lines it's pinned to. A note that isn't pinned to lines shows where it
 //! was asked: under the item the user said something about, or under the
-//! marked lines.
+//! marked lines. A command to run is in no file: it shows where the story
+//! was, under the item before it.
 //!
 //! [`Layout`] works this out from the story, what it was asked about, and
 //! the project's files; the editor only turns the result into tabs.
@@ -25,10 +26,15 @@ impl<F: Files> Layout<'_, F> {
     /// Where item `id` shows.
     pub fn spot(&self, id: ItemId) -> Option<Place> {
         let item = self.story.item(id)?;
-        let unpinned = matches!(&item, Item::Note(Note { at, .. }) if at.is_empty());
+        let unpinned = matches!(&item, Item::Note(Note { at, .. }) if at.is_empty()) || matches!(item, Item::Run(_));
         // A follow-up's answer goes where it was asked.
         if unpinned && let Some(lines) = self.story.asked_about(id).and_then(|about| self.lines(about)) {
             return Some(lines);
+        }
+        if let Item::Run(_) = item
+            && let Some(before) = (0..id.0).rev().map(ItemId).find(|before| self.story.item(*before).is_some())
+        {
+            return self.lines(before).or_else(|| self.spot(before));
         }
         let place = self.placer.place(&item, &self.asked, &self.files);
         match self.story.anchor().filter(|_| self.story.current() == Some(id)) {
@@ -50,6 +56,7 @@ impl<F: Files> Layout<'_, F> {
                 view.first..view.anchor + 1
             }
             Item::Note(note) => lines::find(&text, &note.at, place.near.clone(), note.line.is_some())?.lines,
+            Item::Run(_) => place.near.clone(),
         };
         Some(Place { near, ..place })
     }

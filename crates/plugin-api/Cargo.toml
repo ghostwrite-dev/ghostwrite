@@ -1,0 +1,9 @@
+[package]
+name = "ghostwrite-plugin-api"
+description = "What a Ghostwrite plugin written in Rust compiles against."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+wit-bindgen.workspace = true

@@ -77,11 +77,26 @@ pub fn theme(cx: &App) -> &Theme {
     cx.global::<Theme>()
 }
 
+/// The theme called `name` in the folder `themes` beside the config: files in the
+/// form of the bundled one, which is Zed's, so its themes can be used as they are.
+fn your_theme(name: &str) -> Option<Value> {
+    let folder = crate::config::path()?.parent()?.join("themes");
+    std::fs::read_dir(folder).ok()?.flatten().find_map(|file| {
+        let family: Value = serde_json::from_str(&std::fs::read_to_string(file.path()).ok()?).ok()?;
+        family["themes"].as_array()?.iter().find(|theme| theme["name"] == name).cloned()
+    })
+}
+
 /// Load the themes and pick the one for `appearance`.
 pub fn install(appearance: WindowAppearance, cx: &mut App) {
     let file: Value = serde_json::from_str(GRUVBOX).expect("the bundled theme parses");
     let named = |name: &str| file["themes"].as_array().and_then(|all| all.iter().find(|t| t["name"] == name)).expect("both gruvbox themes are bundled");
-    let themes = Themes { light: parse(named("Gruvbox Light")), dark: parse(named("Gruvbox Dark")) };
+    let config = crate::config::get();
+    let yours = |name: &Option<String>| name.as_deref().and_then(your_theme).map(|theme| parse(&theme));
+    let themes = Themes {
+        light: yours(&config.theme_light).unwrap_or_else(|| parse(named("Gruvbox Light"))),
+        dark: yours(&config.theme_dark).unwrap_or_else(|| parse(named("Gruvbox Dark"))),
+    };
     cx.set_global(themes);
     follow(appearance, cx);
 }
@@ -195,7 +210,14 @@ fn parse(theme: &Value) -> Theme {
         cursor_text: gpui::rgb(bg1).into(),
         syntax,
         ansi: (if dark { ANSI_DARK } else { ANSI_LIGHT }).map(|c| gpui::rgb(c).into()),
-        mono_font: "Menlo".into(),
+        mono_font: if cfg!(target_os = "macos") {
+            "Menlo"
+        } else if cfg!(windows) {
+            "Consolas"
+        } else {
+            "DejaVu Sans Mono"
+        }
+        .into(),
         mono_size: px(crate::config::get().font_size),
         ui_font: ".SystemUIFont".into(),
         zoom: 1.0,

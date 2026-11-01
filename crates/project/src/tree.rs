@@ -18,7 +18,8 @@ pub struct Row {
     pub ignored: bool,
 }
 
-/// A story step about a file or folder, shown in the tree where it applies.
+/// A change to a file or folder that's proposed (by Claude), shown in the
+/// tree where it applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Proposal {
     /// A new file, or a folder if the path ends in `/`.
@@ -41,7 +42,7 @@ impl Proposal {
 /// Where a proposed new entry shows: before row `before` (or at the end), at
 /// `depth`, reading `name` (relative to its nearest existing folder).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ghost {
+pub struct NewEntry {
     pub before: usize,
     pub depth: usize,
     pub name: String,
@@ -245,16 +246,16 @@ impl Tree {
     }
 
     /// Where a proposed new entry shows, if one is proposed.
-    pub fn ghost(&self) -> Option<Ghost> {
+    pub fn new_entry(&self) -> Option<NewEntry> {
         let Some(Proposal::Create(path)) = &self.proposal else { return None };
         let parent = path.ancestors().skip(1).find(|d| d.is_dir())?;
         let rel = path.strip_prefix(parent).ok()?.display().to_string();
         let name = if path.to_string_lossy().ends_with('/') { format!("{rel}/") } else { rel };
         if parent == self.root {
-            return Some(Ghost { before: 0, depth: 0, name });
+            return Some(NewEntry { before: 0, depth: 0, name });
         }
         let ix = self.index_of(parent)?;
-        Some(Ghost { before: ix + 1, depth: self.rows[ix].depth + 1, name })
+        Some(NewEntry { before: ix + 1, depth: self.rows[ix].depth + 1, name })
     }
 }
 
@@ -288,12 +289,12 @@ mod tests {
 
     #[test]
     fn a_proposed_file_shows_under_its_folder() {
-        let root = crate::scratch_dir("ghost");
+        let root = crate::scratch_dir("new-entry");
         std::fs::create_dir_all(root.join("src")).unwrap();
         let mut tree = Tree::new(root.clone());
         tree.propose(Some(Proposal::Create(root.join("src/new/util.rs"))));
-        assert_eq!(tree.ghost(), Some(Ghost { before: 1, depth: 1, name: "new/util.rs".into() }));
+        assert_eq!(tree.new_entry(), Some(NewEntry { before: 1, depth: 1, name: "new/util.rs".into() }));
         tree.propose(None);
-        assert_eq!(tree.ghost(), None);
+        assert_eq!(tree.new_entry(), None);
     }
 }

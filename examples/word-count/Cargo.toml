@@ -1,0 +1,19 @@
+# A plugin, as an example: see the README's "Writing a plugin".
+[package]
+name = "word-count"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ghostwrite-plugin-api = { path = "../../crates/plugin-api" }
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+[workspace]

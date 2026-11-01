@@ -1,50 +1,75 @@
-//! Stories the editor gives: `:output` goes through the last `:sh` command's
-//! errors (or its pages of output), `space d` the file's diagnostics, `:grep`
-//! and `space /` the project's matches. Each stop is a note, reviewed like any
+//! Stories the editor gives: `space d` goes through the file's diagnostics,
+//! `:grep` and `space /` the project's matches. Each stop is a note, reviewed like any
 //! story's: Tab reads on, and Enter asks the model about it, which takes over
 //! from there.
 
 use std::path::Path;
 
 use ghostwrite_ai::Item;
-use ghostwrite_ai::protocol::Note;
+use ghostwrite_ai::protocol::{Note, Step};
 use ghostwrite_project::files::{MAX_FOUND, grep, search_pattern};
-use ghostwrite_project::shell::exit_label;
-use ghostwrite_project::stops::{Stop, command_stops};
 use gpui::{AppContext as _, Context, Window};
 
 use super::Editor;
 
 /// A note at `line` of `path`, whose text there is `text`.
 fn note_at(root: &Path, path: &Path, line: usize, text: &str, say: String) -> Item {
-    let file = path.strip_prefix(root).unwrap_or(path).display().to_string();
-    Item::Note(Note { file: Some(file), at: vec![text.to_string()], text: say, line: Some(line) })
+    let file = ghostwrite_project::platform::with_slashes(path.strip_prefix(root).unwrap_or(path));
+    // No text (a line too long to keep): the note is at the line by its number.
+    let at = if text.is_empty() { vec![] } else { vec![text.to_string()] };
+    Item::Note(Note { file: Some(file), at, text: say, line: Some(line) })
 }
 
-/// Line `line` of the file at `path` (open or on disk).
-fn line_of(editor: &Editor, path: &Path, line: usize) -> String {
-    let text = editor.project.tabs.text_of(path).map(str::to_string).or_else(|| std::fs::read_to_string(path).ok()).unwrap_or_default();
-    text.lines().nth(line).unwrap_or_default().to_string()
+/// Each matching line once, with the matches in it replaced: a step for each that changes.
+fn replacing(root: &Path, pattern: &regex::Regex, with: &str, found: &[ghostwrite_project::files::Found]) -> Vec<Item> {
+    let mut items: Vec<Item> = vec![];
+    let mut last = None;
+    for f in found {
+        if f.text.is_empty() || last == Some((&f.path, f.line)) {
+            continue;
+        }
+        last = Some((&f.path, f.line));
+        let new = pattern.replace_all(&f.text, with).into_owned();
+        if new != f.text {
+            let file = ghostwrite_project::platform::with_slashes(f.path.strip_prefix(root).unwrap_or(&f.path));
+            let say = format!("{} → {}", pattern.as_str().trim_start_matches("(?i)"), with);
+            items.push(Item::Step(Step { file: Some(file), old: vec![f.text.clone()], line: Some(f.line), new: vec![new], say, op: None, complete: true }));
+        }
+    }
+    items
 }
 
 impl Editor {
-    /// `:output`: go through the last command's errors, or its output.
-    pub(super) fn output_story(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        let shell = self.shell.as_ref().ok_or("no command has run yet (:sh ‹command›)")?;
-        let (command, output, exit) = shell.finished()?;
-        let exit = exit_label(exit);
+    /// `:replace old new`: search the project, and go through the changes as
+    /// steps, accepted with Tab; `:replace!` takes them all. Neither saves.
+    pub(super) fn start_replace(&mut self, typed: &str, with: String, all: bool, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let pattern = search_pattern(typed)?;
+        let open = self.project.tabs.iter().filter_map(|t| Some((t.doc.path.clone()?, t.doc.text().to_string()))).collect();
         let root = self.project.root.clone();
-        let items: Vec<Item> = command_stops(&output, &root)
-            .into_iter()
-            .map(|stop| match stop {
-                Stop::Error(loc) => note_at(&root, &loc.path, loc.line, &line_of(self, &loc.path, loc.line), loc.message.join("\n")),
-                Stop::Page(page) => Item::Note(Note { file: None, at: vec![], text: format!("$ {command}\n{}", page.join("\n")), line: None }),
+        let search = {
+            let pattern = pattern.clone();
+            cx.background_spawn(async move { grep(&root, &pattern, &open) })
+        };
+        let typed = typed.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let found = search.await;
+            this.update(cx, |this, cx| {
+                let root = this.project.root.clone();
+                let items = replacing(&root, &pattern, &with, &found);
+                if items.is_empty() {
+                    return this.project.say(format!("nothing to replace for {typed}"));
+                }
+                let n = items.len();
+                this.project.say(format!("{n} line{} to change", if n == 1 { "" } else { "s" }));
+                this.open_given(format!("replace {typed} with {with}"), items, cx);
+                if all {
+                    this.accept_all_given(cx);
+                }
+                cx.notify();
             })
-            .collect();
-        if items.is_empty() {
-            return Err(format!("`{command}` had no output"));
-        }
-        self.open_given(format!("go through what `{command}` printed ({exit})"), items, cx);
+            .ok();
+        })
+        .detach();
         Ok(())
     }
 

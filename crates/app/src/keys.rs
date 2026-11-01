@@ -9,6 +9,16 @@ pub fn key_of(ks: &Keystroke) -> Option<Key> {
     if m.platform || m.function {
         return None;
     }
+    // Outside a Mac, AltGr is Ctrl and Alt: it types `[ ] { } | \\ @ $` on many layouts.
+    if !cfg!(target_os = "macos") && m.control && m.alt {
+        let typed = ks.key_char.as_deref().and_then(|typed| {
+            let mut chars = typed.chars();
+            chars.next().filter(|c| chars.next().is_none() && c.is_ascii_graphic())
+        });
+        if let Some(typed) = typed {
+            return Some(Key::Char(typed));
+        }
+    }
     let single = |s: &str| {
         let mut chars = s.chars();
         chars.next().filter(|_| chars.next().is_none())
@@ -53,6 +63,39 @@ pub fn key_of(ks: &Keystroke) -> Option<Key> {
     typed.filter(|c| !c.is_control()).map(Key::Char)
 }
 
+/// The keys for the app, written as on a Mac, for this system. Elsewhere there's no ⌘, and
+/// plain Ctrl is the editor's and the shell's (`ctrl-w`, `ctrl-c`), so these are Ctrl and Shift,
+/// as in terminals; what's ⌘⇧ on a Mac has Alt too.
+pub fn app(keys: &str) -> String {
+    if cfg!(target_os = "macos") { keys.to_string() } else { elsewhere(keys) }
+}
+
+fn elsewhere(keys: &str) -> String {
+    if let Some(rest) = keys.strip_prefix("cmd-shift-") {
+        format!("ctrl-alt-shift-{rest}")
+    } else if let Some(rest) = keys.strip_prefix("cmd-alt-") {
+        format!("ctrl-alt-{rest}")
+    } else if let Some(rest) = keys.strip_prefix("cmd-") {
+        format!("ctrl-shift-{rest}")
+    } else {
+        keys.to_string()
+    }
+}
+
+/// Keys in a text field, written as on a Mac: nothing there needs plain Ctrl for itself.
+pub fn in_field(keys: &str) -> String {
+    if cfg!(target_os = "macos") { keys.to_string() } else { keys.replacen("cmd-", "ctrl-", 1) }
+}
+
+/// Keys as the help writes them, for this system.
+pub fn shown(keys: &str) -> String {
+    if cfg!(target_os = "macos") { keys.to_string() } else { spelled(keys) }
+}
+
+fn spelled(keys: &str) -> String {
+    keys.replace("⌘⌥", "Ctrl+Alt+").replace("⌘⇧", "Ctrl+Alt+Shift+").replace('⌘', "Ctrl+Shift+")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +115,15 @@ mod tests {
         assert_eq!(k("shift-tab"), Some(Key::BackTab));
         assert_eq!(k("space"), Some(Key::Char(' ')));
         assert_eq!(k("cmd-s"), None);
+    }
+
+    #[test]
+    fn the_apps_keys_stay_out_of_the_way_elsewhere() {
+        assert_eq!(elsewhere("cmd-w"), "ctrl-shift-w", "ctrl-w is the editor's");
+        assert_eq!(elsewhere("cmd-c"), "ctrl-shift-c", "ctrl-c is the shell's");
+        assert_eq!(elsewhere("cmd-shift-s"), "ctrl-alt-shift-s", "not the same as cmd-s");
+        assert_eq!(elsewhere("cmd-alt-left"), "ctrl-alt-left");
+        assert_eq!(spelled("⌘J"), "Ctrl+Shift+J");
+        assert_eq!(spelled("⌘⇧[  ⌘⌥←"), "Ctrl+Alt+Shift+[  Ctrl+Alt+←");
     }
 }

@@ -1,6 +1,6 @@
 //! Colors from the language server (its semantic tokens), over the
 //! grammar's: the server knows what each name is (a local, a constant, a
-//! type, Lean's own notation), which a grammar can't. While the text
+//! type, a language's own notation), which a grammar can't. While the text
 //! changes, the last ones it sent stay, moved past the edit, until it sends
 //! new ones. Only the active file's are asked for.
 
@@ -56,7 +56,7 @@ impl Editor {
                     doc.semantic.unsupported = true;
                     return;
                 };
-                // An error (Lean's when the text changed meanwhile) keeps the last ones.
+                // An error (some servers' when the text changed meanwhile) keeps the last ones.
                 let previous = doc.semantic.last.take().map(|(_, data)| data);
                 let Some((result, data)) = value.and_then(|v| convert::token_data(&v, previous.as_deref())) else { return };
                 let tokens = convert::semantic_tokens(&data, &text, &legend);

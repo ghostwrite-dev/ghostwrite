@@ -1,0 +1,15 @@
+# A plugin that does what plugins shouldn't, for the tests.
+[package]
+name = "misbehaving"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ghostwrite-plugin-api = { path = "../../../plugin-api" }
+wit-bindgen = "0.57"
+
+[workspace]

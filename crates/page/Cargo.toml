@@ -1,0 +1,6 @@
+[package]
+name = "ghostwrite-page"
+description = "A document's pages, whoever lays them out: their sizes, and pages drawn."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

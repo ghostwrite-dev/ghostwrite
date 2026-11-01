@@ -8,18 +8,35 @@ use serde_json::Value;
 use crate::{Completion, Diagnostic, Severity};
 
 pub fn uri(path: &Path) -> String {
+    uri_of(&path.to_string_lossy(), cfg!(windows))
+}
+
+pub fn path_of(uri: &str) -> Option<PathBuf> {
+    path_in(uri, cfg!(windows)).map(PathBuf::from)
+}
+
+/// `path`'s URI: on Windows `C:\\a` is `file:///C:/a`, its drive's colon left as it is.
+fn uri_of(path: &str, windows: bool) -> String {
+    let path = if windows { format!("/{}", path.replace('\\', "/")) } else { path.to_string() };
     let mut out = String::from("file://");
-    for b in path.to_string_lossy().bytes() {
+    for b in path.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b':' if windows => out.push(':'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
     out
 }
 
-pub fn path_of(uri: &str) -> Option<PathBuf> {
-    Some(PathBuf::from(percent_decode(uri.strip_prefix("file://")?)))
+fn path_in(uri: &str, windows: bool) -> Option<String> {
+    let path = percent_decode(uri.strip_prefix("file://")?);
+    if !windows {
+        return Some(path);
+    }
+    // `/C:/a`, and servers write the drive's letter either way.
+    let bare = path.strip_prefix('/').unwrap_or(&path);
+    Some(bare.replace('/', "\\"))
 }
 
 pub fn percent_decode(s: &str) -> String {
@@ -42,27 +59,60 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Byte offset → LSP position (line, UTF-16 column).
-pub fn position(text: &str, offset: usize) -> lsp_types::Position {
-    let offset = offset.min(text.len());
-    let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
-    let line = text[..line_start].matches('\n').count();
-    let character: usize = text[line_start..offset].chars().map(char::len_utf16).sum();
-    lsp_types::Position::new(line as u32, character as u32)
+/// A text's lines, indexed once, to go between byte offsets and LSP
+/// positions (line, UTF-16 column) without reading the text from the start
+/// for each: the only place UTF-16 is counted.
+pub struct Lines<'a> {
+    text: &'a str,
+    starts: Vec<usize>,
 }
 
-/// LSP position → byte offset, clamped to the line.
-pub fn offset(text: &str, pos: lsp_types::Position) -> usize {
-    let line_start = if pos.line == 0 { 0 } else { text.match_indices('\n').nth(pos.line as usize - 1).map_or(text.len(), |(i, _)| i + 1) };
-    let line_end = text[line_start..].find('\n').map_or(text.len(), |i| line_start + i);
-    let mut units = 0;
-    for (i, c) in text[line_start..line_end].char_indices() {
-        if units >= pos.character as usize {
-            return line_start + i;
-        }
-        units += c.len_utf16();
+impl<'a> Lines<'a> {
+    pub fn new(text: &'a str) -> Self {
+        Self { text, starts: std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect() }
     }
-    line_end
+
+    /// Byte offset → position.
+    pub fn position(&self, offset: usize) -> lsp_types::Position {
+        let offset = offset.min(self.text.len());
+        let line = self.starts.partition_point(|&start| start <= offset) - 1;
+        let character: usize = self.text[self.starts[line]..offset].chars().map(char::len_utf16).sum();
+        lsp_types::Position::new(line as u32, character as u32)
+    }
+
+    /// Position → byte offset, clamped to the line (and the text).
+    pub fn offset(&self, pos: lsp_types::Position) -> usize {
+        self.at(pos.line as usize, pos.character)
+    }
+
+    /// UTF-16 column `column` of line `line`, as a byte offset.
+    fn at(&self, line: usize, column: u32) -> usize {
+        let Some(&start) = self.starts.get(line) else { return self.text.len() };
+        let end = self.starts.get(line + 1).map_or(self.text.len(), |next| next - 1);
+        let mut units = 0;
+        for (i, c) in self.text[start..end].char_indices() {
+            if units >= column as usize {
+                return start + i;
+            }
+            units += c.len_utf16();
+        }
+        end
+    }
+
+    pub fn range(&self, r: lsp_types::Range) -> std::ops::Range<usize> {
+        let (start, end) = (self.offset(r.start), self.offset(r.end));
+        start..end.max(start)
+    }
+}
+
+/// Byte offset → LSP position, once (for many, [`Lines`]).
+pub fn position(text: &str, offset: usize) -> lsp_types::Position {
+    Lines::new(text).position(offset)
+}
+
+/// LSP position → byte offset, clamped to the line, once (for many, [`Lines`]).
+pub fn offset(text: &str, pos: lsp_types::Position) -> usize {
+    Lines::new(text).offset(pos)
 }
 
 /// The token types we ask servers for, standard and common: what each colors as is [`token_scope`].
@@ -121,9 +171,7 @@ pub fn token_scope(kind: &str, builtin: bool) -> Option<&'static str> {
         "operator" => "operator",
         "decorator" | "attribute" => "attribute",
         "lifetime" => "label",
-        // Lean's: `sorry`, `admit`.
-        "leanSorryLike" => "constant.builtin",
-        _ => return None,
+        other => return registered_token(other),
     })
 }
 
@@ -151,20 +199,8 @@ pub fn token_data(value: &Value, previous: Option<&[u32]>) -> Option<(Option<Str
 /// and the scopes they show as (see [`token_scope`]), in order.
 pub fn semantic_tokens(data: &[u32], text: &str, (types, modifiers): &(Vec<String>, Vec<String>)) -> Vec<(std::ops::Range<usize>, &'static str)> {
     let builtin = modifiers.iter().position(|m| m == "defaultLibrary").map_or(0, |i| 1u32 << i);
-    let lines: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
-    // A UTF-16 column on a line, as a byte offset.
-    let at = |line: usize, column: u32| {
-        let start = lines.get(line).copied().unwrap_or(text.len());
-        let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
-        let mut units = 0;
-        for (i, c) in text[start..end].char_indices() {
-            if units >= column as usize {
-                return start + i;
-            }
-            units += c.len_utf16();
-        }
-        end
-    };
+    let lines = Lines::new(text);
+    let at = |line: usize, column: u32| lines.at(line, column);
     let (mut line, mut column) = (0, 0);
     let mut out = vec![];
     for token in data.chunks_exact(5) {
@@ -172,26 +208,27 @@ pub fn semantic_tokens(data: &[u32], text: &str, (types, modifiers): &(Vec<Strin
         if *delta_line > 0 {
             (line, column) = (line + *delta_line as usize, *delta_start);
         } else {
-            column += delta_start;
+            column = column.saturating_add(*delta_start);
         }
         let Some(scope) = types.get(*kind as usize).and_then(|kind| token_scope(kind, mods & builtin != 0)) else { continue };
         let start = at(line, column);
-        out.push((start..at(line, column + length).max(start), scope));
+        out.push((start..at(line, column.saturating_add(*length)).max(start), scope));
     }
     out
 }
 
+/// An LSP range → bytes, once (for many, [`Lines`]).
 pub fn range(text: &str, r: lsp_types::Range) -> std::ops::Range<usize> {
-    let (start, end) = (offset(text, r.start), offset(text, r.end));
-    start..end.max(start)
+    Lines::new(text).range(r)
 }
 
 pub fn diagnostics(text: &str, diagnostics: Vec<lsp_types::Diagnostic>) -> Vec<Diagnostic> {
     use lsp_types::DiagnosticSeverity as S;
+    let lines = Lines::new(text);
     let mut out: Vec<Diagnostic> = diagnostics
         .into_iter()
         .map(|d| Diagnostic {
-            range: range(text, d.range),
+            range: lines.range(d.range),
             severity: match d.severity {
                 Some(S::ERROR) | None => Severity::Error,
                 Some(S::WARNING) => Severity::Warning,
@@ -254,13 +291,14 @@ pub fn completions(value: Value, text: &str, offset: usize) -> Vec<Completion> {
     };
     let typed_from = word_start(text, offset);
     let typed = text[typed_from..offset].to_lowercase();
+    let lines = Lines::new(text);
     let mut out: Vec<(bool, String, Completion)> = items
         .into_iter()
         .filter_map(|item| {
-            let more = item.additional_text_edits.iter().flatten().map(|e| (range(text, e.range), e.new_text.clone())).collect();
+            let more = item.additional_text_edits.iter().flatten().map(|e| (lines.range(e.range), e.new_text.clone())).collect();
             let (range, new_text) = match item.text_edit {
-                Some(lsp_types::CompletionTextEdit::Edit(edit)) => (range(text, edit.range), edit.new_text),
-                Some(lsp_types::CompletionTextEdit::InsertAndReplace(edit)) => (range(text, edit.replace), edit.new_text),
+                Some(lsp_types::CompletionTextEdit::Edit(edit)) => (lines.range(edit.range), edit.new_text),
+                Some(lsp_types::CompletionTextEdit::InsertAndReplace(edit)) => (lines.range(edit.replace), edit.new_text),
                 None => (typed_from..offset, item.insert_text.clone().unwrap_or_else(|| item.label.clone())),
             };
             let key = item.filter_text.as_deref().unwrap_or(&item.label).to_lowercase();
@@ -288,7 +326,8 @@ pub fn text_edits(value: &Value) -> Vec<crate::TextEdit> {
 /// `edits` made to `text` (each in the text as it was, as the protocol has
 /// them): from the last, so each one's place is still where it was.
 pub fn apply(text: &str, edits: &[crate::TextEdit]) -> Vec<(std::ops::Range<usize>, String)> {
-    let mut placed: Vec<(std::ops::Range<usize>, String)> = edits.iter().map(|(r, t)| (range(text, *r), t.clone())).collect();
+    let lines = Lines::new(text);
+    let mut placed: Vec<(std::ops::Range<usize>, String)> = edits.iter().map(|(r, t)| (lines.range(*r), t.clone())).collect();
     placed.sort_by_key(|(r, _)| std::cmp::Reverse((r.start, r.end)));
     placed
 }
@@ -416,6 +455,18 @@ pub fn signature(value: &Value) -> Option<(String, Option<std::ops::Range<usize>
     Some((label, range))
 }
 
+/// Kinds of token plugins' servers name, and the scope each shows as.
+static TOKENS: std::sync::RwLock<Vec<(&'static str, &'static str)>> = std::sync::RwLock::new(Vec::new());
+
+/// Say what a kind of token a plugin's server names shows as.
+pub fn register_token(token: &'static str, scope: &'static str) {
+    TOKENS.write().unwrap_or_else(|e| e.into_inner()).push((token, scope));
+}
+
+fn registered_token(token: &str) -> Option<&'static str> {
+    TOKENS.read().unwrap_or_else(|e| e.into_inner()).iter().find(|(name, _)| *name == token).map(|(_, scope)| *scope)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +519,14 @@ mod tests {
         assert_eq!(offset(text, lsp_types::Position::new(1, 3)), x);
         assert_eq!(offset(text, lsp_types::Position::new(1, 99)), text.len() - 1, "clamped to the line");
         assert_eq!(offset(text, lsp_types::Position::new(0, 1)), 1);
+    }
+
+    #[test]
+    fn uris_are_written_for_windows_too() {
+        let path = r"C:\Users\me\my dir\a#b.rs";
+        assert_eq!(uri_of(path, true), "file:///C:/Users/me/my%20dir/a%23b.rs");
+        assert_eq!(path_in(&uri_of(path, true), true).as_deref(), Some(path));
+        assert_eq!(path_in("file:///c%3A/Users/a.rs", true).as_deref(), Some(r"c:\Users\a.rs"), "as a server may write it");
     }
 
     #[test]

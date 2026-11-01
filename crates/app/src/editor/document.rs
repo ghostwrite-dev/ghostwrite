@@ -1,7 +1,8 @@
 //! One open file: its buffer, where it lives on disk, its language and
-//! highlights, its language server, its preview (Typst) or goals (Lean). How it's shown (selection, scroll)
-//! is its tab's [`View`](super::tabs::View). A PDF is its text, read-only,
-//! and where that text is on its pages.
+//! highlights, its language server, and what's beside it (see
+//! [`super::aside`]). How it's shown (selection, scroll) is its tab's
+//! [`View`](super::tabs::View). A file that's only pages is a line for each, read-only, and where
+//! that text is on its pages.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,7 +15,22 @@ use ghostwrite_lsp::Diagnostic;
 use ghostwrite_project::fs::{Stamp, denormalize, normalize};
 use gpui::SharedString;
 
+use super::aside::Aside;
+use super::rendered::Rendered;
+
 pub type DocId = usize;
+
+/// Where a file differs from what git has: worked out off the UI thread as it changes.
+#[derive(Default)]
+pub struct GitChanges {
+    /// The file as git has it, once it's been asked for.
+    pub base: Option<Arc<str>>,
+    pub asked: bool,
+    pub making: bool,
+    /// The buffer version the changes are of.
+    pub made: Option<u64>,
+    pub changes: Vec<ghostwrite_project::git::Change>,
+}
 
 /// `path` opened on its language's server, if one is installed.
 pub fn server_for(servers: &mut ghostwrite_lsp::Registry, path: &Path, text: &str) -> Option<ghostwrite_lsp::Document> {
@@ -38,16 +54,21 @@ pub struct Document {
     pub conflict: bool,
     /// The file has `\r\n` line endings: the buffer has `\n`, and they're put back on save.
     pub crlf: bool,
-    /// A Typst file's pages, compiled as it's typed.
-    pub preview: Option<super::preview::Preview>,
-    /// A Lean file's goals at the cursor, as its server says.
-    pub goals: Option<super::goals::Goals>,
+    /// How the file is stored, to be written back the same way.
+    pub encoding: ghostwrite_project::fs::Encoding,
+    /// Where it differs from what git has.
+    pub git: GitChanges,
+    /// What's beside it, if anything, made once it's first shown.
+    pub aside: Option<Aside>,
+    /// Its pages, if it has any, made once they're first asked for.
+    pub rendered: Option<Rendered>,
     /// Its server's colors, laid over the grammar's.
     pub semantic: super::semantic::Semantic,
     pub lsp: Option<ghostwrite_lsp::Document>,
     pub diagnostics: Vec<Diagnostic>,
-    /// A PDF's pages and where its text is on them. Its text can't change.
-    pub pdf: Option<Arc<ghostwrite_pdf::Pdf>>,
+    /// A tab that shows another document (its pages): which, and it's called this.
+    /// It has no text of its own, and it goes when that document does.
+    pub view_of: Option<(DocId, String)>,
     /// The buffer version the language server (and `dirty`) last saw.
     synced: u64,
     /// The colors shown, for a version of the text.
@@ -67,6 +88,8 @@ impl Document {
             disk: path.as_deref().and_then(Stamp::of),
             conflict: false,
             crlf,
+            encoding: Default::default(),
+            git: Default::default(),
             id,
             indent: IndentUnit::detect(buffer.text()),
             language: path.as_deref().and_then(Language::for_path),
@@ -74,26 +97,53 @@ impl Document {
             buffer,
             path,
             dirty: false,
-            preview: None,
-            goals: None,
+            aside: None,
+            rendered: None,
             semantic: Default::default(),
             lsp,
             diagnostics: vec![],
-            pdf: None,
+            view_of: None,
             highlights: (u64::MAX, vec![]),
             grammar: (u64::MAX, Arc::from(""), vec![]),
             highlighting: false,
         }
     }
 
-    /// A PDF at `path`, as its text.
-    pub fn pdf(id: DocId, path: PathBuf, pdf: ghostwrite_pdf::Pdf) -> Self {
-        let mut doc = Self::new(id, Some(path), pdf.text.clone(), None);
-        doc.pdf = Some(Arc::new(pdf));
+    /// A tab called `name` showing the document `of`.
+    pub fn view(id: DocId, of: DocId, name: String) -> Self {
+        let mut doc = Self::new(id, None, String::new(), None);
+        doc.view_of = Some((of, name));
         doc
     }
 
+    pub fn is_view_of(&self, of: DocId) -> bool {
+        self.view_of.as_ref().is_some_and(|(file, _)| *file == of)
+    }
+
+    /// The text its pages are what it comes from, if they are.
+    fn fixed_text(&self) -> Option<&str> {
+        self.rendered.as_ref()?.pages.as_ref()?.text()
+    }
+
+    /// Whether its pages are its text, so that's what its tab shows.
+    pub fn pages_are_the_text(&self) -> bool {
+        self.is_only_pages() || self.fixed_text().is_some()
+    }
+
+    /// Whether it isn't text at all: it's the pages a plugin makes of it.
+    pub fn is_only_pages(&self) -> bool {
+        self.language.is_some_and(|language| language.only_pages)
+    }
+
+    /// Whether it can't be edited: its text is what its pages say, or it has none.
+    pub fn read_only(&self) -> bool {
+        self.pages_are_the_text() || self.view_of.is_some()
+    }
+
     pub fn name(&self) -> SharedString {
+        if let Some((_, name)) = &self.view_of {
+            return name.clone().into();
+        }
         self.path.as_deref().and_then(Path::file_name).map_or("untitled".into(), |n| n.to_string_lossy().into_owned().into())
     }
 
@@ -112,7 +162,7 @@ impl Document {
 
     /// An untitled, unedited buffer, which opening a file may take over.
     pub fn is_pristine(&self) -> bool {
-        self.path.is_none() && !self.dirty && self.buffer.is_empty()
+        self.path.is_none() && !self.dirty && self.buffer.is_empty() && self.view_of.is_none()
     }
 
     /// After the buffer changed: mark it dirty and tell the language server.
@@ -120,14 +170,22 @@ impl Document {
         if self.buffer.version() == self.synced {
             return;
         }
-        // Every edit comes through here; a PDF's are undone.
-        if let Some(pdf) = &self.pdf {
-            self.buffer.reset(pdf.text.clone());
+        // Every edit comes through here; those of what can't change are undone.
+        if self.read_only() {
+            let text = self.fixed_text().unwrap_or_default().to_string();
+            self.buffer.reset(text);
             self.synced = self.buffer.version();
             return;
         }
         self.synced = self.buffer.version();
         self.dirty = true;
+        // Diagnostics are of the text the server last saw: until it sends new
+        // ones, kept in the text and on char boundaries, so they can be drawn.
+        let text = self.buffer.text();
+        for d in &mut self.diagnostics {
+            let snap = |at: usize| text.floor_char_boundary(at.min(text.len()));
+            d.range = snap(d.range.start)..snap(d.range.end).max(snap(d.range.start));
+        }
         let edits = self.buffer.take_edits();
         if let Some(lsp) = &mut self.lsp {
             lsp.changed(self.buffer.text(), edits);
@@ -146,7 +204,7 @@ impl Document {
     pub fn refresh_highlights(&mut self) -> Option<(&'static Language, u64, Arc<str>)> {
         let version = self.buffer.version();
         let job = (self.grammar.0 != version && !self.highlighting)
-            .then(|| self.language.filter(|_| self.pdf.is_none()))
+            .then(|| self.language.filter(|_| !self.read_only()))
             .flatten()
             .map(|language| (language, version, Arc::<str>::from(self.buffer.text())));
         self.highlighting |= job.is_some();
@@ -188,8 +246,8 @@ impl Document {
     /// [`Document::moved`] there. Unless `force`d, it won't write over a
     /// file another program changed since it was read, or over another file.
     pub fn save(&mut self, path: &Path, force: bool) -> Result<(), String> {
-        if self.pdf.is_some() {
-            return Err("a PDF is read-only".into());
+        if self.read_only() {
+            return Err("this is read-only".into());
         }
         let ours = self.path.as_deref() == Some(path);
         if !force && ours && self.changed_on_disk() {
@@ -198,7 +256,8 @@ impl Document {
         if !force && !ours && path.exists() {
             return Err(format!("{} already exists (:w! writes over it)", path.display()));
         }
-        ghostwrite_project::fs::write_atomic(path, denormalize(self.buffer.text(), self.crlf).as_bytes()).map_err(|e| e.to_string())?;
+        let bytes = self.encoding.encode(&denormalize(self.buffer.text(), self.crlf))?;
+        ghostwrite_project::fs::write_atomic(path, &bytes).map_err(|e| e.to_string())?;
         if ours {
             (self.disk, self.conflict) = (Stamp::of(path), false);
         }
@@ -216,8 +275,11 @@ impl Document {
         self.language = Language::for_path(&path);
         self.highlights.0 = u64::MAX;
         (self.grammar, self.highlighting) = ((u64::MAX, Arc::from(""), vec![]), false);
-        self.preview = None;
-        self.goals = None;
+        self.aside = None;
+        // Made from where it was.
+        if !self.pages_are_the_text() {
+            self.rendered = None;
+        }
         self.semantic = Default::default();
         self.lsp = None;
         self.diagnostics.clear();
@@ -231,7 +293,7 @@ impl Document {
     pub fn restart_server(&mut self, path: Option<&Path>, servers: &mut ghostwrite_lsp::Registry) {
         self.lsp = None;
         self.semantic = Default::default();
-        self.goals = None;
+        self.aside = None;
         // It's opened with the text as it is: the edits before are no news.
         self.buffer.take_edits();
         self.lsp = path.and_then(|path| server_for(servers, path, self.buffer.text()));

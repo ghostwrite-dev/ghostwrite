@@ -1,38 +1,56 @@
 //! The languages Ghostwrite knows, one entry each: which files are in it,
-//! how it's highlighted (see [`syntax`](crate::syntax)), and which language
-//! servers can serve it. Adding a language means adding an entry here.
+//! how it's highlighted (see [`syntax`](crate::syntax)), which language
+//! servers can serve it, and what's particular about editing it. Adding a
+//! language means adding an entry here, or a plugin registering one; nothing
+//! else asks a language's name.
 
 use std::path::Path;
+use std::sync::RwLock;
 
-use crate::syntax::{Highlights, highlights, with_injections};
+use crate::abbreviation::Abbreviations;
+use crate::syntax::{Highlights, Span, highlights, with_injections};
+
+/// Highlights a file by whatever means it has (a grammar a plugin brought, say).
+pub type Highlighter = dyn Fn(&str) -> Vec<Span> + Send + Sync;
 
 /// Spans of text and their scopes' names.
-pub(crate) type Lex = fn(&str) -> Vec<(std::ops::Range<usize>, &'static str)>;
+pub type Lex = fn(&str) -> Vec<(std::ops::Range<usize>, &'static str)>;
 
 pub struct Language {
     /// What the status line and Claude call it.
     pub name: &'static str,
     /// Its LSP language id, when that isn't `name`.
-    id: &'static str,
-    pub(crate) extensions: &'static [&'static str],
-    file_names: &'static [&'static str],
+    pub id: &'static str,
+    pub extensions: &'static [&'static str],
+    pub file_names: &'static [&'static str],
     /// The language servers that can serve it, most preferred first, by
     /// their names in `ghostwrite_lsp`'s registry.
     pub servers: &'static [&'static str],
     /// The grammar and its highlight query, compiled.
-    pub(crate) load: fn() -> Option<Highlights>,
+    pub load: fn() -> Option<Highlights>,
     /// Highlights without a grammar.
-    pub(crate) lex: Option<Lex>,
-    /// Whether `\alpha` types `α` (see [`crate::abbreviation`]).
-    pub abbreviations: bool,
-    /// Quotes that don't close themselves here (Lean's `` `name ``).
+    pub lex: Option<Lex>,
+    /// Highlights that aren't the editor's to work out.
+    pub highlighter: Option<&'static Highlighter>,
+    /// Its files aren't text: what shows is the pages a plugin makes of them.
+    pub only_pages: bool,
+    /// Those pages aren't shown bigger than they are.
+    pub pages_at_own_size: bool,
+    /// What a backslash starts typing (`\alpha` is `α`), if anything.
+    pub abbreviations: Option<&'static Abbreviations>,
+    /// Quotes that don't close themselves here (a name quoted with `` ` ``, say).
     pub unpaired: &'static [char],
     /// What starts a line comment (`ctrl-c`), if there's such a thing.
     pub comment: Option<&'static str>,
+    /// What a line ends with when the next one goes in a level (Python's `:`).
+    pub indent_after: &'static [char],
 }
 
+/// Languages plugins added.
+static REGISTERED: RwLock<Vec<&'static Language>> = RwLock::new(Vec::new());
+
 impl Language {
-    const DEFAULT: Language = Language {
+    pub const DEFAULT: Language = Language {
         name: "",
         id: "",
         extensions: &[],
@@ -40,16 +58,35 @@ impl Language {
         servers: &[],
         load: || None,
         lex: None,
-        abbreviations: false,
+        highlighter: None,
+        only_pages: false,
+        pages_at_own_size: false,
+        abbreviations: None,
         unpaired: &[],
         comment: None,
+        indent_after: &['{', '[', '('],
     };
 
     /// The language of `path`, by its name or extension.
     pub fn for_path(path: &Path) -> Option<&'static Language> {
         let name = path.file_name()?.to_str()?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-        LANGUAGES.iter().find(|l| l.file_names.contains(&name) || l.extensions.contains(&ext))
+        Self::all().into_iter().find(|l| l.file_names.contains(&name) || l.extensions.contains(&ext))
+    }
+
+    /// Add a language a plugin knows.
+    pub fn register(language: &'static Language) {
+        REGISTERED.write().unwrap_or_else(|e| e.into_inner()).push(language);
+    }
+
+    /// A language a plugin knew is gone: new files aren't in it (those open keep it).
+    pub fn unregister(language: &'static Language) {
+        REGISTERED.write().unwrap_or_else(|e| e.into_inner()).retain(|known| !std::ptr::eq(*known, language));
+    }
+
+    /// Every language.
+    pub fn all() -> Vec<&'static Language> {
+        LANGUAGES.iter().chain(REGISTERED.read().unwrap_or_else(|e| e.into_inner()).iter().copied()).collect()
     }
 
     /// Its LSP language id.
@@ -64,10 +101,9 @@ impl std::fmt::Debug for Language {
     }
 }
 
-const PYTHON_SERVERS: &[&str] = &["basedpyright", "pyright", "pylsp"];
 const TYPESCRIPT_SERVERS: &[&str] = &["typescript-language-server"];
 
-pub static LANGUAGES: [Language; 17] = [
+pub static LANGUAGES: [Language; 15] = [
     Language {
         name: "rust",
         comment: Some("//"),
@@ -82,7 +118,8 @@ pub static LANGUAGES: [Language; 17] = [
         name: "python",
         comment: Some("#"),
         extensions: &["py", "pyi"],
-        servers: PYTHON_SERVERS,
+        servers: &["basedpyright", "pyright", "pylsp"],
+        indent_after: &['{', '[', '(', ':'],
         load: || highlights("python", tree_sitter_python::LANGUAGE, tree_sitter_python::HIGHLIGHTS_QUERY),
         ..Language::DEFAULT
     },
@@ -206,26 +243,6 @@ pub static LANGUAGES: [Language; 17] = [
         load: || highlights("css", tree_sitter_css::LANGUAGE, tree_sitter_css::HIGHLIGHTS_QUERY),
         ..Language::DEFAULT
     },
-    Language {
-        name: "typst",
-        comment: Some("//"),
-        extensions: &["typ"],
-        servers: &["tinymist"],
-        // The crate doesn't export its query; this is its queries/typst/highlights.scm.
-        load: || highlights("typst", codebook_tree_sitter_typst::LANGUAGE, include_str!("../queries/typst/highlights.scm")),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "lean",
-        comment: Some("--"),
-        extensions: &["lean"],
-        servers: &["lean"],
-        // No tree-sitter grammar for Lean fits; it's lexed, as its VS Code extension does.
-        lex: Some(crate::lean::highlight),
-        abbreviations: true,
-        unpaired: &['`'],
-        ..Language::DEFAULT
-    },
 ];
 
 #[cfg(test)]
@@ -237,8 +254,6 @@ mod tests {
         let id = |path: &str| Language::for_path(Path::new(path)).map(Language::id);
         assert_eq!(id("src/main.rs"), Some("rust"));
         assert_eq!(id("App.tsx"), Some("typescriptreact"));
-        assert_eq!(id("paper.typ"), Some("typst"));
-        assert_eq!(id("Basic.lean"), Some("lean"));
         assert_eq!(id("Cargo.lock"), Some("toml"));
         assert_eq!(id("notes.txt"), None);
     }

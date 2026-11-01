@@ -12,18 +12,17 @@
 //! and it's entered and left like the review modes, so a story under
 //! review is still there to go back to.
 //!
-//! Two modes are for reviewing: AI mode while a Claude story is up, and tour
-//! mode while a tour is (`:output` errors, diagnostics, search matches). Tab,
-//! Shift+Tab, Backspace, Enter and Esc become [`Review`] keys; you can move
-//! around to look, but not edit. They're entered over another mode with
-//! [`Modal::enter`] and [`Modal::leave`] goes back to it, so asking Claude
-//! about a tour's error goes normal → tour → AI and back again.
+//! AI mode is for reviewing a story: Claude's, or one of the editor's
+//! stops (`:output` errors, diagnostics, search matches). Tab, Enter and Esc
+//! become [`Review`] keys; you can move around to look, but not edit. It's
+//! entered over another mode with [`Modal::enter`], and [`Modal::leave`]
+//! goes back to it.
 //!
 //! While the completion menu is open, [`Modal::menu_key`] has first say.
 //!
 //! The modes live in their own files: `normal` (normal and select mode, and
-//! the motions AI and tour mode share), `insert` (with the completion menu's
-//! keys), and `tree`.
+//! the motions AI mode shares), `insert` (with the completion menu's keys),
+//! and `tree`.
 
 mod insert;
 mod normal;
@@ -32,6 +31,7 @@ mod tree;
 #[cfg(test)]
 mod tests;
 
+use crate::abbreviation::Abbreviations;
 use crate::buffer::Buffer;
 use crate::indent::IndentUnit;
 use crate::language::Language;
@@ -94,9 +94,19 @@ pub enum Key {
 /// What the editor around the buffer should do after a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
+    /// `ctrl-w v`: a second pane beside this one.
+    SplitRight,
+    /// `ctrl-w w`: the keys go to the other pane.
+    OtherPane,
+    /// `ctrl-w q`: only this pane.
+    CloseSplit,
     /// `gn` / `gp`
-    NextBuffer,
-    PrevBuffer,
+    /// `gn`, `gp`: so many tabs along, round the ends (`4gn`).
+    NextBuffer(usize),
+    PrevBuffer(usize),
+    /// `gN`, `gP`: move the tab so many places along, as far as there are (`4gN`).
+    MoveBufferNext(usize),
+    MoveBufferPrev(usize),
     /// `space e`: tree mode has begun; show the tree.
     FocusTree,
     /// `:`
@@ -149,7 +159,7 @@ pub enum Effect {
     /// `space t`: the terminal, and terminal mode.
     Terminal,
     /// `space j`: go to the next error in the file (or warning, if it has
-    /// no errors), and bring a Typst file's pages there.
+    /// no errors), and bring a file's pages there.
     NextProblem,
 }
 
@@ -224,13 +234,18 @@ pub struct Target<'a> {
     /// Rows on screen, for paging.
     pub page_rows: usize,
     /// The buffer's language: whether `\alpha` types `α` (see
-    /// [`crate::abbreviation`]), and which quotes close themselves.
+    /// [`crate::abbreviation`]), which quotes close themselves, and so on.
     pub language: Option<&'static Language>,
 }
 
 impl Target<'_> {
-    fn abbreviations(&self) -> bool {
-        self.language.is_some_and(|l| l.abbreviations)
+    fn abbreviations(&self) -> Option<&'static Abbreviations> {
+        self.language.and_then(|l| l.abbreviations)
+    }
+
+    /// Whether `c` closes itself when typed here.
+    fn pairs(&self, c: char) -> bool {
+        !self.language.is_some_and(|l| l.unpaired.contains(&c))
     }
 }
 
@@ -248,6 +263,8 @@ pub trait Registers {
 enum Pending {
     Goto,
     Space,
+    /// `ctrl-w`, then: `v` `w` `q`, as in helix.
+    Pane,
     Find {
         forward: bool,
         till: bool,
@@ -270,10 +287,10 @@ enum Pending {
     Next(bool),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Modal {
     pub mode: Mode,
-    /// The modes AI and tour mode were entered from, innermost last.
+    /// The modes AI and terminal mode were entered from, innermost last.
     entered_from: Vec<Mode>,
     pending: Option<Pending>,
     count: Option<usize>,
@@ -308,9 +325,17 @@ impl Modal {
     /// Keys typed so far toward a command, for the status line.
     pub fn pending_label(&self) -> String {
         let count = self.count.map(|c| c.to_string()).unwrap_or_default();
-        let pending = match self.pending {
+        let pending = self.pending_keys();
+        let register = self.register.map(|r| format!("\"{r}")).unwrap_or_default();
+        format!("{register}{count}{pending}")
+    }
+
+    /// The command started, if one is: `space`, `g`.
+    pub fn pending_keys(&self) -> &'static str {
+        match self.pending {
             Some(Pending::Goto) => "g",
             Some(Pending::Space) => "space",
+            Some(Pending::Pane) => "ctrl-w",
             Some(Pending::Find { forward: true, till: false }) => "f",
             Some(Pending::Find { forward: true, till: true }) => "t",
             Some(Pending::Find { forward: false, till: false }) => "F",
@@ -328,9 +353,12 @@ impl Modal {
             Some(Pending::Next(true)) => "]",
             Some(Pending::Next(false)) => "[",
             None => "",
-        };
-        let register = self.register.map(|r| format!("\"{r}")).unwrap_or_default();
-        format!("{register}{count}{pending}")
+        }
+    }
+
+    /// Forget the command started, and its count.
+    pub fn cancel_pending(&mut self) {
+        (self.pending, self.count) = (None, None);
     }
 
     /// Back to normal mode, closing an insert session as one undo step.
@@ -353,7 +381,7 @@ impl Modal {
         if self.mode != Mode::Insert {
             return false;
         }
-        if t.abbreviations() {
+        if t.abbreviations().is_some() {
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
                 (Some(c), None) if t.selection.is_empty() && self.abbreviate(c, t) => return true,
@@ -372,7 +400,7 @@ impl Modal {
                 *t.selection = Range::point(range.start + c.len_utf8());
                 return true;
             }
-            if let Some(close) = insert::paired(c, before, after).filter(|_| !t.language.is_some_and(|l| l.unpaired.contains(&c))) {
+            if let Some(close) = insert::paired(c, before, after).filter(|_| t.pairs(c)) {
                 t.buffer.begin(*t.selection);
                 t.buffer.edit(range.clone(), &format!("{c}{close}"));
                 *t.selection = Range::point(range.start + c.len_utf8());
@@ -399,7 +427,7 @@ impl Modal {
         true
     }
 
-    /// Enter AI, tour or terminal mode over the current one (an insert session should
+    /// Enter AI or terminal mode over the current one (an insert session should
     /// be closed first). Entering the mode you're in changes nothing.
     pub fn enter(&mut self, mode: Mode) {
         if self.mode == mode {
@@ -412,7 +440,7 @@ impl Modal {
         self.count = None;
     }
 
-    /// Leave AI, tour or terminal mode for the mode it was entered from. If it isn't
+    /// Leave AI or terminal mode for the mode it was entered from. If it isn't
     /// the current mode but one further down, it's dropped from under it.
     pub fn leave(&mut self, mode: Mode) {
         if self.mode == mode {
@@ -430,13 +458,13 @@ impl Modal {
         std::mem::take(&mut self.refused)
     }
 
-    /// The mode the current one was entered from (AI and tour mode).
+    /// The mode AI mode was entered from.
     pub fn entered_from(&self) -> Option<Mode> {
         self.entered_from.last().copied().filter(|_| self.mode.reviewing())
     }
 
-    /// A key for the buffer, in normal, select or insert mode (or AI and
-    /// tour mode, which review it).
+    /// A key for the buffer, in normal, select or insert mode (or AI mode,
+    /// which reviews it).
     pub fn key(&mut self, key: Key, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
         if self.mode == Mode::Tree {
             return self.tree_key(key);
@@ -460,9 +488,6 @@ impl Modal {
         if self.mode == Mode::Insert {
             return self.insert_key(key, t);
         }
-        if matches!(key, Key::Ctrl(c) if !matches!(c, 'd' | 'u' | 'f' | 'b' | 'o' | 'i' | 'a' | 'x' | 'c')) {
-            return Outcome::Ignored;
-        }
         t.buffer.begin(*t.selection);
         let outcome = self.normal_key(key, regs, t);
         if self.mode != Mode::Insert {
@@ -481,6 +506,18 @@ impl Modal {
 
 /// The largest count: more is taken as this (`99999999999p` doesn't run out of memory).
 const MAX_COUNT: usize = 100_000;
+
+impl Modal {
+    /// A digit of a count (`10j`), taken if it is one: `0` only goes on one.
+    fn count_digit(&mut self, key: Key) -> bool {
+        let Key::Char(c @ '0'..='9') = key else { return false };
+        if c == '0' && self.count.is_none() {
+            return false;
+        }
+        self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(c as usize - '0' as usize).min(MAX_COUNT));
+        true
+    }
+}
 
 /// What a key does in AI mode, if it's a review key.
 fn review_of(key: Key) -> Option<Review> {

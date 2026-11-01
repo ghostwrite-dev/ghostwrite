@@ -291,7 +291,7 @@ impl Editor {
     /// After typing: the signature of the call being typed, after `(` or `,`
     /// (as the server says); gone after `)`.
     pub(super) fn signature_after_typing(&mut self, typed: &str, cx: &mut Context<Self>) {
-        let Some(tab) = self.tab() else { return };
+        let Some(tab) = self.project.tabs.active() else { return };
         let Some(lsp) = tab.doc.lsp.as_ref().filter(|l| l.supports("signatureHelpProvider")) else { return };
         if typed.ends_with(')') {
             self.signature = None;
@@ -300,10 +300,13 @@ impl Editor {
         if !lsp.signature_triggers().iter().any(|t| typed.ends_with(t.as_str())) && self.signature.is_none() {
             return;
         }
-        let answer = lsp.ask("textDocument/signatureHelp", tab.doc.text(), tab.view.selection.head);
+        let (answer, asked) = self.signature_asked.ask(lsp, "textDocument/signatureHelp", tab.doc.text(), tab.view.selection.head);
         cx.spawn(async move |this, cx| {
             let found = answer.await.ok().and_then(Result::ok).and_then(|v| convert::signature(&v));
             this.update(cx, |this, cx| {
+                if !this.signature_asked.answered(asked) {
+                    return;
+                }
                 this.signature = found.filter(|_| this.modal.mode == ghostwrite_core::Mode::Insert).map(|(label, active)| Signature { label, active });
                 cx.notify();
             })
@@ -317,7 +320,11 @@ impl Editor {
         let signature = self.signature.as_ref().filter(|_| self.modal.mode == ghostwrite_core::Mode::Insert)?;
         let cursor = self.measured.cursor?;
         let label = &signature.label;
-        let (before, active, after) = match signature.active.clone().filter(|r| r.end <= label.len()) {
+        let (before, active, after) = match signature
+            .active
+            .clone()
+            .filter(|r| r.start <= r.end && r.end <= label.len() && label.is_char_boundary(r.start) && label.is_char_boundary(r.end))
+        {
             Some(r) => (&label[..r.start], &label[r.clone()], &label[r.end..]),
             None => (label.as_str(), "", ""),
         };

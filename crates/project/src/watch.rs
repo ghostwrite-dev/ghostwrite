@@ -20,7 +20,7 @@ pub struct Watcher {
 /// Changes inside `.git` are left out.
 pub fn watch(root: &Path, changed: impl Fn(Vec<PathBuf>) + Send + 'static) -> notify_debouncer_mini::notify::Result<Watcher> {
     // The platform reports real paths (`/private/var/…` for `/var/…`).
-    let real = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let real = crate::platform::real(root).unwrap_or_else(|_| root.to_path_buf());
     let spelled = root.to_path_buf();
     let mut debouncer = new_debouncer(SETTLE, move |result: DebounceEventResult| {
         let Ok(events) = result else { return };

@@ -4,11 +4,12 @@
 //! between; typing the closing one steps over it; Backspace between an empty
 //! pair takes both; Enter between brackets opens an indented line.
 //!
-//! In Lean, a backslash starts an abbreviation that becomes a symbol as
-//! it's typed (`\to` → `→`, see [`crate::abbreviation`]).
+//! In a language with abbreviations, a backslash starts one that
+//! becomes a symbol as it's typed (`\to` → `→`, see [`crate::abbreviation`]).
 
 use super::{Key, MenuKey, Modal, Outcome, Target};
 use crate::abbreviation;
+use crate::language::Language;
 use crate::movement;
 use crate::selection::Range;
 
@@ -62,15 +63,16 @@ impl Modal {
     /// (which, once no longer one starts with it, becomes its symbol);
     /// otherwise that one's finished, and a backslash starts another.
     pub(super) fn abbreviate(&mut self, c: char, t: &mut Target) -> bool {
+        let Some(table) = t.abbreviations() else { return false };
         if let Some(start) = self.abbreviation_start(t) {
             let at = t.selection.head;
             let typed = format!("{}{c}", &t.buffer.text()[start + 1..at]);
-            if abbreviation::extends(&typed) {
+            if table.extends(&typed) {
                 t.buffer.begin(*t.selection);
                 t.buffer.edit(at..at, c.encode_utf8(&mut [0; 4]));
                 *t.selection = Range::point(at + c.len_utf8());
                 self.abbreviating = Some((start, at + c.len_utf8()));
-                if let Some(symbol) = abbreviation::eager(&typed) {
+                if let Some(symbol) = table.eager(&typed) {
                     self.replace_abbreviation(symbol, t);
                 }
                 return true;
@@ -91,7 +93,8 @@ impl Modal {
     /// Turn the abbreviation being typed into its symbol, if it stands for
     /// one, and stop typing it. `true` if it changed.
     pub(super) fn finish_abbreviation(&mut self, t: &mut Target) -> bool {
-        let symbol = self.abbreviation_start(t).and_then(|start| abbreviation::finished(&t.buffer.text()[start + 1..t.selection.head]));
+        let table = t.abbreviations();
+        let symbol = self.abbreviation_start(t).zip(table).and_then(|(start, table)| table.finished(&t.buffer.text()[start + 1..t.selection.head]));
         match symbol {
             Some(symbol) => self.replace_abbreviation(symbol, t),
             None => self.abbreviating = None,
@@ -121,7 +124,7 @@ impl Modal {
     pub(super) fn insert_key(&mut self, key: Key, t: &mut Target) -> Outcome {
         // A named key but Backspace finishes an abbreviation; Tab only that.
         // (Chars arrive as text, through `insert`.)
-        if t.abbreviations() && !matches!(key, Key::Backspace | Key::Char(_)) && self.finish_abbreviation(t) && key == Key::Tab {
+        if t.abbreviations().is_some() && !matches!(key, Key::Backspace | Key::Char(_)) && self.finish_abbreviation(t) && key == Key::Tab {
             return Outcome::Handled;
         }
         let text = t.buffer.text();
@@ -143,8 +146,7 @@ impl Modal {
                         // opening bracket (or Python's `:`) the new one goes in a level.
                         let start = t.buffer.line_start_at(at);
                         let kept = text[start..at].trim_end_matches([' ', '\t']).len() + start;
-                        let opens =
-                            text[start..kept].ends_with(['{', '[', '(']) || text[start..kept].ends_with(':') && t.language.is_some_and(|l| l.name == "python");
+                        let opens = text[start..kept].ends_with(t.language.map_or(Language::DEFAULT.indent_after, |l| l.indent_after));
                         let deeper = if opens { t.indent.as_str() } else { String::new() };
                         t.buffer.begin(*t.selection);
                         t.buffer.edit(kept..at, &format!("\n{indent}{deeper}"));

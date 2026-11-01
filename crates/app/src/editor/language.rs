@@ -12,6 +12,51 @@ use crate::theme::{Theme, pt};
 
 const MENU_ROWS: usize = 10;
 
+/// Questions to a server where only the latest answer counts (completions,
+/// the signature, a panel's): a newer question cancels the ones still
+/// out, and an older one's answer, if it comes anyway, is dropped.
+#[derive(Default)]
+pub(super) struct Latest {
+    asked: u64,
+    /// The questions still out, to cancel.
+    pending: Vec<i64>,
+}
+
+impl Latest {
+    /// Ask `method` about `offset` in `text`, cancelling what's still out:
+    /// the answer, and the question's number, to check it's still the latest.
+    pub(super) fn ask(&mut self, lsp: &ghostwrite_lsp::Document, method: &str, text: &str, offset: usize) -> (ghostwrite_lsp::document::Answer, u64) {
+        self.cancel(lsp);
+        self.asked += 1;
+        let (id, answer) = lsp.ask_cancelable(method, text, offset);
+        self.pending.push(id);
+        (answer, self.asked)
+    }
+
+    /// Another question with the latest (asked together, both answers wanted).
+    pub(super) fn also(&mut self, lsp: &ghostwrite_lsp::Document, method: &str, text: &str, offset: usize) -> ghostwrite_lsp::document::Answer {
+        let (id, answer) = lsp.ask_cancelable(method, text, offset);
+        self.pending.push(id);
+        answer
+    }
+
+    /// Whether question `n`'s answer is the one wanted; if it is, nothing's out.
+    pub(super) fn answered(&mut self, n: u64) -> bool {
+        let latest = n == self.asked;
+        if latest {
+            self.pending.clear();
+        }
+        latest
+    }
+
+    /// Cancel what's still out: its answers aren't wanted.
+    pub(super) fn cancel(&mut self, lsp: &ghostwrite_lsp::Document) {
+        for id in self.pending.drain(..) {
+            lsp.cancel(id);
+        }
+    }
+}
+
 /// The completion menu: what the server offered at the cursor, and which is chosen.
 pub(super) struct CompletionMenu {
     doc: DocId,
@@ -132,8 +177,8 @@ impl Editor {
         .detach();
     }
 
-    /// A server asked for `path` to be shown (tinymist, when its preview is
-    /// clicked): open it at `selection`, and bring the window to the front.
+    /// A server asked for `path` to be shown (`window/showDocument`): open
+    /// it at `selection`, and bring the window to the front.
     pub(super) fn show_document(&mut self, path: &std::path::Path, selection: Option<ghostwrite_lsp::RawRange>, window: &mut Window, cx: &mut Context<Self>) {
         self.leave_insert();
         let Some(ix) = self.project.open(path) else { return cx.notify() };
@@ -167,12 +212,11 @@ impl Editor {
     }
 
     /// `space j`: the next error after the cursor, round to the first; or,
-    /// with no errors, the next warning (Lean's unsolved goals are errors,
-    /// its `sorry`s warnings). A Typst file's pages come along.
+    /// with no errors, the next warning. A file's pages come along.
     pub(super) fn next_problem(&mut self, cx: &mut Context<Self>) {
         let Some(tab) = self.project.tabs.active_mut() else { return };
         let cursor = tab.cursor();
-        let checking = tab.doc.goals.as_ref().and_then(|g| g.checking);
+        let checking = tab.doc.aside.as_ref().and_then(|a| a.panel.working_on()).zip(tab.doc.lsp.as_ref().map(|l| l.server()));
         let found = next_problem(&tab.doc.diagnostics, cursor).map(|(d, nth, of)| {
             let first = d.message.lines().next().unwrap_or_default();
             (d.range.start, format!("{} {nth} of {of}: {first}", d.severity.label()))
@@ -184,7 +228,7 @@ impl Editor {
                 self.project.say(message);
             }
             None => match checking {
-                Some(line) => self.project.say(format!("no problems yet: Lean is still checking line {}", line + 1)),
+                Some((line, server)) => self.project.say(format!("no problems yet: {server} is still checking line {}", line + 1)),
                 None => self.project.say("no problems in this file"),
             },
         }
@@ -216,7 +260,7 @@ impl Editor {
     /// as a word is typed or after a trigger character; close it otherwise.
     pub(super) fn after_typing(&mut self, typed: &str, cx: &mut Context<Self>) {
         self.signature_after_typing(typed, cx);
-        let Some(tab) = self.tab() else { return };
+        let Some(tab) = self.project.tabs.active() else { return };
         let Some(lsp) = tab.doc.lsp.as_ref() else { return };
         let Some(last) = typed.chars().last() else { return };
         // `\alp` is a symbol on its way, not a name.
@@ -230,14 +274,12 @@ impl Editor {
             return;
         }
         let (text, at, doc) = (tab.doc.text().to_string(), tab.view.selection.head, tab.doc.id);
-        let answer = lsp.ask("textDocument/completion", &text, at);
-        self.completions_asked += 1;
-        let asked = self.completions_asked;
+        let (answer, asked) = self.completions_asked.ask(lsp, "textDocument/completion", &text, at);
         cx.spawn(async move |this, cx| {
             let Some(value) = answer.await.ok().and_then(Result::ok) else { return };
             this.update(cx, |this, cx| {
                 // Only the latest answer, and only if we're still typing there.
-                if asked != this.completions_asked {
+                if !this.completions_asked.answered(asked) {
                     return;
                 }
                 let still_there = this.tab().is_some_and(|t| t.doc.id == doc && t.view.selection.head >= at) && this.modal.mode == Mode::Insert;

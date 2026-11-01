@@ -18,9 +18,11 @@ pub struct Project {
     pub tree: Tree,
     /// What the status line says, until something else does.
     pub status: Option<SharedString>,
+    /// What's happened that plugins want to hear of, since they were last told.
+    pub heard: Vec<super::plugin_host::Heard>,
     servers: ghostwrite_lsp::Registry,
-    /// Show Typst files compiled, beside them.
-    pub previews: bool,
+    /// What's beside files is shown (`:preview`).
+    pub aside_shown: bool,
 }
 
 /// The project's files as Claude's steps see them: open ones as they are on screen.
@@ -50,8 +52,8 @@ pub struct Reread {
 pub struct Disk {
     rows: Option<(Listing, Vec<Row>)>,
     texts: Vec<(PathBuf, String)>,
-    /// PDFs, read again.
-    pdfs: Vec<(PathBuf, ghostwrite_pdf::Pdf)>,
+    /// Files that are only pages, which their plugins read.
+    only_pages: Vec<PathBuf>,
 }
 
 impl Reread {
@@ -61,11 +63,10 @@ impl Reread {
             let rows = listing.list();
             (listing, rows)
         });
-        let pdf = |p: &PathBuf| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
-        let (pdfs, files): (Vec<PathBuf>, Vec<PathBuf>) = self.files.into_iter().partition(pdf);
-        let texts = files.into_iter().filter_map(|path| std::fs::read_to_string(&path).ok().map(|text| (path, text))).collect();
-        let pdfs = pdfs.into_iter().filter_map(|path| ghostwrite_pdf::Pdf::open(&path).ok().map(|pdf| (path, pdf))).collect();
-        Disk { rows, texts, pdfs }
+        let is_only_pages = |path: &PathBuf| ghostwrite_core::Language::for_path(path).is_some_and(|language| language.only_pages);
+        let (only_pages, files): (Vec<PathBuf>, Vec<PathBuf>) = self.files.into_iter().partition(is_only_pages);
+        let texts = files.into_iter().filter_map(|path| ghostwrite_project::fs::read_text(&path).ok().map(|(text, _)| (path, text))).collect();
+        Disk { rows, texts, only_pages }
     }
 }
 
@@ -77,8 +78,8 @@ impl Disk {
 }
 
 impl Project {
-    pub fn new(root: PathBuf, servers: ghostwrite_lsp::Registry, previews: bool) -> Self {
-        Self { tree: Tree::new(root.clone()), root, tabs: Tabs::default(), status: None, servers, previews }
+    pub fn new(root: PathBuf, servers: ghostwrite_lsp::Registry, aside_shown: bool) -> Self {
+        Self { tree: Tree::new(root.clone()), root, tabs: Tabs::default(), status: None, heard: vec![], servers, aside_shown }
     }
 
     pub fn say(&mut self, message: impl Into<SharedString>) {
@@ -113,12 +114,12 @@ impl Project {
     /// A new tab for `text` (not switched to); returns its index.
     pub fn add(&mut self, path: Option<PathBuf>, text: String) -> usize {
         let lsp = path.as_deref().and_then(|p| document::server_for(&mut self.servers, p, &text));
-        self.tabs.add(|id| Document::new(id, path, text, lsp))
-    }
-
-    /// A new tab for the PDF read from `path` (not switched to); returns its index.
-    pub fn add_pdf(&mut self, path: PathBuf, pdf: ghostwrite_pdf::Pdf) -> usize {
-        self.tabs.add(|id| Document::pdf(id, path, pdf))
+        let has_a_file = path.is_some();
+        let ix = self.tabs.add(|id| Document::new(id, path, text, lsp));
+        if has_a_file {
+            self.tell_plugins(ix, ghostwrite_plugin::Event::Opened);
+        }
+        ix
     }
 
     /// The tab for `path`, opening the file if it isn't open (a missing file
@@ -128,14 +129,9 @@ impl Project {
         if let Some(ix) = self.tabs.index_of_path(&path) {
             return Some(ix);
         }
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
-            return match ghostwrite_pdf::Pdf::open(&path) {
-                Ok(pdf) => Some(self.tabs.add(|id| Document::pdf(id, path, pdf))),
-                Err(e) => {
-                    self.say(format!("couldn't open {}: {e}", path.display()));
-                    None
-                }
-            };
+        // It isn't text: the plugin that makes its pages reads it.
+        if ghostwrite_core::Language::for_path(&path).is_some_and(|language| language.only_pages) {
+            return Some(self.add(Some(path), String::new()));
         }
         let max = crate::config::get().max_file_size;
         if let Ok(meta) = std::fs::metadata(&path)
@@ -144,8 +140,17 @@ impl Project {
             self.say(format!("{} is too large to open ({} MB, limit {} MB)", path.display(), meta.len() >> 20, max >> 20));
             return None;
         }
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Some(self.add(Some(path), text)),
+        match ghostwrite_project::fs::read_text(&path) {
+            Ok((text, encoding)) => {
+                let ix = self.add(Some(path), text);
+                if let Some(tab) = self.tabs.get_mut(ix) {
+                    tab.doc.encoding = encoding;
+                }
+                if !matches!(encoding, ghostwrite_project::fs::Encoding::Utf8) {
+                    self.say(format!("{}: it'll be written back the same way", encoding.name()));
+                }
+                Some(ix)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(self.add(Some(path), String::new())),
             Err(e) => {
                 self.say(format!("couldn't open {}: {e}", path.display()));
@@ -154,7 +159,7 @@ impl Project {
         }
     }
 
-    /// Switch tabs. Leaving a file writes it, so disk (what Claude, `:sh`
+    /// Switch tabs. Leaving a file writes it, so disk (what Claude, the terminal
     /// and the language servers read) matches what you see; never over
     /// changes another program made (the status says so instead).
     pub fn activate(&mut self, ix: usize) {
@@ -189,6 +194,9 @@ impl Project {
         };
         self.say(message);
         self.tree.refresh();
+        if saved.is_ok() {
+            self.tell_plugins(ix, ghostwrite_plugin::Event::Saved);
+        }
         saved.is_ok()
     }
 
@@ -203,7 +211,14 @@ impl Project {
 
     /// Close tab `ix` (unsaved changes are lost: ask first).
     pub fn close(&mut self, ix: usize) {
+        self.tell_plugins(ix, ghostwrite_plugin::Event::Closed);
+        let id = self.tabs.get(ix).map(|t| t.doc.id);
         self.tabs.remove(ix);
+        // A view of it goes with it.
+        let pages = id.and_then(|id| self.tabs.iter().position(|t| t.doc.is_view_of(id)));
+        if let Some(pages) = pages {
+            self.tabs.remove(pages);
+        }
         self.tabs.set_active(ix);
         self.tree.set_active(self.active_path());
     }
@@ -214,6 +229,15 @@ impl Project {
             let Some(rest) = tab.doc.path.as_deref().and_then(|p| p.strip_prefix(from).ok()) else { continue };
             let moved = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
             tab.doc.moved(moved, &mut self.servers);
+        }
+        // Views are called after what they show.
+        let names: Vec<_> = self.tabs.iter().map(|t| (t.doc.id, t.doc.name().to_string())).collect();
+        for tab in self.tabs.iter_mut() {
+            if let Some((of, name)) = tab.doc.view_of.as_mut()
+                && let Some((_, file)) = names.iter().find(|(id, _)| id == of)
+            {
+                *name = format!("{file} · pages");
+            }
         }
         self.tree.renamed(from, to);
     }
@@ -248,11 +272,12 @@ impl Project {
             self.tree.listed(&listing, rows);
             changed = true;
         }
-        // A PDF that's changed (rebuilt, say): its new text and pages.
-        for (path, pdf) in disk.pdfs {
-            if let Some(tab) = self.tabs.index_of_path(&path).and_then(|ix| self.tabs.get_mut(ix)) {
-                tab.doc.pdf = Some(std::sync::Arc::new(pdf));
-                tab.reload(tab.doc.pdf.as_ref().map(|p| p.text.clone()).unwrap_or_default());
+        // A file that's only pages has changed (rebuilt, say): its pages are made again.
+        for path in disk.only_pages {
+            if let Some(tab) = self.tabs.index_of_path(&path).and_then(|ix| self.tabs.get_mut(ix))
+                && let Some(rendered) = tab.doc.rendered.as_mut()
+            {
+                rendered.made = None;
                 changed = true;
             }
         }
@@ -313,14 +338,6 @@ impl Project {
         self.say(format!("{server} stopped{why} ({next})"));
     }
 
-    /// How far Lean has checked `path`: the goals pane says, and asks again once it's done.
-    pub fn apply_progress(&mut self, path: &Path, checking: Option<u32>) -> bool {
-        let Some(tab) = self.tabs.index_of_path(path).and_then(|ix| self.tabs.get_mut(ix)) else { return false };
-        let Some(goals) = tab.doc.goals.as_mut() else { return false };
-        goals.checked(checking);
-        true
-    }
-
     /// The open files and their cursors, to bring back next time.
     pub fn session(&self) -> Session {
         let files: Vec<(PathBuf, usize, usize)> = self
@@ -340,7 +357,7 @@ impl Project {
         let existing: Vec<&(PathBuf, usize, usize)> = session.files.iter().filter(|(p, ..)| p.is_file()).collect();
         for (path, line, column) in &existing {
             let Some(tab) = self.open(path).and_then(|ix| self.tabs.get_mut(ix)) else { continue };
-            let at = ghostwrite_core::offset_of(tab.doc.text(), *line, *column);
+            let at = tab.doc.buffer.at_line_col(*line, *column);
             tab.select(Range::point(at), Autoscroll::Center(*line..*line + 1));
         }
         let active = session.files.get(session.active).filter(|(p, ..)| p.is_file()).or(existing.last().copied());

@@ -1,7 +1,7 @@
 //! The editing model, with no UI: a [`Buffer`] of text with undo history,
 //! helix-style [`Range`] selections, the motions and text objects that move
 //! them, the [`modal`] key handling that drives it all, the [`language`]s it
-//! knows, and [`syntax`] highlighting; and Lean's [`abbreviation`]s.
+//! knows, their [`syntax`] highlighting and [`abbreviation`]s.
 //!
 //! Every offset is a byte offset into the text, always on a char boundary.
 
@@ -9,7 +9,6 @@ pub mod abbreviation;
 pub mod buffer;
 pub mod indent;
 pub mod language;
-mod lean;
 pub mod modal;
 pub mod movement;
 pub mod selection;
@@ -45,20 +44,6 @@ pub fn display_width(text: &str, tab_width: usize) -> usize {
     })
 }
 
-/// Byte offset → (zero-based line, char column), for status lines and sessions.
-pub fn line_col(text: &str, offset: usize) -> (usize, usize) {
-    let offset = offset.min(text.len());
-    let start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
-    (text[..start].matches('\n').count(), text[start..offset].chars().count())
-}
-
-/// (zero-based line, char column) → byte offset, clamped to the text and the line.
-pub fn offset_of(text: &str, line: usize, column: usize) -> usize {
-    let start = if line == 0 { 0 } else { text.match_indices('\n').nth(line - 1).map_or(text.len(), |(i, _)| i + 1) };
-    let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
-    text[start..end].char_indices().nth(column).map_or(end, |(i, _)| start + i)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,9 +54,9 @@ mod tests {
         assert_eq!(next_char(text, 1), 3);
         assert_eq!(prev_char(text, 3), 1);
         assert_eq!(next_char(text, text.len()), text.len());
-        assert_eq!(line_col(text, 5), (1, 1));
-        assert_eq!(offset_of(text, 0, 1), 1);
-        assert_eq!(offset_of(text, 0, 9), 3, "clamped to the line");
-        assert_eq!(offset_of(text, 7, 0), text.len());
+        let buffer = Buffer::new(text);
+        assert_eq!(buffer.at_line_col(0, 1), 1);
+        assert_eq!(buffer.at_line_col(0, 9), 3, "clamped to the line");
+        assert_eq!(buffer.at_line_col(1, 1), text.len());
     }
 }

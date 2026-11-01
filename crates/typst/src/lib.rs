@@ -6,13 +6,16 @@
 //!
 //! A compiled [`Page`] knows where each glyph is on it and which bytes of
 //! the file it came from, so the editor can draw the cursor on the page and
-//! go from a click on the page to the text. [`Page::render`] draws it.
+//! go from a click on the page to the text ([`Document::glyph_at`],
+//! [`Page::hit`]). [`Page::render`] draws it.
 
+use ghostwrite_core::Language;
+use ghostwrite_lsp::registry::Spec;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
-use parking_lot::Mutex;
+pub use ghostwrite_page::{Bitmap, Place, Size};
 use typst::diag::{FileResult, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::layout::{Abs, Frame, FrameItem, Point, Transform};
@@ -52,7 +55,7 @@ struct Loader {
 
 impl FileLoader for Loader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
-        if id == self.main { Ok(self.text.lock().clone()) } else { self.files.load(id) }
+        if id == self.main { Ok(self.text.lock().unwrap().clone()) } else { self.files.load(id) }
     }
 }
 
@@ -100,23 +103,25 @@ pub struct Compiler {
 impl Compiler {
     /// For `path`, rooted at `root` (where `/` paths start) if it's in it,
     /// else at its own folder.
-    pub fn new(root: &Path, path: &Path) -> Option<Self> {
-        let root = if path.starts_with(root) { root } else { path.parent()? };
-        let main = RootedPath::new(VirtualRoot::Project, VirtualPath::virtualize(root, path).ok()?).intern();
+    pub fn new(root: &Path, path: &Path) -> Result<Self, String> {
+        let root = if path.starts_with(root) { root } else { path.parent().ok_or("no folder to compile it in")? };
+        let virtual_path = VirtualPath::virtualize(root, path).map_err(|_| format!("{} isn't in {}", path.display(), root.display()))?;
+        let main = RootedPath::new(VirtualRoot::Project, virtual_path).intern();
         let packages = SystemPackages::new(SystemDownloader::new(concat!("ghostwrite/", env!("CARGO_PKG_VERSION"))));
         let files = SystemFiles::new(FsRoot::new(root.to_path_buf()), packages);
         let loader = Loader { files, main, text: Mutex::new(Bytes::new(Vec::<u8>::new())) };
-        Some(Self { world: ProjectWorld { store: FileStore::new(loader), main, time: Time::system() } })
+        Ok(Self { world: ProjectWorld { store: FileStore::new(loader), main, time: Time::system() } })
     }
 
     /// Compile the file as `text`, with the other files as they are now.
     /// Fails with the first error, and where it is.
     pub fn compile(&mut self, text: &str) -> Result<Document, String> {
-        *self.world.store.loader().text.lock() = Bytes::new(text.as_bytes().to_vec());
+        *self.world.store.loader().text.lock().unwrap() = Bytes::new(text.as_bytes().to_vec());
         self.world.store.reset();
         self.world.time.reset();
         let compiled = typst::compile::<PagedDocument>(&self.world).output;
-        // Typst keeps what it computed, for next time: enough for that, not more.
+        // Typst keeps what it computed, for next time: enough for that, not
+        // more. Its cache is the process's, shared by every compiler.
         comemo::evict(10);
         let document = compiled.map_err(|errors| self.describe(&errors))?;
         Ok(Document { pages: document.pages().iter().map(|page| Page::new(page.clone(), &self.world)).collect() })
@@ -137,12 +142,107 @@ pub struct Document {
     pub pages: Vec<Page>,
 }
 
-/// A page as laid out: its size in points, and its glyphs, in reading order.
+impl Document {
+    /// The glyph made from byte `at` of the text, and its page; or, for a
+    /// byte nothing on the pages comes from (markup), the next one that is if `near`.
+    pub fn glyph_at(&self, at: usize, near: bool) -> Option<(usize, &Glyph)> {
+        let glyphs = || self.pages.iter().enumerate().flat_map(|(ix, page)| page.glyphs.iter().map(move |g| (ix, g)));
+        let exact = glyphs().find(|(_, g)| g.source.as_ref().is_some_and(|s| s.contains(&at)));
+        exact.or_else(|| {
+            near.then(|| glyphs().filter(|(_, g)| g.source.as_ref().is_some_and(|s| s.start >= at)).min_by_key(|(_, g)| g.source.as_ref().map(|s| s.start)))
+                .flatten()
+        })
+    }
+}
+
+impl Document {
+    fn place(page: usize, glyph: &Glyph) -> Place {
+        Place { page, x: glyph.x, y: glyph.y, width: glyph.width, height: glyph.height }
+    }
+}
+
+impl ghostwrite_page::Pages for Document {
+    fn sizes(&self) -> Vec<Size> {
+        self.pages.iter().map(|page| page.size).collect()
+    }
+
+    fn key(&self, page: usize) -> u128 {
+        self.pages.get(page).map_or(0, |page| page.hash)
+    }
+
+    fn draw(&self, page: usize, pixels: usize) -> Option<Bitmap> {
+        let page = self.pages.get(page)?;
+        page.render(pixels as f32 / page.size.width.max(1.))
+    }
+
+    fn cursor(&self, at: usize) -> Option<Place> {
+        self.glyph_at(at, false).map(|(page, glyph)| Self::place(page, glyph))
+    }
+
+    fn nearest(&self, at: usize) -> Option<Place> {
+        self.glyph_at(at, true).map(|(page, glyph)| Self::place(page, glyph))
+    }
+
+    fn covering(&self, range: Range<usize>) -> Vec<Place> {
+        let on = |glyph: &&Glyph| glyph.source.as_ref().is_some_and(|s| s.start < range.end && range.start < s.end);
+        self.pages.iter().enumerate().flat_map(|(ix, page)| page.glyphs.iter().filter(on).map(move |glyph| Self::place(ix, glyph))).collect()
+    }
+
+    fn at(&self, page: usize, x: f32, y: f32) -> Option<usize> {
+        self.pages.get(page)?.hit(x, y)
+    }
+}
+
+static TYPST: Language = Language {
+    name: "typst",
+    comment: Some("//"),
+    extensions: &["typ"],
+    servers: &["tinymist"],
+    // The crate doesn't export its query; this is its queries/typst/highlights.scm.
+    load: || ghostwrite_core::syntax::highlights("typst", codebook_tree_sitter_typst::LANGUAGE, include_str!("../queries/highlights.scm")),
+    ..Language::DEFAULT
+};
+
+static SERVER: Spec = Spec { name: "tinymist", command: &["tinymist"], ..Spec::DEFAULT };
+
+/// Typst as a plugin: its language, its server, and its pages.
+pub struct Plugin;
+
+impl ghostwrite_plugin::Plugin for Plugin {
+    fn keys(&self, language: Option<&Language>) -> &'static [ghostwrite_plugin::Binding] {
+        const KEYS: &[ghostwrite_plugin::Binding] =
+            &[ghostwrite_plugin::Binding { keys: "space v", command: "preview", what: "to the pages, and back to the file" }];
+        if language.is_some_and(|l| std::ptr::eq(l, &TYPST)) { KEYS } else { &[] }
+    }
+
+    fn languages(&self) -> Vec<&'static Language> {
+        vec![&TYPST]
+    }
+
+    fn servers(&self) -> Vec<&'static Spec> {
+        vec![&SERVER]
+    }
+
+    fn renders(&self, language: &Language) -> bool {
+        std::ptr::eq(language, &TYPST)
+    }
+
+    fn renderer(&self, root: &Path, path: &Path) -> Result<Box<dyn ghostwrite_page::Renderer>, String> {
+        Ok(Box::new(Compiler::new(root, path)?))
+    }
+}
+
+impl ghostwrite_page::Renderer for Compiler {
+    fn render(&mut self, text: &str) -> Result<std::sync::Arc<dyn ghostwrite_page::Pages>, String> {
+        Ok(std::sync::Arc::new(self.compile(text)?))
+    }
+}
+
+/// A page as laid out: its size, and its glyphs, in reading order.
 #[derive(Clone)]
 pub struct Page {
     page: typst_layout::Page,
-    pub width: f32,
-    pub height: f32,
+    pub size: Size,
     /// Changes when what's on it does: pages that stay the same needn't be drawn again.
     pub hash: u128,
     pub glyphs: Vec<Glyph>,
@@ -159,31 +259,43 @@ pub struct Glyph {
     pub source: Option<Range<usize>>,
 }
 
-/// A page drawn: rows of pixels, blue, green, red and alpha.
-pub struct Bitmap {
-    pub width: usize,
-    pub height: usize,
-    pub bgra: Vec<u8>,
-}
-
 impl Page {
     fn new(page: typst_layout::Page, world: &ProjectWorld) -> Self {
         let size = page.frame.size();
         let mut glyphs = vec![];
         collect(&page.frame, Transform::identity(), world, &mut glyphs);
         let hash = typst::utils::hash128(&page.frame);
-        Self { width: size.x.to_pt() as f32, height: size.y.to_pt() as f32, hash, glyphs, page }
+        Self { size: Size { width: size.x.to_pt() as f32, height: size.y.to_pt() as f32 }, hash, glyphs, page }
     }
 
-    /// Draw it, `pixel_per_pt` pixels to a point.
-    pub fn render(&self, pixel_per_pt: f32) -> Bitmap {
+    /// The byte of the text at `x`, `y` (points from the top left): the
+    /// glyph there, or the nearest (lines count more than columns); after
+    /// it if it's on its right half.
+    pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
+        let distance = |g: &Glyph| {
+            let dx = (g.x - x).max(x - (g.x + g.width)).max(0.);
+            let dy = (g.y - y).max(y - (g.y + g.height)).max(0.);
+            dy * 4. + dx
+        };
+        let glyph = self.glyphs.iter().filter(|g| g.source.is_some()).min_by(|a, b| distance(a).total_cmp(&distance(b)))?;
+        let source = glyph.source.clone()?;
+        Some(if x > glyph.x + glyph.width / 2. { source.end } else { source.start })
+    }
+
+    /// Draw it, `pixel_per_pt` pixels to a point; `None` if that's more than
+    /// [`ghostwrite_page::MAX_PIXELS`].
+    pub fn render(&self, pixel_per_pt: f32) -> Option<Bitmap> {
+        let pixels = |pt: f32| (pt * pixel_per_pt).ceil().max(1.) as usize;
+        if pixels(self.size.width).saturating_mul(pixels(self.size.height)) > ghostwrite_page::MAX_PIXELS {
+            return None;
+        }
         let options = typst_render::RenderOptions { pixel_per_pt: typst::utils::Scalar::new(pixel_per_pt.into()), ..Default::default() };
         let pixmap = typst_render::render(&self.page, &options);
         let mut bgra = pixmap.data().to_vec();
         for pixel in bgra.chunks_exact_mut(4) {
             pixel.swap(0, 2);
         }
-        Bitmap { width: pixmap.width() as usize, height: pixmap.height() as usize, bgra }
+        Some(Bitmap { width: pixmap.width() as usize, height: pixmap.height() as usize, bgra })
     }
 }
 
@@ -242,7 +354,7 @@ mod tests {
         let document = compiler.compile(text).unwrap();
         assert_eq!(document.pages.len(), 1);
         let page = &document.pages[0];
-        assert_eq!(page.width, 200.);
+        assert_eq!(page.size.width, 200.);
         let hello = text.find("Hello").unwrap();
         let first = page.glyphs.iter().find(|g| g.source.is_some()).expect("glyphs know their source");
         assert_eq!(first.source, Some(hello..hello + 1), "H is the H of Hello");
@@ -253,8 +365,29 @@ mod tests {
         let error = compiler.compile("#oops(").err().unwrap();
         assert!(error.starts_with("paper/paper.typ:1: error:"), "{error}");
 
-        let drawn = page.render(2.);
+        // A click: on the left half of the H, before it; on its right, after it.
+        let h = first.clone();
+        assert_eq!(page.hit(h.x + 0.5, h.y + 1.), Some(hello), "its left half: before it");
+        assert_eq!(page.hit(h.x + h.width - 0.5, h.y + 1.), Some(hello + 1), "its right half: after it");
+        assert_eq!(page.hit(h.x, h.y - 15.), Some(hello), "above the line: the nearest glyph");
+        assert_eq!(document.glyph_at(hello, false).map(|(_, g)| g.source.clone()), Some(Some(hello..hello + 1)));
+        assert_eq!(document.glyph_at(0, true).map(|(_, g)| g.source.clone()), Some(Some(hello..hello + 1)), "from markup, the text after it");
+
+        let drawn = page.render(2.).unwrap();
+        assert!(page.render(1e6).is_none(), "too big to draw");
         assert_eq!((drawn.width, drawn.bgra.len()), (400, 400 * drawn.height * 4));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn its_language_is_highlighted_through_aliases() {
+        use ghostwrite_core::syntax::scope_named;
+        let text = "= Title\n#let x = 1\n*bold*";
+        let spans = super::TYPST.highlight(text);
+        let at = |offset: usize| spans.iter().find(|s| s.range.contains(&offset)).map(|s| s.scope);
+        assert_eq!(at(2), scope_named("text.title"));
+        assert_eq!(at(text.find("let").unwrap()), scope_named("keyword"));
+        assert_eq!(at(text.find("1").unwrap()), scope_named("number"));
+        assert_eq!(at(text.find("bold").unwrap()), scope_named("text.strong"));
     }
 }

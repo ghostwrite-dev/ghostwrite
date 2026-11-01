@@ -1,0 +1,23 @@
+[package]
+name = "ghostwrite-wasm"
+description = "Runs plugins compiled to WebAssembly, sandboxed, and the grammars they bring."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ghostwrite-core.workspace = true
+ghostwrite-page.workspace = true
+ghostwrite-plugin.workspace = true
+ghostwrite-project.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ureq.workspace = true
+tree-sitter = { workspace = true, features = ["wasm"] }
+tree-sitter-highlight.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+
+# To hold the plugin to what the native crate does, as long as there is one.
+[dev-dependencies]
+ghostwrite-typst.workspace = true
+image = { workspace = true, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }

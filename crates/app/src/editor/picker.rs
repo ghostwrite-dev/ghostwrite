@@ -141,9 +141,9 @@ impl Editor {
                 }
             }
             Some(Pick::At(doc, at)) => {
-                if let Some(ix) = self.project.tabs.index_of_id(doc) {
-                    self.activate(ix, cx);
-                }
+                // Its file was closed meanwhile: nowhere to go.
+                let Some(ix) = self.project.tabs.index_of_id(doc) else { return };
+                self.activate(ix, cx);
                 if let Some(tab) = self.tab_mut() {
                     let line = tab.doc.buffer.line_of(at);
                     tab.select(ghostwrite_core::Range::point(at), super::Autoscroll::Center(line..line + 1));

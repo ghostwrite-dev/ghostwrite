@@ -253,7 +253,11 @@ fn brackets_and_quotes_close_themselves() {
     assert_eq!(s.text(), "fn(){\n    x\n}\n", "Enter between braces opens an indented line");
 }
 
-/// Lean's unicode input, typed a char at a time as the editor types.
+/// A language that types symbols with backslashes, with a real table of them.
+static TABLE: crate::abbreviation::Abbreviations = crate::abbreviation::Abbreviations::new(include_str!("../../../lean/src/abbreviations.tsv"));
+static ABBREVIATING: crate::Language = crate::Language { name: "abbreviating", abbreviations: Some(&TABLE), unpaired: &['`'], ..crate::Language::DEFAULT };
+
+/// Unicode input, typed a char at a time as the editor types.
 #[test]
 fn backslash_abbreviations_become_symbols() {
     let typed = |keys: &str| {
@@ -261,13 +265,7 @@ fn backslash_abbreviations_become_symbols() {
         let indent = IndentUnit::default();
         s.keys("i");
         for c in keys.chars() {
-            let mut t = Target {
-                buffer: &mut s.buffer,
-                selection: &mut s.selection,
-                indent: &indent,
-                page_rows: 20,
-                language: crate::Language::for_path(std::path::Path::new("a.lean")),
-            };
+            let mut t = Target { buffer: &mut s.buffer, selection: &mut s.selection, indent: &indent, page_rows: 20, language: Some(&ABBREVIATING) };
             match c {
                 '⇥' => s.modal.key(Key::Tab, &mut s.regs, &mut t),
                 '⌫' => s.modal.key(Key::Backspace, &mut s.regs, &mut t),

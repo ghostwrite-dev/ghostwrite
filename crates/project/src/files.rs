@@ -25,7 +25,7 @@ pub fn files(root: &Path, under: &Path) -> Vec<String> {
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-        .filter_map(|e| e.path().strip_prefix(root).ok().map(|p| p.display().to_string()))
+        .filter_map(|e| e.path().strip_prefix(root).ok().map(crate::platform::with_slashes))
         .collect();
     out.sort();
     out
@@ -79,7 +79,9 @@ pub fn search_pattern(typed: &str) -> Result<Regex, String> {
     Regex::new(&format!("{flags}{typed}")).or_else(|_| Regex::new(&format!("{flags}{}", regex::escape(typed)))).map_err(|e| e.to_string())
 }
 
-/// A match: the file, its line (zero-based), the match's bytes in the line, and the line.
+/// A match: the file, its line (zero-based), the match's bytes in the line,
+/// and the line (empty if it's longer than [`MAX_LINE`]: a minified bundle's
+/// one line isn't copied for each of its matches).
 #[derive(Debug, Clone)]
 pub struct Found {
     pub path: PathBuf,
@@ -87,6 +89,9 @@ pub struct Found {
     pub bytes: Range<usize>,
     pub text: String,
 }
+
+/// The longest line a match keeps a copy of.
+pub const MAX_LINE: usize = 4_000;
 
 /// Every match of `pattern` in the project, file by file, line by line.
 /// Files in `open` are searched as they are there (maybe unsaved).
@@ -97,7 +102,8 @@ pub fn grep(root: &Path, pattern: &Regex, open: &HashMap<PathBuf, String>) -> Ve
         let Some(text) = open.get(&path).cloned().or_else(|| searchable(&path)) else { continue };
         for (line, text) in text.lines().enumerate() {
             for m in pattern.find_iter(text).filter(|m| !m.is_empty()) {
-                found.push(Found { path: path.clone(), line, bytes: m.range(), text: text.to_string() });
+                let text = if text.len() <= MAX_LINE { text.to_string() } else { String::new() };
+                found.push(Found { path: path.clone(), line, bytes: m.range(), text });
                 if found.len() >= MAX_FOUND {
                     return found;
                 }
@@ -112,7 +118,7 @@ pub fn grep(root: &Path, pattern: &Regex, open: &HashMap<PathBuf, String>) -> Ve
 /// repository or with nothing changed.
 pub fn uncommitted(root: &Path, max: usize) -> Option<String> {
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git").arg("-C").arg(root).args(args).stderr(std::process::Stdio::null()).output().ok()?;
+        let out = crate::platform::command("git").arg("-C").arg(root).args(args).stderr(std::process::Stdio::null()).output().ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
     let mut diff = git(&["diff", "HEAD", "--no-color", "--no-ext-diff"]).or_else(|| git(&["diff", "--no-color", "--no-ext-diff"]))?;
@@ -132,8 +138,8 @@ pub fn uncommitted(root: &Path, max: usize) -> Option<String> {
 
 /// `path` inside the project (resolved), or `None` if it would leave it.
 pub fn inside(root: &Path, path: &str) -> Option<PathBuf> {
-    let root = root.canonicalize().ok()?;
-    let real = root.join(path.trim_start_matches('/')).canonicalize().ok()?;
+    let root = crate::platform::real(root).ok()?;
+    let real = crate::platform::real(&root.join(path.trim_start_matches('/'))).ok()?;
     real.starts_with(&root).then_some(real)
 }
 
@@ -163,7 +169,7 @@ mod tests {
     #[test]
     fn uncommitted_changes_come_from_git() {
         let root = crate::scratch_dir("diff");
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&root).args(args).output().unwrap();
+        let git = |args: &[&str]| crate::platform::command("git").arg("-C").arg(&root).args(args).output().unwrap();
         assert_eq!(uncommitted(&root, 1000), None, "not a repository");
         git(&["init", "-q"]);
         std::fs::write(root.join("a.txt"), "one\n").unwrap();

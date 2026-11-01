@@ -67,11 +67,27 @@ pub struct CodeView {
     block: Option<Block>,
     /// The block once built: its line and element.
     built: Option<(usize, AnyElement)>,
+    /// The tab it shows, if it's the other pane's: the active one otherwise.
+    other: Option<super::DocId>,
 }
 
 impl CodeView {
     pub fn new(editor: Entity<Editor>, focus: FocusHandle, decorations: Vec<Decoration>, block: Option<Block>) -> Self {
-        Self { editor, focus, decorations, block, built: None }
+        Self { editor, focus, decorations, block, built: None, other: None }
+    }
+
+    /// The other pane, showing `doc`: without the keys, until it's clicked.
+    pub fn of_other_pane(editor: Entity<Editor>, focus: FocusHandle, doc: super::DocId) -> Self {
+        Self { editor, focus, decorations: vec![], block: None, built: None, other: Some(doc) }
+    }
+
+    /// The tab it shows.
+    fn shown<'a>(&self, editor: &'a Editor) -> &'a Tab {
+        let tab = match self.other {
+            Some(doc) => editor.project.tabs.by_id(doc),
+            None => editor.project.tabs.active(),
+        };
+        tab.expect("a code view shows a tab that's there")
     }
 }
 
@@ -81,12 +97,14 @@ struct Snapshot {
     mode: Mode,
     line_count: usize,
     selection: Range,
+    /// More cursors, kept in the text.
+    others: Vec<Range>,
     autoscroll: Option<Autoscroll>,
     scroll_top: Pixels,
     /// Where the cursor is drawn: the block's char, or the insert bar's gap.
     cursor: usize,
     cursor_line: usize,
-    /// The keys are elsewhere (the PDF beside it, the tree, the terminal),
+    /// The keys are elsewhere (the pages beside it, the tree, the terminal),
     /// and the selection with them.
     elsewhere: bool,
 }
@@ -98,6 +116,7 @@ impl Snapshot {
             mode,
             line_count: tab.doc.buffer.line_count(),
             selection: tab.view.selection,
+            others: tab.view.others.iter().map(|other| other.within(tab.doc.text())).collect(),
             autoscroll: tab.view.autoscroll.clone(),
             scroll_top: tab.view.scroll_top,
             cursor,
@@ -259,6 +278,8 @@ pub struct Prepainted {
     quads: Vec<PaintQuad>,
     cursor_glyph: Option<Glyph>,
     gutter: Vec<Glyph>,
+    /// Where the file differs from what git has.
+    marks: Vec<PaintQuad>,
     text_bounds: Bounds<Pixels>,
     gutter_bounds: Bounds<Pixels>,
     line_height: Pixels,
@@ -307,8 +328,9 @@ impl Element for CodeView {
         let metrics = Metrics::measure(&theme, window);
         let snap = {
             let editor = self.editor.read(cx);
-            let mut snap = Snapshot::take(editor.project.tabs.active().expect("a code view shows the active tab"), editor.modal.mode);
-            snap.elsewhere = matches!(editor.modal.mode, Mode::Tree | Mode::Terminal);
+            let mode = if self.other.is_some() { Mode::Normal } else { editor.modal.mode };
+            let mut snap = Snapshot::take(self.shown(editor), mode);
+            snap.elsewhere = self.other.is_some() || matches!(editor.modal.mode, Mode::Tree | Mode::Terminal);
             snap
         };
         let focused = self.focus.is_focused(window) && !snap.elsewhere;
@@ -319,20 +341,21 @@ impl Element for CodeView {
         let sizes = BlockSizes { line_height: metrics.line_height, char_width: metrics.char_width, width: text_bounds.size.width };
         let fits = ((f32::from(text_bounds.size.width) / f32::from(metrics.char_width)).floor() as usize).saturating_sub(1).max(1);
         let cols = fits.min(crate::config::get().wrap_column);
-        let offsets = self.editor.update(cx, |editor, _| editor.row_offsets(cols));
+        let other = self.other;
+        let offsets = self.editor.update(cx, |editor, _| editor.row_offsets(other, cols));
         let cursor_row = {
-            let doc = &self.editor.read(cx).project.tabs.active().expect("checked above").doc;
+            let doc = &self.shown(self.editor.read(cx)).doc;
             let start = doc.buffer.line_start(snap.cursor_line);
             let rows = wrap_rows(&doc.text()[start..doc.buffer.line_end(snap.cursor_line)], cols);
             rows.iter().position(|r| snap.cursor - start < r.end).unwrap_or(rows.len() - 1)
         };
         let geometry = Geometry { line_height: metrics.line_height, rows: offsets, block: self.lay_out_block(sizes, window, cx), cursor_row };
         let scroll_top = geometry.scroll(&snap, bounds.size.height);
-        let (lines, gutter) = self.shape_lines(&snap, &metrics, &geometry, &theme, bounds, gutter_bounds, scroll_top, cols, window, cx);
+        let (lines, gutter, marks) = self.shape_lines(&snap, &metrics, &geometry, &theme, bounds, gutter_bounds, scroll_top, cols, window, cx);
         // Lines wrap, so there's no scrolling sideways.
         let scroll_left = px(0.);
         let (quads, cursor_bounds, cursor_glyph) = {
-            let text = self.editor.read(cx).project.tabs.active().expect("checked above").doc.text();
+            let text = self.shown(self.editor.read(cx)).doc.text();
             let mut quads = self.backgrounds(&snap, &lines, text, &theme, text_bounds, scroll_left, metrics.line_height, focused);
             let (bounds, glyph) = cursor(&snap, &lines, text, &metrics, &theme, text_bounds.left() - scroll_left, focused, &mut quads, window);
             (quads, bounds, glyph)
@@ -347,15 +370,22 @@ impl Element for CodeView {
 
         let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height)).floor() as usize;
         let measured = Measured { rows, cursor: cursor_bounds, top_line: Some(geometry.first_below(scroll_top, snap.line_count)) };
+        let other = self.other;
         self.editor.update(cx, |editor, _| {
-            editor.measured = measured;
-            if let Some(tab) = editor.project.tabs.active_mut() {
+            if other.is_none() {
+                editor.measured = measured;
+            }
+            let tab = match other {
+                Some(doc) => editor.project.tabs.by_id_mut(doc),
+                None => editor.project.tabs.active_mut(),
+            };
+            if let Some(tab) = tab {
                 tab.view.scroll_top = scroll_top;
                 tab.view.scroll_left = scroll_left;
                 tab.view.autoscroll = None;
             }
         });
-        Prepainted { hitbox, lines, quads, cursor_glyph, gutter, text_bounds, gutter_bounds, line_height: metrics.line_height, scroll_left }
+        Prepainted { hitbox, lines, quads, cursor_glyph, gutter, marks, text_bounds, gutter_bounds, line_height: metrics.line_height, scroll_left }
     }
 
     fn paint(
@@ -385,6 +415,9 @@ impl Element for CodeView {
         });
         window.with_content_mask(Some(ContentMask { bounds: state.gutter_bounds }), |window| {
             window.paint_quad(fill(state.gutter_bounds, background));
+            for mark in state.marks.drain(..) {
+                window.paint_quad(mark);
+            }
             for (number, at) in &state.gutter {
                 number.paint(*at, line_height, window, cx).ok();
             }
@@ -400,8 +433,8 @@ impl CodeView {
     /// Build the block for these sizes and lay it out: its line and height.
     fn lay_out_block(&mut self, sizes: BlockSizes, window: &mut Window, cx: &mut App) -> Option<(usize, Pixels)> {
         let block = self.block.take()?;
-        // Clicks and the wheel over it are its own, not the code's under it.
-        let mut element = gpui::div().occlude().child((block.build)(sizes, window, cx)).into_any_element();
+        // Clicks over it are its own, not the code's under it; the wheel still scrolls the code.
+        let mut element = gpui::div().block_mouse_except_scroll().child((block.build)(sizes, window, cx)).into_any_element();
         let size = element.layout_as_root(gpui::size(AvailableSpace::Definite(sizes.width), AvailableSpace::MinContent), window, cx);
         self.built = Some((block.line, element));
         Some((block.line, size.height))
@@ -421,9 +454,9 @@ impl CodeView {
         cols: usize,
         window: &mut Window,
         cx: &App,
-    ) -> (Vec<LaidLine>, Vec<Glyph>) {
+    ) -> (Vec<LaidLine>, Vec<Glyph>, Vec<PaintQuad>) {
         let editor = self.editor.read(cx);
-        let doc = &editor.project.tabs.active().expect("a code view shows the active tab").doc;
+        let doc = &self.shown(editor).doc;
         let text = doc.text();
         let first = geometry.first_below(scroll_top, snap.line_count);
         // Only the diagnostics near what's on screen are looked through, line by line.
@@ -431,6 +464,8 @@ impl CodeView {
         let near: Vec<&ghostwrite_lsp::Diagnostic> = doc.diagnostics.iter().filter(|d| d.range.end >= near_start && d.range.start <= near_end).collect();
         let mut lines = vec![];
         let mut gutter = vec![];
+        let mut marks = vec![];
+        let breakpoints = doc.path.as_deref().and_then(|path| editor.breakpoints_in(path));
         for line in first..snap.line_count {
             let y = bounds.top() + geometry.top(line) - scroll_top;
             if y > bounds.bottom() {
@@ -454,12 +489,30 @@ impl CodeView {
                 _ if line == snap.cursor_line => theme.active_line_number,
                 _ => theme.line_number,
             };
+            // A breakpoint: a dot in the margin.
+            if breakpoints.is_some_and(|lines| lines.contains(&line)) {
+                let size = metrics.line_height * 0.5;
+                let at = Bounds::new(point(gutter_bounds.left() + px(5.), y + metrics.line_height * 0.25), gpui::size(size, size));
+                marks.push(gpui::quad(at, size / 2., theme.danger, px(0.), gpui::transparent_black(), gpui::BorderStyle::default()));
+            }
+            // Where it differs from what git has: a bar beside the number, or a tick where lines went.
+            if let Some(kind) = ghostwrite_project::git::at_line(&doc.git.changes, line) {
+                use ghostwrite_project::git::ChangeKind;
+                let rows = (lines.iter().filter(|l: &&LaidLine| l.y >= y).count().max(1)) as f32;
+                let (color, height) = match kind {
+                    ChangeKind::Added => (theme.success, metrics.line_height * rows),
+                    ChangeKind::Modified => (theme.warning, metrics.line_height * rows),
+                    ChangeKind::Removed => (theme.danger, px(2.)),
+                };
+                let at = Bounds::new(point(gutter_bounds.left() + px(1.), y), gpui::size(px(3.), height));
+                marks.push(fill(at, color));
+            }
             let number: SharedString = (line + 1).to_string().into();
             let shaped_number = window.text_system().shape_line(number.clone(), metrics.size, &[metrics.run(number.len(), color)], None);
             let x = gutter_bounds.right() - metrics.gap - shaped_number.width - metrics.char_width;
             gutter.push((shaped_number, point(x, y)));
         }
-        (lines, gutter)
+        (lines, gutter, marks)
     }
 
     /// What's filled behind the text: the cursor's line, marks, the selection.
@@ -502,6 +555,22 @@ impl CodeView {
         if selected && !snap.elsewhere {
             span(&snap.selection.bytes(), theme.selection, &mut quads);
         }
+        // The other cursors: what each has selected, and the cell it's on.
+        if !snap.elsewhere {
+            for other in &snap.others {
+                if !other.is_empty() {
+                    span(&other.bytes(), theme.selection, &mut quads);
+                }
+                let at = other.cursor(text).min(text.len());
+                let next = text[at..].chars().next().map_or(at, |c| if c == '\n' { at } else { at + c.len_utf8() });
+                if next > at {
+                    span(&(at..next), theme.accent.opacity(0.7), &mut quads);
+                } else if let Some(laid) = lines.iter().find(|l| l.holds(at)) {
+                    let x = text_bounds.left() - scroll_left + laid.x(at);
+                    quads.push(fill(Bounds::new(point(x, laid.y), gpui::size(px(2.), line_height)), theme.accent));
+                }
+            }
+        }
         quads
     }
 
@@ -517,6 +586,7 @@ impl CodeView {
             Some(laid.byte_at_x(position.x - text_bounds.left() + scroll_left))
         };
         let hit = std::rc::Rc::new(hit);
+        let other = self.other;
         let (editor, focus, hitbox, on) = (self.editor.clone(), self.focus.clone(), state.hitbox.clone(), hit.clone());
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             let ours = hitbox.is_hovered(window) && text_bounds.contains(&event.position);
@@ -525,16 +595,22 @@ impl CodeView {
             }
             let Some(at) = on(event.position) else { return };
             window.focus(&focus);
-            editor.update(cx, |editor, cx| editor.click(at, event.modifiers.shift, event.click_count, cx));
+            editor.update(cx, |editor, cx| {
+                // In the other pane, the keys come here first.
+                if let Some(doc) = other {
+                    editor.go_to_doc(doc, cx);
+                }
+                editor.click(at, event.modifiers.shift, event.click_count, cx)
+            });
         });
         // Dragging from a click selects to where the mouse is, also above or below the view.
         let (editor, on) = (self.editor.clone(), hit.clone());
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-            if phase != DispatchPhase::Bubble || !editor.read(cx).text_drag {
+            if phase != DispatchPhase::Bubble || !editor.read(cx).pointer.selecting {
                 return;
             }
             if event.pressed_button != Some(MouseButton::Left) {
-                editor.update(cx, |editor, _| editor.text_drag = false);
+                editor.update(cx, |editor, _| editor.pointer.selecting = false);
                 return;
             }
             let Some(at) = on(event.position) else { return };
@@ -542,8 +618,8 @@ impl CodeView {
         });
         let editor = self.editor.clone();
         window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-            if phase == DispatchPhase::Bubble && editor.read(cx).text_drag {
-                editor.update(cx, |editor, _| editor.text_drag = false);
+            if phase == DispatchPhase::Bubble && editor.read(cx).pointer.selecting {
+                editor.update(cx, |editor, _| editor.pointer.selecting = false);
             }
         });
         let (editor, hitbox) = (self.editor.clone(), state.hitbox.clone());
@@ -552,28 +628,9 @@ impl CodeView {
                 return;
             }
             let delta = event.delta.pixel_delta(line_height);
-            editor.update(cx, |editor, cx| editor.scroll_by(delta, cx));
+            editor.update(cx, |editor, cx| editor.scroll_by(other, delta, cx));
         });
     }
-}
-
-/// Where a click at `at` leaves `selection`, and the mode. It puts the
-/// cursor there; with shift, or in select mode (`v`), it extends the
-/// selection to there instead. A double click selects the word, a triple
-/// click the line. The mode stays as it was.
-pub(super) fn clicked(buffer: &ghostwrite_core::Buffer, selection: Range, mode: Mode, at: usize, extend: bool, clicks: usize) -> (Range, Mode) {
-    let text = buffer.text();
-    let to = |anchor: usize| Range::new(anchor, if mode == Mode::Insert || at < anchor { at } else { ghostwrite_core::next_char(text, at) });
-    if clicks >= 3 {
-        let line = buffer.line_of(at);
-        let lines = buffer.lines_range(line..line + 1);
-        return (Range::new(lines.start, lines.end), mode);
-    }
-    if clicks == 2 {
-        let word = ghostwrite_core::textobject::text_object(buffer, Range::point(at), 'w', false).unwrap_or(Range::point(at));
-        return (word, mode);
-    }
-    if extend || mode == Mode::Select { (to(selection.anchor), mode) } else { (Range::point(at), mode) }
 }
 
 /// The cursor: a filled cell with its char redrawn on top, or a bar in
@@ -724,10 +781,15 @@ impl Editor {
     /// Rows above each line of the active file wrapped at `cols`, and the
     /// total last: worked out once per version of the text and width, not
     /// every frame.
-    fn row_offsets(&mut self, cols: usize) -> std::sync::Arc<Vec<usize>> {
-        let Some(doc) = self.project.tabs.active().map(|t| &t.doc) else { return Default::default() };
+    fn row_offsets(&mut self, other: Option<super::DocId>, cols: usize) -> std::sync::Arc<Vec<usize>> {
+        let tab = match other {
+            Some(doc) => self.project.tabs.by_id(doc),
+            None => self.project.tabs.active(),
+        };
+        let Some(doc) = tab.map(|t| &t.doc) else { return Default::default() };
         let key = (doc.id, doc.buffer.version(), cols);
-        if let Some((cached, offsets)) = &self.wrapped
+        let cache = if other.is_some() { &self.wrapped_other } else { &self.wrapped };
+        if let Some((cached, offsets)) = cache
             && *cached == key
         {
             return offsets.clone();
@@ -740,45 +802,8 @@ impl Editor {
             offsets.push(offsets[line] + count);
         }
         let offsets = std::sync::Arc::new(offsets);
-        self.wrapped = Some((key, offsets.clone()));
+        *(if other.is_some() { &mut self.wrapped_other } else { &mut self.wrapped }) = Some((key, offsets.clone()));
         offsets
-    }
-
-    /// A click in the text: see [`clicked`].
-    pub(super) fn click(&mut self, at: usize, extend: bool, clicks: usize, cx: &mut gpui::Context<Self>) {
-        if self.resizing() {
-            return;
-        }
-        if self.modal.mode == Mode::Tree {
-            self.modal.mode = Mode::Normal;
-        }
-        self.modal.leave(Mode::Terminal);
-        let mode = self.modal.mode;
-        let Some(tab) = self.tab_mut() else { return };
-        let (selection, mode) = clicked(&tab.doc.buffer, tab.view.selection, mode, at, extend, clicks);
-        tab.select(selection, Autoscroll::Fit);
-        self.modal.mode = mode;
-        self.completion = None;
-        self.text_drag = clicks == 1;
-        cx.notify();
-    }
-
-    /// The mouse dragged, from a click, to `at`: select from where it was pressed.
-    pub(super) fn drag_to(&mut self, at: usize, cx: &mut gpui::Context<Self>) {
-        let mode = self.modal.mode;
-        let Some(tab) = self.tab_mut() else { return };
-        let (selection, _) = clicked(&tab.doc.buffer, tab.view.selection, Mode::Select, at, true, 1);
-        let selection = if mode == Mode::Insert { Range::new(selection.anchor, at) } else { selection };
-        if selection != tab.view.selection {
-            tab.select(selection, Autoscroll::Fit);
-            cx.notify();
-        }
-    }
-
-    pub(super) fn scroll_by(&mut self, delta: Point<Pixels>, cx: &mut gpui::Context<Self>) {
-        let Some(tab) = self.tab_mut() else { return };
-        tab.view.scroll_top = (tab.view.scroll_top - delta.y).max(px(0.));
-        cx.notify();
     }
 }
 
@@ -818,6 +843,7 @@ mod tests {
             mode: Mode::Normal,
             line_count: 1,
             selection: Range::point(0),
+            others: vec![],
             autoscroll: Some(Autoscroll::Fit),
             scroll_top,
             cursor: 0,

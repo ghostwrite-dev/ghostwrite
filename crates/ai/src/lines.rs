@@ -55,6 +55,16 @@ pub fn window(text: &str, around: Range<usize>, bytes: usize, mark: bool) -> Str
     numbered(&text[byte(first)..byte(last)], first, mark.then_some(around))
 }
 
+/// The bytes `lines` take up in `text` (past its end: its end).
+pub fn bytes_of(text: &str, lines: Range<usize>) -> Range<usize> {
+    let at = |line: usize| match line.checked_sub(1) {
+        None => 0,
+        Some(before) => text.match_indices('\n').nth(before).map_or(text.len(), |(newline, _)| newline + 1),
+    };
+    let start = at(lines.start);
+    start..at(lines.end).max(start)
+}
+
 /// The byte where each line of `text` starts.
 pub fn line_starts(text: &str) -> Vec<usize> {
     std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1).filter(|&i| i < text.len())).collect()
@@ -72,7 +82,7 @@ pub fn unnumbered(lines: &[String]) -> (Vec<String>, Option<usize>) {
         Some((rest[..digits].parse::<usize>().ok()?, rest[digits + sep.len_utf8()..].to_string()))
     };
     let Some(split): Option<Vec<(usize, String)>> = lines.iter().map(split).collect() else { return (lines.to_vec(), None) };
-    let counts_up = split.windows(2).all(|w| w[1].0 == w[0].0 + 1);
+    let counts_up = split.windows(2).all(|w| Some(w[1].0) == w[0].0.checked_add(1));
     match split.first() {
         Some(&(n, _)) if counts_up && n > 0 => (split.into_iter().map(|(_, l)| l).collect(), Some(n - 1)),
         _ => (lines.to_vec(), None),
@@ -130,7 +140,7 @@ pub fn find(text: &str, quoted: &[String], near: Range<usize>, pointed: bool) ->
     }
     // A close copy: the most alike within reach of the number, unless another
     // about as alike is as near.
-    let reach = near.start.saturating_sub(CLOSE_WITHIN)..=(near.start + CLOSE_WITHIN).min(*starts.end());
+    let reach = near.start.saturating_sub(CLOSE_WITHIN)..=near.start.saturating_add(CLOSE_WITHIN).min(*starts.end());
     let away = |i: usize| i.abs_diff(near.start);
     let mut scored: Vec<(f64, usize)> = reach.filter_map(|i| Some((alike(&lines[i..i + quoted.len()], quoted)?, i))).collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(away(a.1).cmp(&away(b.1))));
@@ -250,6 +260,15 @@ mod tests {
 
     fn at(text: &str, quoted: &[&str], near: usize, pointed: bool) -> Option<(Range<usize>, Match)> {
         find(text, &lines(quoted), near..near + 1, pointed).map(|f| (f.lines, f.how))
+    }
+
+    #[test]
+    fn the_bytes_of_lines_are_by_the_lines_of_the_text() {
+        let text = "→→\ntwo\nthree";
+        assert_eq!(&text[bytes_of(text, 0..1)], "→→\n");
+        assert_eq!(&text[bytes_of(text, 1..2)], "two\n");
+        assert_eq!(&text[bytes_of(text, 2..3)], "three");
+        assert_eq!(bytes_of(text, 9..12), text.len()..text.len(), "past the end: the end");
     }
 
     #[test]

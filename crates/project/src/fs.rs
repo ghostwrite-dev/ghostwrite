@@ -6,6 +6,76 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
+/// How a file's text is stored, to be written back the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Encoding {
+    #[default]
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+    /// What's left: text that isn't UTF-8 is most likely this, a superset of Latin-1.
+    Windows1252,
+}
+
+impl Encoding {
+    pub fn name(self) -> &'static str {
+        match self {
+            Encoding::Utf8 => "UTF-8",
+            Encoding::Utf8Bom => "UTF-8 with a BOM",
+            Encoding::Utf16Le | Encoding::Utf16Be => "UTF-16",
+            Encoding::Windows1252 => "Windows-1252",
+        }
+    }
+
+    /// The text in `bytes`, and how it's stored. A file with NUL bytes that isn't UTF-16 is
+    /// binary, not text, and an error: opened as text, saving it would ruin it.
+    pub fn decode(bytes: &[u8]) -> std::io::Result<(String, Encoding)> {
+        let units = |bytes: &[u8], make: fn([u8; 2]) -> u16| String::from_utf16_lossy(&bytes.chunks_exact(2).map(|b| make([b[0], b[1]])).collect::<Vec<u16>>());
+        if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+            return Ok((units(rest, u16::from_le_bytes), Encoding::Utf16Le));
+        }
+        if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+            return Ok((units(rest, u16::from_be_bytes), Encoding::Utf16Be));
+        }
+        if bytes.contains(&0) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "it's a binary file"));
+        }
+        if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF])
+            && let Ok(text) = std::str::from_utf8(rest)
+        {
+            return Ok((text.to_string(), Encoding::Utf8Bom));
+        }
+        match std::str::from_utf8(bytes) {
+            Ok(text) => Ok((text.to_string(), Encoding::Utf8)),
+            Err(_) => Ok((encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes).0.into_owned(), Encoding::Windows1252)),
+        }
+    }
+
+    /// `text` as it's stored; an error if there's something in it this encoding can't hold.
+    pub fn encode(self, text: &str) -> Result<Vec<u8>, String> {
+        let with = |bom: &[u8], rest: &[u8]| [bom, rest].concat();
+        Ok(match self {
+            Encoding::Utf8 => text.as_bytes().to_vec(),
+            Encoding::Utf8Bom => with(&[0xEF, 0xBB, 0xBF], text.as_bytes()),
+            Encoding::Utf16Le => with(&[0xFF, 0xFE], &text.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>()),
+            Encoding::Utf16Be => with(&[0xFE, 0xFF], &text.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>()),
+            Encoding::Windows1252 => {
+                let (bytes, _, lossy) = encoding_rs::WINDOWS_1252.encode(text);
+                if lossy {
+                    return Err("there's a character in it Windows-1252 can't hold, so it wasn't written".into());
+                }
+                bytes.into_owned()
+            }
+        })
+    }
+}
+
+/// The text of the file at `path`, however it's stored, and how.
+pub fn read_text(path: &Path) -> std::io::Result<(String, Encoding)> {
+    Encoding::decode(&std::fs::read(path)?)
+}
+
 /// Write `bytes` to `path` so it's never half-written: into a file beside
 /// it, flushed to the disk, then renamed over it. A symlink is written
 /// through, and an existing file keeps its permissions. Where a file can't
@@ -14,7 +84,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let name = target.file_name().map_or_else(Default::default, |n| n.to_string_lossy().into_owned());
-    let temp = dir.join(format!(".{name}.ghostwrite-{}.tmp", std::process::id()));
+    // Its own, so that saves at the same moment, from any thread, can't write into each other's.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let write = WRITES.fetch_add(1, Ordering::Relaxed);
+    let temp = dir.join(format!(".{name}.ghostwrite-{}-{write}.tmp", std::process::id()));
     // Can't make a file beside it: write it where it is.
     let Ok(mut file) = std::fs::File::create(&temp) else { return std::fs::write(&target, bytes) };
     let written = (|| {
@@ -121,8 +194,8 @@ pub fn trash(path: &Path) -> Result<(), String> {
 }
 
 fn check_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.split('/').any(|part| part == "..") {
-        return Err("give a name without `..`".into());
+    if name.is_empty() || name.starts_with('/') || name.split('/').any(|part| part == "..") {
+        return Err("give a name in the folder: not starting with `/`, without `..`".into());
     }
     Ok(())
 }
@@ -131,6 +204,44 @@ fn check_name(name: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn text_goes_back_as_it_came() {
+        for (bytes, text, encoding) in [
+            (b"plain\n".to_vec(), "plain\n", Encoding::Utf8),
+            ("bl\u{e5}\n".as_bytes().to_vec(), "bl\u{e5}\n", Encoding::Utf8),
+            ([&[0xEF, 0xBB, 0xBF], b"bom\n".as_slice()].concat(), "bom\n", Encoding::Utf8Bom),
+            (vec![0xFF, 0xFE, b'h', 0, b'i', 0], "hi", Encoding::Utf16Le),
+            (vec![0xFE, 0xFF, 0, b'h', 0, b'i'], "hi", Encoding::Utf16Be),
+            (vec![b'b', b'l', 0xE5, b'\n'], "bl\u{e5}\n", Encoding::Windows1252),
+        ] {
+            let (read, found) = Encoding::decode(&bytes).unwrap();
+            assert_eq!((read.as_str(), found), (text, encoding));
+            assert_eq!(found.encode(&read).unwrap(), bytes, "{encoding:?}");
+        }
+        assert!(Encoding::decode(&[b'a', 0, b'b']).is_err(), "binary isn't text");
+        assert!(Encoding::Windows1252.encode("\u{2192}").is_err(), "not written with something lost");
+    }
+
+    #[test]
+    fn saves_at_the_same_moment_leave_one_of_them_whole() {
+        let path = crate::scratch_dir("atomic-race").join("file");
+        let texts: Vec<String> = (0..8).map(|i| i.to_string().repeat(200_000)).collect();
+        std::thread::scope(|threads| {
+            for text in &texts {
+                let path = &path;
+                threads.spawn(move || {
+                    for _ in 0..5 {
+                        write_atomic(path, text.as_bytes()).unwrap();
+                    }
+                });
+            }
+        });
+        assert!(texts.contains(&std::fs::read_to_string(&path).unwrap()));
+        let left = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(left, 1, "and no temporary files");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn writes_whole_files_through_symlinks_keeping_permissions() {
         use std::os::unix::fs::PermissionsExt as _;

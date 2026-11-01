@@ -8,6 +8,7 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 cargo build --release
+scripts/build-plugins.sh
 
 # Replace only our own bundle, never something else that happens to be there.
 if [ -e "$APP" ]; then
@@ -19,47 +20,9 @@ if [ -e "$APP" ]; then
 fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/ghostwrite "$APP/Contents/MacOS/ghostwrite"
+cp -R target/bundled-plugins "$APP/Contents/Resources/plugins"
 
-cat > "$APP/Contents/Info.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key><string>Ghostwrite</string>
-    <key>CFBundleDisplayName</key><string>Ghostwrite</string>
-    <key>CFBundleIdentifier</key><string>app.ghostwrite.Ghostwrite</string>
-    <key>CFBundleExecutable</key><string>ghostwrite</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>$VERSION</string>
-    <key>CFBundleVersion</key><string>$VERSION</string>
-    <key>LSMinimumSystemVersion</key><string>11.0</string>
-    <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
-    <key>NSHighResolutionCapable</key><true/>
-    <key>CFBundleDocumentTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleTypeName</key><string>Text</string>
-            <key>CFBundleTypeRole</key><string>Editor</string>
-            <key>LSHandlerRank</key><string>Alternate</string>
-            <key>LSItemContentTypes</key>
-            <array>
-                <string>public.text</string>
-                <string>net.daringfireball.markdown</string>
-            </array>
-        </dict>
-        <dict>
-            <key>CFBundleTypeName</key><string>PDF</string>
-            <key>CFBundleTypeRole</key><string>Viewer</string>
-            <key>LSHandlerRank</key><string>Alternate</string>
-            <key>LSItemContentTypes</key>
-            <array>
-                <string>com.adobe.pdf</string>
-            </array>
-        </dict>
-    </array>
-</dict>
-</plist>
-EOF
+scripts/info-plist.sh "$VERSION" > "$APP/Contents/Info.plist"
 
 codesign --force --sign - "$APP"
 "$LSREGISTER" -f "$APP"

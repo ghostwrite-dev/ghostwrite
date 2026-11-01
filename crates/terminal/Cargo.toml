@@ -1,0 +1,9 @@
+[package]
+name = "ghostwrite-terminal"
+description = "The user's shell on a pseudo-terminal, emulated by alacritty's terminal: what's on its screen, to draw and to read."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true

@@ -79,11 +79,21 @@ fn editors(cx: &App) -> Vec<(WindowHandle<Workspace>, Entity<Editor>)> {
     workspaces(cx).into_iter().filter_map(|w| Some((w, editor(&w)?))).collect()
 }
 
+/// You said to quit without saving: nothing's kept to bring back next time.
+fn forget_unsaved(cx: &mut App) {
+    for (_, editor) in editors(cx) {
+        editor.update(cx, |editor, _| editor.forget_unsaved());
+    }
+}
+
 /// ⌘Q and `:qa`: quit, after asking (in the first window with any) about
 /// unsaved changes in every window, unless `force`d.
 pub fn quit(force: bool, cx: &mut App) {
     let dirty: Vec<_> = editors(cx).into_iter().filter(|(_, e)| e.read(cx).is_dirty()).collect();
-    let Some((window, _)) = dirty.first().filter(|_| !force).cloned() else { return cx.quit() };
+    let Some((window, _)) = dirty.first().filter(|_| !force).cloned() else {
+        forget_unsaved(cx);
+        return cx.quit();
+    };
     let files: usize = dirty.iter().map(|(_, e)| e.read(cx).dirty_count()).sum();
     window
         .update(cx, |_, window, cx| {
@@ -92,7 +102,12 @@ pub fn quit(force: bool, cx: &mut App) {
             let answer = window.prompt(PromptLevel::Warning, &message, None, &["Save All and Quit", "Quit Without Saving", "Cancel"], cx);
             cx.spawn(async move |_, cx| match answer.await {
                 Ok(0) => cx.update(write_all_and_quit).ok(),
-                Ok(1) => cx.update(|cx| cx.quit()).ok(),
+                Ok(1) => cx
+                    .update(|cx| {
+                        forget_unsaved(cx);
+                        cx.quit();
+                    })
+                    .ok(),
                 _ => None,
             })
             .detach();
@@ -192,6 +207,7 @@ impl Workspace {
             if let Some(session) = &session {
                 editor.restore(session, cx);
             }
+            editor.recover(cx);
             editor.open_paths(files, cx);
             editor
         });
@@ -205,7 +221,12 @@ impl Workspace {
                 if let Screen::Project(editor) = &this.screen {
                     editor.read(cx).save_session();
                 }
-                if *force || this.may_close(window, cx) {
+                if *force {
+                    if let Screen::Project(editor) = &this.screen {
+                        editor.update(cx, |editor, _| editor.forget_unsaved());
+                    }
+                    window.remove_window();
+                } else if this.may_close(window, cx) {
                     window.remove_window();
                 }
             }
@@ -229,8 +250,10 @@ impl Workspace {
             &["Leave", "Cancel"],
             cx,
         );
+        let editor = editor.clone();
         cx.spawn_in(window, async move |this, cx| {
             if answer.await == Ok(0) {
+                editor.update(cx, |editor, _| editor.forget_unsaved()).ok();
                 this.update_in(cx, |this, window, cx| then(this, window, cx)).ok();
             }
         })
