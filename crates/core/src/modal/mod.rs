@@ -4,8 +4,9 @@
 //! count). [`Modal::key`] applies one key to a [`Target`] (a buffer and its
 //! selection); anything that reaches beyond the buffer, like opening the
 //! command line, comes back as an [`Effect`] for the editor to carry out.
-//! In normal and select mode every key is consumed, so stray letters never
-//! reach the text; in insert mode typed text arrives through
+//! In normal and select mode a key is looked up in the [`Keymap`], which
+//! binds keys to named [`Command`]s, and every key is consumed, so stray
+//! letters never reach the text; in insert mode typed text arrives through
 //! [`Modal::insert`]. Tree mode drives the file tree instead of a buffer:
 //! [`Modal::tree_key`] turns keys into [`TreeCommand`]s. Terminal mode
 //! gives the keys to the user's shell: the editor sends them there itself,
@@ -20,13 +21,19 @@
 //!
 //! While the completion menu is open, [`Modal::menu_key`] has first say.
 //!
-//! The modes live in their own files: `normal` (normal and select mode, and
-//! the motions AI mode shares), `insert` (with the completion menu's keys),
-//! and `tree`.
+//! The modes live in their own files: `normal` (normal and select mode's
+//! commands, which AI mode shares), `insert` (with the completion menu's
+//! keys), and `tree`; the commands' names are in `command`, and which keys
+//! run them in `keymap`. Insert and tree mode's keys are their own.
 
+mod command;
 mod insert;
+mod keymap;
 mod normal;
 mod tree;
+
+pub use command::Command;
+pub use keymap::{Bound, CheatLine, DEFAULT, Keymap, Section, YOURS, parse_keys, sequence};
 
 #[cfg(test)]
 mod tests;
@@ -69,7 +76,7 @@ impl Mode {
 }
 
 /// A key, as modal editing sees it (the UI translates its keystrokes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
     Char(char),
     Ctrl(char),
@@ -169,6 +176,29 @@ pub enum Effect {
     /// `space j`: go to the next error in the file (or warning, if it has
     /// no errors), and bring a file's pages there.
     NextProblem,
+    /// A `:` command of yours, bound to a key (`"ctrl-s": ":w"`).
+    Run(&'static str),
+    /// `C`, `alt-C`: each selection copied to the line below (or above), `count` times.
+    CopySelections {
+        below: bool,
+        count: usize,
+    },
+    /// `,`, `alt-,`: back to one cursor; all but the main one.
+    KeepPrimarySelection,
+    RemovePrimarySelection,
+    /// `)`, `(`: the main cursor so many on, or back.
+    RotateSelections {
+        forward: bool,
+        count: usize,
+    },
+    /// `alt-minus`, `alt-_`: the selections merged (`touching`: only those that touch).
+    MergeSelections {
+        touching: bool,
+    },
+    /// `&`: the selections lined up.
+    AlignSelections,
+    /// `s`: a cursor on each match of a regex, typed next.
+    SelectRegex,
 }
 
 /// Where on screen (`zt`, `gc`…).
@@ -269,39 +299,22 @@ pub trait Registers {
     fn set_clipboard(&mut self, text: String);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
-    Goto,
-    Space,
-    /// `ctrl-w`, then: `v` `w` `q`, as in helix.
-    Pane,
-    Find {
-        forward: bool,
-        till: bool,
-    },
-    Replace,
-    /// `m`, then: `m` `s` `r` `d` `a` `i`.
-    Match,
-    SurroundAdd,
-    SurroundDelete,
-    SurroundReplace,
-    SurroundReplaceWith(char),
-    Object {
-        around: bool,
-    },
-    /// `"`, then the register's name.
-    Register,
+    /// Keys toward a binding (`g`, `space`, `ctrl-w`), which lead on to more.
+    Keys(Vec<Key>),
+    /// A command that waits for a char (`f`, `r`, `mi`, `"`), and the keys
+    /// it was run with. `mr` waits for two: the first is `first`.
+    Char { command: Command, keys: Vec<Key>, first: Option<char> },
     /// `ctrl-r` while typing, then the register to type out.
     InsertRegister,
-    /// `z`: where the cursor's line goes on screen.
-    View,
-    /// `]`, `[`: the next or previous something (`d`: diagnostic).
-    Next(bool),
 }
 
 #[derive(Debug, Clone)]
 pub struct Modal {
     pub mode: Mode,
+    /// Which keys run which command in normal and select mode.
+    keymap: &'static Keymap,
     /// The modes AI and terminal mode were entered from, innermost last.
     entered_from: Vec<Mode>,
     pending: Option<Pending>,
@@ -328,6 +341,7 @@ impl Default for Modal {
     fn default() -> Self {
         Self {
             mode: Mode::Normal,
+            keymap: Keymap::standard(),
             entered_from: vec![],
             pending: None,
             count: None,
@@ -352,31 +366,53 @@ impl Modal {
         format!("{register}{count}{pending}")
     }
 
-    /// The command started, if one is: `space`, `g`.
-    pub fn pending_keys(&self) -> &'static str {
-        match self.pending {
-            Some(Pending::Goto) => "g",
-            Some(Pending::Space) => "space",
-            Some(Pending::Pane) => "ctrl-w",
-            Some(Pending::Find { forward: true, till: false }) => "f",
-            Some(Pending::Find { forward: true, till: true }) => "t",
-            Some(Pending::Find { forward: false, till: false }) => "F",
-            Some(Pending::Find { forward: false, till: true }) => "T",
-            Some(Pending::Replace) => "r",
-            Some(Pending::Match) => "m",
-            Some(Pending::SurroundAdd) => "ms",
-            Some(Pending::SurroundDelete) => "md",
-            Some(Pending::SurroundReplace) => "mr",
-            Some(Pending::SurroundReplaceWith(_)) => "mr…",
-            Some(Pending::Object { around: true }) => "ma",
-            Some(Pending::Object { around: false }) => "mi",
-            Some(Pending::Register) => "\"",
-            Some(Pending::InsertRegister) => "ctrl-r",
-            Some(Pending::View) => "z",
-            Some(Pending::Next(true)) => "]",
-            Some(Pending::Next(false)) => "[",
-            None => "",
+    /// The command started, if one is: `space`, `g`, `mr…`.
+    pub fn pending_keys(&self) -> String {
+        match &self.pending {
+            Some(Pending::Keys(keys)) => sequence(keys),
+            Some(Pending::Char { keys, first, .. }) => format!("{}{}", sequence(keys), if first.is_some() { "…" } else { "" }),
+            Some(Pending::InsertRegister) => "ctrl-r".into(),
+            None => String::new(),
         }
+    }
+
+    /// The keymap keys are looked up in.
+    pub fn keymap(&self) -> &'static Keymap {
+        self.keymap
+    }
+
+    /// Look keys up in `keymap` from now on (yours, from the config).
+    pub fn set_keymap(&mut self, keymap: &'static Keymap) {
+        self.keymap = keymap;
+    }
+
+    /// The keys typed toward a binding, with `key` after them, if a key
+    /// would be looked up in the keymap now.
+    fn keys_with(&self, key: Key) -> Option<Vec<Key>> {
+        if !matches!(self.mode, Mode::Normal | Mode::Select | Mode::Ai) {
+            return None;
+        }
+        let mut keys = match &self.pending {
+            None => vec![],
+            Some(Pending::Keys(keys)) => keys.clone(),
+            Some(_) => return None,
+        };
+        keys.push(key);
+        Some(keys)
+    }
+
+    /// The command `key` would run now, after the keys typed so far.
+    pub fn command_for(&self, key: Key) -> Option<Command> {
+        match self.keymap.find(&self.keys_with(key)?) {
+            keymap::Found::Bound(Bound::Command(command)) => Some(*command),
+            _ => None,
+        }
+    }
+
+    /// Whether the keymap has `key`, after the keys typed so far: bound, or
+    /// leading on to more.
+    pub fn binds(&self, key: Key) -> bool {
+        self.keys_with(key).is_some_and(|keys| !matches!(self.keymap.find(&keys), keymap::Found::Nothing))
     }
 
     /// Forget the command started, and its count.

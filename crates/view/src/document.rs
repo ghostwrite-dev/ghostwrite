@@ -1,22 +1,20 @@
 //! One open file: its buffer, where it lives on disk, its language and
 //! highlights, its language server, and what's beside it (see
-//! [`super::aside`]). How it's shown (selection, scroll) is its tab's
-//! [`View`](super::tabs::View). A file that's only pages is a line for each, read-only, and where
+//! [`crate::aside`]). How it's shown (selection, scroll) is its tab's
+//! [`View`](crate::tabs::View). A file that's only pages is a line for each, read-only, and where
 //! that text is on its pages.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::aside::Aside;
+use crate::rendered::Rendered;
 use ghostwrite_core::Language;
 use ghostwrite_core::indent::IndentUnit;
 use ghostwrite_core::syntax::{self, Span};
 use ghostwrite_core::{Buffer, Range};
 use ghostwrite_lsp::Diagnostic;
 use ghostwrite_project::fs::{Stamp, denormalize, normalize};
-use gpui::SharedString;
-
-use super::aside::Aside;
-use super::rendered::Rendered;
 
 pub type DocId = usize;
 
@@ -66,7 +64,7 @@ pub struct Document {
     /// Its pages, if it has any, made once they're first asked for.
     pub rendered: Option<Rendered>,
     /// Its server's colors, laid over the grammar's.
-    pub semantic: super::semantic::Semantic,
+    pub semantic: crate::semantic::Semantic,
     pub lsp: Option<ghostwrite_lsp::Document>,
     pub diagnostics: Vec<Diagnostic>,
     /// A tab that shows another document (its pages): which, and it's called this.
@@ -147,11 +145,11 @@ impl Document {
         self.pages_are_the_text() || self.view_of.is_some() || self.output
     }
 
-    pub fn name(&self) -> SharedString {
+    pub fn name(&self) -> Arc<str> {
         if let Some((_, name)) = &self.view_of {
-            return name.clone().into();
+            return name.as_str().into();
         }
-        self.path.as_deref().and_then(Path::file_name).map_or("untitled".into(), |n| n.to_string_lossy().into_owned().into())
+        self.path.as_deref().and_then(Path::file_name).map_or("untitled".into(), |n| n.to_string_lossy().into())
     }
 
     /// What the language is called, for Claude and the status line.
@@ -372,5 +370,38 @@ impl Document {
 
     pub fn set_diagnostics(&mut self, diagnostics: Vec<ghostwrite_lsp::RawDiagnostic>) {
         self.diagnostics = ghostwrite_lsp::convert::diagnostics(self.buffer.text(), diagnostics);
+    }
+}
+
+/// The problem `space j` goes to from `cursor`, and which of how many of
+/// its kind it is: the next error after it (round to the first), or with
+/// no errors, the next warning.
+pub fn next_problem(diagnostics: &[ghostwrite_lsp::Diagnostic], cursor: usize) -> Option<(&ghostwrite_lsp::Diagnostic, usize, usize)> {
+    use ghostwrite_lsp::Severity;
+    let worst = [Severity::Error, Severity::Warning].into_iter().find(|s| diagnostics.iter().any(|d| d.severity == *s))?;
+    let mut kind: Vec<&ghostwrite_lsp::Diagnostic> = diagnostics.iter().filter(|d| d.severity == worst).collect();
+    kind.sort_by_key(|d| d.range.start);
+    kind.dedup_by_key(|d| d.range.start);
+    let ix = kind.iter().position(|d| d.range.start > cursor).unwrap_or(0);
+    Some((kind[ix], ix + 1, kind.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use ghostwrite_lsp::{Diagnostic, Severity};
+
+    use super::next_problem;
+
+    #[test]
+    fn space_j_goes_to_the_next_error_round_to_the_first_then_warnings() {
+        let d = |at: usize, severity| Diagnostic { range: at..at + 1, severity, message: format!("at {at}") };
+        let all = [d(30, Severity::Error), d(5, Severity::Warning), d(10, Severity::Error), d(20, Severity::Info)];
+        let at = |cursor| next_problem(&all, cursor).map(|(d, nth, of)| (d.range.start, nth, of));
+        assert_eq!(at(0), Some((10, 1, 2)));
+        assert_eq!(at(10), Some((30, 2, 2)));
+        assert_eq!(at(30), Some((10, 1, 2)), "round to the first");
+        let warnings = [d(5, Severity::Warning), d(20, Severity::Info)];
+        assert_eq!(next_problem(&warnings, 9).map(|(d, ..)| d.range.start), Some(5), "no errors: the warnings");
+        assert!(next_problem(&[d(20, Severity::Info)], 0).is_none(), "info isn't a problem");
     }
 }

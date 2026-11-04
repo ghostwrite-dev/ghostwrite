@@ -21,7 +21,7 @@ scripts/install-windows.ps1     # Windows: installs for this user, with a Start 
 ```
 
 Building needs Rust; on macOS the Metal toolchain, on Linux the packages named at the top of
-its script, and on Windows the MSVC toolchain. `--no-default-features --features typst,lean`
+its script, and on Windows the MSVC toolchain. `--no-default-features --features lean,wasm-plugins`
 builds without local models, and without needing `cmake` and a C++ compiler for llama.cpp.
 
 **How far each system has come.** macOS is what it's used on every day. Windows and Linux
@@ -213,10 +213,10 @@ and nothing below `app` knows about the UI.
 | `plugin` | what a plugin can add, the plugins there are, and installing them |
 | `plugin-api` | what a plugin written in Rust compiles against, and the interface itself |
 | `wasm` | runs plugins compiled to WebAssembly, sandboxed, and their grammars |
-| `typst` | Typst compiled natively (the `typst` feature), until the plugin in `plugins/typst` has taken over for good |
 | `lean` | a plugin: Lean's language, `lake serve`, its abbreviations, and its goals beside a file |
 | `model` | a local model: llama.cpp, in a process of its own, and the memory it may use |
 | `ai` | the model: the reply format, prompts, backends, the review story, placing steps, its notes kept per project |
+| `view` | the editor's state, without drawing: documents, tabs, the project, search, registers, jumps, `:` commands, and the story under review |
 | `app` | the application (binary `ghostwrite`) |
 
 The editor knows no file type in particular. What's particular to one is a plugin:
@@ -358,12 +358,23 @@ all of them, as one undo.
 
 ## Your own keys and theme
 
-In `~/.config/ghostwrite/config.json`, `keys` binds keys in normal and select mode to
-`:` commands, and yours come before a plugin's:
+In `~/.config/ghostwrite/config.json`, `keys` binds keys in normal and select mode. A key
+can run a `:` command (it starts with `:`), or one of the editor's own commands by name, as
+helix names them where helix has it (`extend_line_below`, `goto_definition`, `move_char_left`;
+`space ?` shows what each key does). `no_op` unbinds a key. Keys pressed one after another are
+written apart (`space w`, `g x`), and a key can lead on to keys of your own (`Z Z`). Yours come
+before a plugin's, and `space ?` shows them:
 
 ```json
-{ "keys": { "ctrl-s": ":w", "space w": ":wa" }, "theme_dark": "One Dark", "theme_light": "One Light" }
+{
+  "keys": { "ctrl-s": ":w", "space w": ":wa", "Z": "extend_line_below", "x": "no_op" },
+  "theme_dark": "One Dark",
+  "theme_light": "One Light"
+}
 ```
+
+A command name that isn't one is said when the editor starts, and that key stays as it was.
+The commands and the default keys are in `crates/core/src/modal/command.rs` and `keymap.rs`.
 
 Themes are found by name in `~/.config/ghostwrite/themes/`, as JSON files in Zed's format.
 

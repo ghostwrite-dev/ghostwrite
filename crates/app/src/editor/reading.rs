@@ -11,10 +11,10 @@
 //! A story's command waiting in the terminal is reviewed here in AI mode:
 //! look through what's on it, and Tab runs it as ever.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ghostwrite_core::{Buffer, Key, Mode, Range};
-use ghostwrite_terminal::Transcript;
+use ghostwrite_terminal::{Transcript, located, path_at};
 use gpui::{Context, Window};
 
 use super::document::{DocId, Document};
@@ -280,52 +280,9 @@ impl Editor {
     }
 }
 
-/// The chars a path (and the line and column after it) is made of.
-pub(super) fn in_path(c: char) -> bool {
-    c.is_alphanumeric() || "/._-~+@:\\".contains(c)
-}
-
-/// The path under `at`, with its `:line:column` if it has them.
-fn path_at(text: &str, at: usize) -> String {
-    let start = text[..at].char_indices().rev().take_while(|(_, c)| in_path(*c)).last().map_or(at, |(i, _)| i);
-    let end = text[at..].char_indices().find(|(_, c)| !in_path(*c)).map_or(text.len(), |(i, _)| at + i);
-    text[start..end].to_string()
-}
-
-/// The file `named` is (`path`, `path:line`, `path:line:column`, as compilers
-/// write them), if there is one: the line and column from zero.
-pub(super) fn located(named: &str, root: &Path, near: Option<&Path>) -> Option<(PathBuf, usize, usize)> {
-    let named = named.trim_start_matches(|c: char| !in_path(c)).trim_end_matches(|c: char| !in_path(c) || c == ':' || c == '.');
-    let mut parts = named.split(':');
-    let path = parts.next().filter(|p| !p.is_empty())?;
-    let mut number = || parts.next().and_then(|n| n.parse::<usize>().ok()).map(|n| n.saturating_sub(1));
-    let (line, column) = (number().unwrap_or(0), number().unwrap_or(0));
-    let path = match path.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
-        None => PathBuf::from(path),
-    };
-    let candidates = if path.is_absolute() { vec![path] } else { [Some(root), near].into_iter().flatten().map(|dir| dir.join(&path)).collect() };
-    candidates.into_iter().find(|path| path.is_file()).map(|path| (path, line, column))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_path_is_read_with_its_line_and_column() {
-        let text = "error: oops\n --> src/main.rs:12:5\n";
-        let at = text.find("main").unwrap();
-        assert_eq!(path_at(text, at), "src/main.rs:12:5");
-        let root = std::env::temp_dir().join(format!("ghostwrite-gf-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
-        let root = root.as_path();
-        assert_eq!(located("src/main.rs:12:5", root, None), Some((root.join("src/main.rs"), 11, 4)));
-        assert_eq!(located("(src/main.rs:3).", root, None), Some((root.join("src/main.rs"), 2, 0)), "what's around it goes");
-        assert_eq!(located("main.rs", root, Some(&root.join("src"))), Some((root.join("src/main.rs"), 0, 0)), "or by the file");
-        assert_eq!(located("nowhere.rs:1", root, None), None);
-    }
 
     #[test]
     fn a_place_is_a_line_and_char() {

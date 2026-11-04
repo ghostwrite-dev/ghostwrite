@@ -1,8 +1,12 @@
-//! Normal and select mode: motions, selections and edits. AI mode uses the
-//! same motions to look around, but every edit is refused, and the keys
-//! under `space` that would start something else wait for the review.
+//! Normal and select mode: what each command does (the moves, selections
+//! and edits), and keys looked up in the keymap to run them. AI mode uses
+//! the same commands to look around, but every edit is refused, and those
+//! that would start something else (most under `space`) wait for the
+//! review: see [`Command::waits_for_review`].
 
-use super::{Effect, Key, Modal, Mode, Outcome, Pending, Place, Registers, Target};
+use super::command::Command;
+use super::keymap::{Bound, Found};
+use super::{Effect, Key, Modal, Mode, Outcome, Pending, Place, Registers, Review, Target};
 use crate::buffer::Buffer;
 use crate::indent::{self, unindent};
 use crate::language::Language;
@@ -85,139 +89,272 @@ impl Motion {
 }
 
 impl Modal {
+    /// A key in normal, select or AI mode: a digit of a count, a key on the
+    /// way to a binding (`g`, `space`), the char a command waits for, or the
+    /// last key of a binding, which runs its command.
     pub(super) fn normal_key(&mut self, key: Key, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
-        let sel = *t.selection;
-        let extend = self.mode == Mode::Select;
-
-        if let Some(pending) = self.pending.take() {
-            let count = self.count.take().unwrap_or(1);
-            return self.pending_key(pending, key, count, sel, extend, regs, t);
-        }
-        if self.count_digit(key) {
+        let keys = match self.pending.take() {
+            Some(Pending::Char { command, keys, first }) => return self.char_key(command, keys, first, key, t),
+            Some(Pending::Keys(keys)) => keys,
+            _ => vec![],
+        };
+        if keys.is_empty() && self.count_digit(key) {
             return Outcome::Handled;
         }
-        let explicit_count = self.count.take();
+        self.bound_key(keys, key, regs, t)
+    }
+
+    /// `key` after `keys`, looked up in the keymap.
+    fn bound_key(&mut self, mut keys: Vec<Key>, key: Key, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
+        let at_rest = keys.is_empty();
+        keys.push(key);
+        let keymap = self.keymap;
+        match keymap.find(&keys) {
+            // A count before them is for the key after (`5gg`, `2fx`).
+            Found::Keys => {
+                self.sticky_col = None;
+                self.pending = Some(Pending::Keys(keys));
+                Outcome::Handled
+            }
+            Found::Bound(Bound::Command(command)) => self.command(*command, keys, regs, t),
+            // Yours wait while a story's reviewed, as the keys under `space` do.
+            Found::Bound(Bound::Typed(line)) if !self.mode.reviewing() => {
+                self.count = None;
+                Outcome::Effect(Effect::Run(line))
+            }
+            _ => {
+                self.count = None;
+                if !at_rest {
+                    return Outcome::Handled;
+                }
+                self.sticky_col = None;
+                // Other ctrl keys aren't modal editing's: the app may have them.
+                if matches!(key, Key::Ctrl(_)) { Outcome::Ignored } else { Outcome::Handled }
+            }
+        }
+    }
+
+    /// Run `command`, bound to `keys`, or wait for the char it takes.
+    fn command(&mut self, command: Command, keys: Vec<Key>, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
+        if self.mode.reviewing() && command.waits_for_review() {
+            (self.count, self.sticky_col) = (None, None);
+            return Outcome::Handled;
+        }
+        if command.takes_char() {
+            self.sticky_col = None;
+            self.pending = Some(Pending::Char { command, keys, first: None });
+            return Outcome::Handled;
+        }
+        if !command.keeps_column() {
+            self.sticky_col = None;
+        }
+        let count = self.count.take();
+        self.run(command, count, regs, t)
+    }
+
+    /// A command, with the count typed before it, if any: first the moves.
+    fn run(&mut self, command: Command, explicit_count: Option<usize>, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
+        use Command::*;
         let count = explicit_count.unwrap_or(1);
+        let sel = *t.selection;
+        let extend = self.mode == Mode::Select;
         let b = &*t.buffer;
         let text = b.text();
-        let mut sticky = None;
-
-        let moved = match key {
-            Key::Char('h') | Key::Left => Some(movement::move_horizontally(b, sel, false, count, extend)),
-            Key::Char('l') | Key::Right => Some(movement::move_horizontally(b, sel, true, count, extend)),
-            Key::Char('j' | 'k') | Key::Down | Key::Up => {
-                let down = matches!(key, Key::Char('j') | Key::Down);
-                let (r, col) = movement::move_vertically(b, sel, down, count, extend, self.sticky_col, t.indent.width);
-                sticky = Some(col);
+        let cursor = sel.cursor(text);
+        let put = |at: usize| sel.put_cursor(text, at, extend);
+        let next = matches!(
+            command,
+            GotoNextParagraph | GotoNextFunction | GotoNextClass | GotoNextParameter | GotoNextComment | GotoNextTest | GotoNextEntry | GotoNextXmlElement
+        );
+        let to = match command {
+            MoveCharLeft | MoveCharRight => Some(movement::move_horizontally(b, sel, command == MoveCharRight, count, extend)),
+            MoveLineDown | MoveLineUp | PageCursorHalfDown | PageCursorHalfUp | PageCursorDown | PageCursorUp => {
+                let rows = match command {
+                    MoveLineDown | MoveLineUp => count,
+                    PageCursorHalfDown | PageCursorHalfUp => (t.page_rows.max(2) / 2).saturating_mul(count),
+                    _ => t.page_rows.max(2).saturating_mul(count),
+                };
+                let down = matches!(command, MoveLineDown | PageCursorHalfDown | PageCursorDown);
+                let (r, col) = movement::move_vertically(b, sel, down, rows, extend, self.sticky_col, t.indent.width);
+                self.sticky_col = Some(col);
                 Some(r)
             }
-            Key::Ctrl('d' | 'u' | 'f' | 'b') | Key::PageDown | Key::PageUp => {
-                let half = matches!(key, Key::Ctrl('d' | 'u'));
-                let down = matches!(key, Key::Ctrl('d' | 'f') | Key::PageDown);
-                let rows = if half { t.page_rows.max(2) / 2 } else { t.page_rows.max(2) };
-                let (r, col) = movement::move_vertically(b, sel, down, rows.saturating_mul(count), extend, self.sticky_col, t.indent.width);
-                sticky = Some(col);
-                Some(r)
-            }
-            Key::Char(c @ ('w' | 'b' | 'e' | 'W' | 'B' | 'E')) => {
-                let target = match c {
-                    'w' => Word::NextStart,
-                    'b' => Word::PrevStart,
-                    'e' => Word::NextEnd,
-                    'W' => Word::NextLongStart,
-                    'B' => Word::PrevLongStart,
+            MoveNextWordStart | MovePrevWordStart | MoveNextWordEnd | MoveNextLongWordStart | MovePrevLongWordStart | MoveNextLongWordEnd => {
+                let target = match command {
+                    MoveNextWordStart => Word::NextStart,
+                    MovePrevWordStart => Word::PrevStart,
+                    MoveNextWordEnd => Word::NextEnd,
+                    MoveNextLongWordStart => Word::NextLongStart,
+                    MovePrevLongWordStart => Word::PrevLongStart,
                     _ => Word::NextLongEnd,
                 };
                 let r = movement::word_move(b, sel, count, target);
                 Some(if extend { sel.put_cursor(text, r.cursor(text), true) } else { r })
             }
             // `G` goes to the line counted (`10G`); without a count, nowhere, as in helix.
-            Key::Char('G') => explicit_count.map(|n| sel.put_cursor(text, b.line_start((n - 1).min(b.last_line())), extend)),
-            Key::Home => Some(sel.put_cursor(text, b.line_start_at(sel.cursor(text)), extend)),
-            Key::End => Some(sel.put_cursor(text, line_last_char(b, sel.cursor(text)), extend)),
-            Key::Char('x') => Some(movement::extend_line_below(b, sel, count)),
+            GotoLine => explicit_count.map(|n| put(b.line_start((n - 1).min(b.last_line())))),
+            GotoFileStart => Some(put(b.line_start((count - 1).min(b.last_line())))),
+            GotoLastLine => Some(put(b.line_start(b.last_line()))),
+            GotoLineStart => Some(put(b.line_start_at(cursor))),
+            GotoLineEnd => Some(put(line_last_char(b, cursor))),
+            GotoFirstNonwhitespace => Some(put(b.first_non_blank_at(cursor))),
+            GotoLastModification => b.last_edit().map(put),
+            MatchBrackets => textobject::matching_bracket(b, cursor).map(put),
+            ExtendLineBelow => Some(movement::extend_line_below(b, sel, count)),
             // `X`: out to whole lines, not on to the next, facing as it did.
-            Key::Char('X') => {
+            ExtendToLineBounds => {
                 let lines = b.lines_range(b.line_of(sel.from())..b.line_of(b.prev(sel.to()).max(sel.from())) + 1);
                 Some(facing(sel, lines.start, lines.end))
             }
-            Key::Alt('x') => Some(shrink_to_lines(b, sel)),
-            Key::Char('%') => Some(Range::new(0, b.len())),
-            Key::Char(';') => Some(Range::point(sel.cursor(text))),
-            Key::Alt(';') => Some(sel.flip()),
-            Key::Char('_') => Some(trimmed(text, sel)),
-            Key::Alt('s') => {
+            ShrinkToLineBounds => Some(shrink_to_lines(b, sel)),
+            SelectAll => Some(Range::new(0, b.len())),
+            CollapseSelection => Some(Range::point(cursor)),
+            FlipSelections => Some(sel.flip()),
+            TrimSelections => Some(trimmed(text, sel)),
+            SplitSelectionOnNewline => {
                 let mut lines = split_lines(text, sel).into_iter();
                 let first = lines.next();
                 self.added = lines.collect();
                 first
             }
-            Key::Alt('.') => self.last_motion.map(|motion| (0..count).fold(sel, |r, _| motion.from(b, r, extend, t.language).unwrap_or(r))),
-            Key::Alt(c @ ('o' | 'i' | 'n' | 'p' | 'e' | 'b')) => {
-                let node = match c {
-                    'o' => NodeMove::Expand,
-                    'i' => NodeMove::Shrink,
-                    'n' | 'p' => NodeMove::Sibling { next: c == 'n' },
-                    _ => NodeMove::End { to_end: c == 'e' },
+            RepeatLastMotion => self.last_motion.map(|motion| (0..count).fold(sel, |r, _| motion.from(b, r, extend, t.language).unwrap_or(r))),
+            ExpandSelection | ShrinkSelection | SelectNextSibling | SelectPrevSibling | MoveParentNodeEnd | MoveParentNodeStart => {
+                let node = match command {
+                    ExpandSelection => NodeMove::Expand,
+                    ShrinkSelection => NodeMove::Shrink,
+                    SelectNextSibling | SelectPrevSibling => NodeMove::Sibling { next: command == SelectNextSibling },
+                    _ => NodeMove::End { to_end: command == MoveParentNodeEnd },
                 };
                 self.motion(Motion::Node(node), t);
                 return Outcome::Handled;
             }
             // `alt-a`: each node beside the selection's; `alt-I`: each inside it.
-            Key::Alt(c @ ('a' | 'I')) => {
-                let spread = t.language.and_then(|language| nodes::spread(language, text, sel, c == 'a'));
+            SelectAllSiblings | SelectAllChildren => {
+                let spread = t.language.and_then(|language| nodes::spread(language, text, sel, command == SelectAllSiblings));
                 let mut each = spread.unwrap_or_default().into_iter();
                 let first = each.next();
                 self.added = each.collect();
                 first
             }
-            _ => None,
-        };
-        if let Some(r) = moved {
-            self.sticky_col = sticky;
-            *t.selection = r;
-            return Outcome::Handled;
-        }
-        self.sticky_col = None;
-
-        let target = sel.min_width_1(text);
-        match key {
-            Key::Char(':') => return Outcome::Effect(Effect::CommandLine),
-            Key::Char(c @ ('/' | '?')) => return Outcome::Effect(Effect::Find { backward: c == '?' }),
-            Key::Char(c @ ('n' | 'N')) => return Outcome::Effect(Effect::FindNext { backward: c == 'N', count }),
-            Key::Char('*') => return Outcome::Effect(Effect::FindSelection { word_bounds: true }),
-            Key::Alt('*') => return Outcome::Effect(Effect::FindSelection { word_bounds: false }),
-            Key::Ctrl('o') => return Outcome::Effect(Effect::JumpBack(count)),
-            Key::Ctrl('i') => return Outcome::Effect(Effect::JumpForward(count)),
-            // A count before them is for the key after (`5gg`, `2fx`).
-            Key::Char('g') => (self.pending, self.count) = (Some(Pending::Goto), explicit_count),
-            Key::Char(' ') => (self.pending, self.count) = (Some(Pending::Space), explicit_count),
-            Key::Ctrl('w') => self.pending = Some(Pending::Pane),
-            Key::Char('r') => (self.pending, self.count) = (Some(Pending::Replace), explicit_count),
-            Key::Char('m') => (self.pending, self.count) = (Some(Pending::Match), explicit_count),
-            Key::Char(c @ ('f' | 't' | 'F' | 'T')) => {
-                let find = Pending::Find { forward: c.is_lowercase(), till: c.eq_ignore_ascii_case(&'t') };
-                (self.pending, self.count) = (Some(find), explicit_count);
+            GotoNextParagraph | GotoPrevParagraph => {
+                self.motion(Motion::Paragraph { forward: next, count }, t);
+                return Outcome::Handled;
             }
-            Key::Char('v') if !self.mode.reviewing() => self.mode = if self.mode == Mode::Select { Mode::Normal } else { Mode::Select },
-            Key::Escape => self.mode = Mode::Normal,
+            GotoNextFunction | GotoPrevFunction | GotoNextClass | GotoPrevClass | GotoNextParameter | GotoPrevParameter | GotoNextComment | GotoPrevComment
+            | GotoNextTest | GotoPrevTest | GotoNextEntry | GotoPrevEntry | GotoNextXmlElement | GotoPrevXmlElement => {
+                let name = match command {
+                    GotoNextFunction | GotoPrevFunction => "function",
+                    GotoNextClass | GotoPrevClass => "class",
+                    GotoNextParameter | GotoPrevParameter => "parameter",
+                    GotoNextComment | GotoPrevComment => "comment",
+                    GotoNextTest | GotoPrevTest => "test",
+                    GotoNextEntry | GotoPrevEntry => "entry",
+                    _ => "xml-element",
+                };
+                self.motion(Motion::Node(NodeMove::Object { name, next, count }), t);
+                return Outcome::Handled;
+            }
+            _ => return self.act(command, count, regs, t),
+        };
+        if let Some(r) = to {
+            *t.selection = r;
+        }
+        Outcome::Handled
+    }
+
+    /// A command that reaches beyond the buffer: an effect for the editor.
+    fn act(&mut self, command: Command, count: usize, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
+        use Command::*;
+        let effect = match command {
+            CommandMode => Effect::CommandLine,
+            Search | Rsearch => Effect::Find { backward: command == Rsearch },
+            SearchNext | SearchPrev => Effect::FindNext { backward: command == SearchPrev, count },
+            SearchSelectionDetectWordBounds => Effect::FindSelection { word_bounds: true },
+            SearchSelection => Effect::FindSelection { word_bounds: false },
+            JumpBackward => Effect::JumpBack(count),
+            JumpForward => Effect::JumpForward(count),
+            RepeatLastChange => Effect::Repeat,
+            RecordMacro => Effect::RecordMacro,
+            ReplayMacro => Effect::PlayMacro,
+            GotoNextBuffer => Effect::NextBuffer(count),
+            GotoPreviousBuffer => Effect::PrevBuffer(count),
+            MoveBufferNext => Effect::MoveBufferNext(count),
+            MoveBufferPrevious => Effect::MoveBufferPrev(count),
+            GotoDefinition => Effect::GotoDefinition,
+            GotoFile => Effect::GotoFile,
+            GotoReference => Effect::References,
+            GotoWindowTop => Effect::ScreenLine(Place::Top),
+            GotoWindowCenter => Effect::ScreenLine(Place::Middle),
+            GotoWindowBottom => Effect::ScreenLine(Place::Bottom),
+            AlignViewCenter => Effect::View(Place::Middle),
+            AlignViewTop => Effect::View(Place::Top),
+            AlignViewBottom => Effect::View(Place::Bottom),
+            GotoNextDiag | GotoPrevDiag => Effect::Diagnostic { forward: command == GotoNextDiag },
+            Vsplit => Effect::SplitRight,
+            RotateView => Effect::OtherPane,
+            Wonly => Effect::CloseSplit,
+            // While reviewing, `space a` asks about what's under review.
+            Ask if self.mode.reviewing() => return Outcome::Review(Review::Ask),
+            Ask => Effect::Assist,
+            Terminal => Effect::Terminal,
+            GotoNextProblem => Effect::NextProblem,
+            FileExplorer => {
+                self.to_tree();
+                Effect::FocusTree
+            }
+            Hover => Effect::Hover,
+            FileDiagnostics => Effect::Diagnostics,
+            GlobalSearch => Effect::Search,
+            Cheatsheet => Effect::Cheatsheet,
+            FilePicker => Effect::PickFile,
+            BufferPicker => Effect::PickBuffer,
+            RenameSymbol => Effect::Rename,
+            CodeAction => Effect::CodeActions,
+            SymbolPicker => Effect::Symbols,
+            CopySelectionOnNextLine | CopySelectionOnPrevLine => Effect::CopySelections { below: command == CopySelectionOnNextLine, count },
+            KeepPrimarySelection => Effect::KeepPrimarySelection,
+            RemovePrimarySelection => Effect::RemovePrimarySelection,
+            RotateSelectionsBackward | RotateSelectionsForward => Effect::RotateSelections { forward: command == RotateSelectionsForward, count },
+            MergeSelections | MergeConsecutiveSelections => Effect::MergeSelections { touching: command == MergeConsecutiveSelections },
+            AlignSelections => Effect::AlignSelections,
+            SelectRegex => Effect::SelectRegex,
+            _ => {
+                self.change(command, count, regs, t);
+                return Outcome::Handled;
+            }
+        };
+        Outcome::Effect(effect)
+    }
+
+    /// A command that changes the mode or the text.
+    fn change(&mut self, command: Command, count: usize, regs: &mut dyn Registers, t: &mut Target) {
+        use Command::*;
+        let sel = *t.selection;
+        let extend = self.mode == Mode::Select;
+        let b = &*t.buffer;
+        let text = b.text();
+        let target = sel.min_width_1(text);
+        match command {
+            SelectMode if !self.mode.reviewing() => self.mode = if self.mode == Mode::Select { Mode::Normal } else { Mode::Select },
+            NormalMode => self.mode = Mode::Normal,
             // `i` types before the selection, `a` after it; either way it
             // stays selected, as in helix (a single char is just the cursor).
-            Key::Char('i') if sel.is_wide(text) => self.enter_insert(Range::new(target.to(), target.from()), t),
-            Key::Char('i') => self.enter_insert(Range::point(target.from()), t),
-            Key::Char('a') => self.enter_insert(Range::new(target.from(), target.to()), t),
-            Key::Char(c @ ('I' | 'A')) => self.insert_on_line(t, sel, c == 'A', extend),
-            Key::Char(c @ ('o' | 'O')) => self.open(t, target, c == 'o', count, true),
+            InsertMode if sel.is_wide(text) => self.enter_insert(Range::new(target.to(), target.from()), t),
+            InsertMode => self.enter_insert(Range::point(target.from()), t),
+            AppendMode => self.enter_insert(Range::new(target.from(), target.to()), t),
+            InsertAtLineStart | InsertAtLineEnd => self.insert_on_line(t, sel, command == InsertAtLineEnd, extend),
+            OpenBelow | OpenAbove => self.open(t, target, command == OpenBelow, count, true),
             // Under review nothing's deleted, so nothing's yanked either.
-            Key::Char('d' | 'c') | Key::Alt('d' | 'c') if self.mode.reviewing() => self.refused = true,
+            DeleteSelection | ChangeSelection | DeleteSelectionNoyank | ChangeSelectionNoyank if self.mode.reviewing() => self.refused = true,
             // `alt-d`, `alt-c`: the same, but nothing's yanked.
-            Key::Char(c @ ('d' | 'c')) | Key::Alt(c @ ('d' | 'c')) => {
+            DeleteSelection | ChangeSelection | DeleteSelectionNoyank | ChangeSelectionNoyank => {
                 let register = self.register.take();
-                if matches!(key, Key::Char(_)) {
+                if matches!(command, DeleteSelection | ChangeSelection) {
                     regs.yank(register, b.slice(target.bytes()).to_string());
                 }
-                let whole_lines = c == 'c' && whole_lines(b, target);
-                let mode = if c == 'c' && !whole_lines { Mode::Insert } else { Mode::Normal };
+                let change = matches!(command, ChangeSelection | ChangeSelectionNoyank);
+                let whole_lines = change && whole_lines(b, target);
+                let mode = if change && !whole_lines { Mode::Insert } else { Mode::Normal };
                 self.edit(t, target.bytes(), "", Range::point(target.from()), mode);
                 // Lines changed: typing goes on a line of its own in their place.
                 if whole_lines {
@@ -225,45 +362,39 @@ impl Modal {
                     self.open(t, at.min_width_1(t.buffer.text()), false, 1, false);
                 }
             }
-            Key::Char('y') => {
+            Yank => {
                 regs.yank(self.register.take(), b.slice(target.bytes()).to_string());
                 if !self.mode.reviewing() {
                     self.mode = Mode::Normal;
                 }
             }
-            Key::Char(c @ ('p' | 'P')) => {
+            PasteAfter | PasteBefore => {
                 let text = regs.yanked(self.register.take());
-                self.paste(t, target, &text, c == 'p', count);
+                self.paste(t, target, &text, command == PasteAfter, count);
             }
             // `R`: the selection replaced with what was yanked (if anything was).
-            Key::Char('R') => {
+            ReplaceWithYanked => {
                 let text = regs.yanked(self.register.take()).repeat(count.min(1000));
                 if !text.is_empty() {
                     let after = Range::new(target.from(), target.from() + text.len());
                     self.edit(t, target.bytes(), &text, after, Mode::Normal);
                 }
             }
-            Key::Char('"') => (self.pending, self.count) = (Some(Pending::Register), explicit_count),
-            Key::Char('z') => self.pending = Some(Pending::View),
-            Key::Char(c @ (']' | '[')) => (self.pending, self.count) = (Some(Pending::Next(c == ']')), explicit_count),
-            Key::Char('.') => return Outcome::Effect(Effect::Repeat),
-            Key::Char('Q') => return Outcome::Effect(Effect::RecordMacro),
-            Key::Char('q') => return Outcome::Effect(Effect::PlayMacro),
             // `J`: the selection's lines (or this and the next) joined; `alt-J` selects the spaces put between.
-            Key::Char('J') | Key::Alt('J') => self.join(t, sel, key == Key::Alt('J')),
+            JoinSelections | JoinSelectionsSpace => self.join(t, sel, command == JoinSelectionsSpace),
             // `ctrl-a`, `ctrl-x`: the number at or after the cursor on its line, up or down by the count.
-            Key::Ctrl(c @ ('a' | 'x')) => {
+            Increment | Decrement => {
                 let cursor = sel.cursor(text);
                 let (start, end) = (b.line_start_at(cursor), b.line_end_at(cursor));
                 if let Some((at, len, n)) = number_at(&text[start..end], cursor - start) {
-                    let by = count as i128 * if c == 'a' { 1 } else { -1 };
+                    let by = count as i128 * if command == Increment { 1 } else { -1 };
                     let new = (n + by).to_string();
                     let at = start + at;
                     self.edit(t, at..at + len, &new, Range::new(at, at + new.len()), self.mode);
                 }
             }
             // `ctrl-c`: the selection's lines commented out, or back in.
-            Key::Ctrl('c') => {
+            ToggleComments => {
                 if let Some(token) = t.language.and_then(|l| l.comment) {
                     let first = b.line_of(sel.from());
                     let last = b.line_of(b.prev(sel.to()).max(sel.from()));
@@ -273,24 +404,24 @@ impl Modal {
                     self.edit(t, start..end, &toggled, after, self.mode);
                 }
             }
-            Key::Char(c @ ('u' | 'U')) if !self.mode.reviewing() => {
+            Undo | Redo if !self.mode.reviewing() => {
                 for _ in 0..count {
-                    let Some(r) = (if c == 'u' { t.buffer.undo() } else { t.buffer.redo() }) else { break };
+                    let Some(r) = (if command == Undo { t.buffer.undo() } else { t.buffer.redo() }) else { break };
                     *t.selection = r.clamp(t.buffer.len());
                 }
             }
-            Key::Char(c @ ('>' | '<')) => {
+            Indent | Unindent => {
                 let start = b.line_start_at(target.from());
                 let end = b.line_end_at(b.prev(target.to()).max(target.from()));
                 let (unit, width) = (t.indent.as_str().repeat(count.min(100)), t.indent.width.max(1));
                 let shifted: Vec<String> = b
                     .slice(start..end)
                     .split('\n')
-                    .map(|line| match c {
+                    .map(|line| match command {
                         // Blank lines stay so; others go in to the next indent stop, as in helix.
-                        '>' if line.trim().is_empty() => line.to_string(),
-                        '>' if t.indent.hard_tabs => format!("{unit}{line}"),
-                        '>' => {
+                        Indent if line.trim().is_empty() => line.to_string(),
+                        Indent if t.indent.hard_tabs => format!("{unit}{line}"),
+                        Indent => {
                             let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
                             format!("{}{line}", &unit[indent % width..])
                         }
@@ -304,94 +435,78 @@ impl Modal {
                 self.edit(t, start..end, &shifted, after, Mode::Normal);
             }
             // `~` switches case; `` ` `` is lower case, `` alt-` `` upper.
-            Key::Char('~') => self.change_case(t, sel, |ch| if ch.is_uppercase() { ch.to_lowercase().collect() } else { ch.to_uppercase().collect() }),
-            Key::Char('`') => self.change_case(t, sel, |ch| ch.to_lowercase().collect()),
-            Key::Alt('`') => self.change_case(t, sel, |ch| ch.to_uppercase().collect()),
-            // Other ctrl keys aren't modal editing's: the app may have them.
-            Key::Ctrl(_) => return Outcome::Ignored,
+            SwitchCase => self.change_case(t, sel, |ch| if ch.is_uppercase() { ch.to_lowercase().collect() } else { ch.to_uppercase().collect() }),
+            SwitchToLowercase => self.change_case(t, sel, |ch| ch.to_lowercase().collect()),
+            SwitchToUppercase => self.change_case(t, sel, |ch| ch.to_uppercase().collect()),
+            // `] space`, `[ space`: blank lines below the selection, or above.
+            AddNewlineBelow | AddNewlineAbove => {
+                let below = command == AddNewlineBelow;
+                let (first, last) = (b.line_of(sel.from()), b.line_of(b.prev(sel.to()).max(sel.from())));
+                let at = movement::start_of(b, if below { last + 1 } else { first });
+                let moved = |p: usize| if p > at || (p == at && !below) { p + count } else { p };
+                let after = Range::new(moved(sel.anchor), moved(sel.head));
+                self.edit(t, at..at, &"\n".repeat(count), after, self.mode);
+            }
+            YankToClipboard => regs.set_clipboard(b.slice(target.bytes()).to_string()),
+            PasteClipboardAfter | PasteClipboardBefore => {
+                let pasted = regs.clipboard().unwrap_or_default();
+                self.paste(t, target, &pasted, command == PasteClipboardAfter, 1);
+            }
             _ => {}
         }
-        Outcome::Handled
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn pending_key(&mut self, pending: Pending, key: Key, count: usize, sel: Range, extend: bool, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
-        // `r` then Enter or Tab replaces with a line break or a tab, and `f`
-        // then Tab finds one; `ctrl-w` takes its keys with ctrl too.
-        let key = match (pending, key) {
-            (Pending::Replace, Key::Enter) => Key::Char('\n'),
-            (Pending::Replace | Pending::Find { .. }, Key::Tab) => Key::Char('\t'),
-            (Pending::Pane, Key::Ctrl(c)) => Key::Char(c),
-            (Pending::Find { forward, till }, Key::Enter) => {
-                self.motion(Motion::Find { ch: None, forward, till, count, extend }, t);
-                return Outcome::Handled;
-            }
-            (_, key) => key,
+    /// The char a command waited for (`f`, `r`, `mi`). Enter and Tab are a
+    /// line break and a tab for some (see [`Command::takes_enter`]); any
+    /// other key that isn't a char gives up on it.
+    fn char_key(&mut self, command: Command, keys: Vec<Key>, first: Option<char>, key: Key, t: &mut Target) -> Outcome {
+        use Command::*;
+        let explicit_count = self.count.take();
+        let count = explicit_count.unwrap_or(1);
+        let ch = match key {
+            Key::Char(c) => c,
+            Key::Enter if command.takes_enter() => '\n',
+            Key::Tab if command.takes_enter() => '\t',
+            _ => return Outcome::Handled,
         };
-        let Key::Char(c) = key else { return Outcome::Handled };
+        let sel = *t.selection;
+        let extend = self.mode == Mode::Select;
         let b = &*t.buffer;
         let text = b.text();
-        let cursor = sel.cursor(text);
-        let to = match (pending, c) {
-            (Pending::Goto, 'g') => Some(b.line_start((count - 1).min(b.last_line()))),
-            (Pending::Goto, 'e') => Some(b.line_start(b.last_line())),
-            (Pending::Goto, 'h') => Some(b.line_start_at(cursor)),
-            (Pending::Goto, 'l') => Some(line_last_char(b, cursor)),
-            (Pending::Goto, 's') => Some(b.first_non_blank_at(cursor)),
-            (Pending::Goto, '.') => b.last_edit(),
-            (Pending::Goto, 'n') => return Outcome::Effect(Effect::NextBuffer(count)),
-            (Pending::Goto, 'p') => return Outcome::Effect(Effect::PrevBuffer(count)),
-            (Pending::Goto, 'N') => return Outcome::Effect(Effect::MoveBufferNext(count)),
-            (Pending::Goto, 'P') => return Outcome::Effect(Effect::MoveBufferPrev(count)),
-            (Pending::Goto, 'd') => return Outcome::Effect(Effect::GotoDefinition),
-            (Pending::Goto, 'f') => return Outcome::Effect(Effect::GotoFile),
-            (Pending::Goto, 'r') => return Outcome::Effect(Effect::References),
-            (Pending::Goto, 't') => return Outcome::Effect(Effect::ScreenLine(Place::Top)),
-            (Pending::Goto, 'c') => return Outcome::Effect(Effect::ScreenLine(Place::Middle)),
-            (Pending::Goto, 'b') => return Outcome::Effect(Effect::ScreenLine(Place::Bottom)),
-            (Pending::Find { forward, till }, ch) => {
-                self.motion(Motion::Find { ch: Some(ch), forward, till, count, extend }, t);
-                return Outcome::Handled;
+        let target = sel.min_width_1(text);
+        match command {
+            FindNextChar | FindTillChar | FindPrevChar | TillPrevChar => {
+                let forward = matches!(command, FindNextChar | FindTillChar);
+                let till = matches!(command, FindTillChar | TillPrevChar);
+                // Enter: the line's end.
+                let ch = Some(ch).filter(|&ch| ch != '\n');
+                self.motion(Motion::Find { ch, forward, till, count, extend }, t);
             }
-            (Pending::Match, 'm') => {
-                if let Some(at) = textobject::matching_bracket(b, cursor) {
-                    *t.selection = sel.put_cursor(text, at, extend);
-                }
-                return Outcome::Handled;
+            Replace => {
+                let replaced: String = b.slice(target.bytes()).chars().map(|o| if o == '\n' { o } else { ch }).collect();
+                let after = same_shape(sel, target.from(), replaced.len());
+                self.edit(t, target.bytes(), &replaced, after, Mode::Normal);
             }
-            (Pending::Match, next @ ('s' | 'd' | 'r' | 'a' | 'i')) => {
-                self.pending = Some(match next {
-                    's' => Pending::SurroundAdd,
-                    'd' => Pending::SurroundDelete,
-                    'r' => Pending::SurroundReplace,
-                    'a' => Pending::Object { around: true },
-                    _ => Pending::Object { around: false },
-                });
-                // The count is for which pair (`2md(`: the second out).
-                self.count = Some(count);
-                return Outcome::Handled;
-            }
-            (Pending::SurroundAdd, ch) => {
+            SelectRegister => self.register = Some(ch),
+            SurroundAdd => {
                 let (open, close) = textobject::pair_of(ch);
-                let target = sel.min_width_1(text);
                 let wrapped = format!("{open}{}{close}", b.slice(target.bytes()));
                 let after = Range::new(target.from(), target.from() + wrapped.len());
                 self.edit(t, target.bytes(), &wrapped, after, Mode::Normal);
-                return Outcome::Handled;
             }
-            (Pending::SurroundReplace, from) => {
-                self.pending = Some(Pending::SurroundReplaceWith(from));
-                self.count = Some(count);
-                return Outcome::Handled;
+            // `mr` waits for the pair there is, then the one it becomes.
+            SurroundReplace if first.is_none() => {
+                self.pending = Some(Pending::Char { command, keys, first: Some(ch) });
+                self.count = explicit_count;
             }
-            (pending @ (Pending::SurroundDelete | Pending::SurroundReplaceWith(_)), ch) => {
-                let target = sel.min_width_1(text);
-                let which = if let Pending::SurroundReplaceWith(from) = pending { from } else { ch };
+            // The count is for which pair (`2md(`: the second out).
+            SurroundDelete | SurroundReplace => {
+                let which = first.unwrap_or(ch);
                 let Some((left, right)) = textobject::pair_around(b, target.from(), target.to(), which, count) else { return Outcome::Handled };
                 let inner = b.slice(b.next(left)..right).to_string();
                 let (open_len, close_len) = (b.next(left) - left, b.next(right) - right);
-                let (new_open, new_close) = match pending {
-                    Pending::SurroundReplaceWith(_) => {
+                let (new_open, new_close) = match command {
+                    SurroundReplace => {
                         let (open, close) = textobject::pair_of(ch);
                         (open.to_string(), close.to_string())
                     }
@@ -410,83 +525,9 @@ impl Modal {
                 };
                 let after = Range::new(map(sel.anchor), map(sel.head));
                 self.edit(t, left..b.next(right), &format!("{new_open}{inner}{new_close}"), after, Mode::Normal);
-                return Outcome::Handled;
             }
-            (Pending::Object { around }, ch) => {
-                self.motion(Motion::Object { ch, around, count }, t);
-                return Outcome::Handled;
-            }
-            (Pending::Replace, ch) => {
-                let target = sel.min_width_1(text);
-                let replaced: String = b.slice(target.bytes()).chars().map(|o| if o == '\n' { o } else { ch }).collect();
-                let after = same_shape(sel, target.from(), replaced.len());
-                self.edit(t, target.bytes(), &replaced, after, Mode::Normal);
-                return Outcome::Handled;
-            }
-            (Pending::Pane, 'v') => return Outcome::Effect(Effect::SplitRight),
-            (Pending::Pane, 'w' | 'h' | 'l') => return Outcome::Effect(Effect::OtherPane),
-            (Pending::Pane, 'q' | 'o') => return Outcome::Effect(Effect::CloseSplit),
-            (Pending::Pane, _) => return Outcome::Handled,
-            // Ghostwrite's own keys are under space. While reviewing, `space a`
-            // asks about what's under review; looking around (files, open files,
-            // symbols, docs, the tree, the terminal, copying, the cheatsheet) is free, and
-            // starting anything else waits until it's done.
-            (Pending::Space, 'a') if self.mode.reviewing() => return Outcome::Review(super::Review::Ask),
-            (Pending::Space, c) if self.mode.reviewing() && !matches!(c, 't' | 'y' | 'p' | '?' | 'f' | 'b' | 's' | 'k' | 'e') => return Outcome::Handled,
-            (Pending::Space, 'a') => return Outcome::Effect(Effect::Assist),
-            (Pending::Space, 't') => return Outcome::Effect(Effect::Terminal),
-            (Pending::Space, 'j') => return Outcome::Effect(Effect::NextProblem),
-            (Pending::Space, 'e') => {
-                self.to_tree();
-                return Outcome::Effect(Effect::FocusTree);
-            }
-            (Pending::Space, 'k') => return Outcome::Effect(Effect::Hover),
-            (Pending::Space, 'd') => return Outcome::Effect(Effect::Diagnostics),
-            (Pending::Space, '/') => return Outcome::Effect(Effect::Search),
-            (Pending::Space, '?') => return Outcome::Effect(Effect::Cheatsheet),
-            (Pending::Space, 'f') => return Outcome::Effect(Effect::PickFile),
-            (Pending::Space, 'r') => return Outcome::Effect(Effect::Rename),
-            (Pending::Space, '.') => return Outcome::Effect(Effect::CodeActions),
-            (Pending::Space, 's') => return Outcome::Effect(Effect::Symbols),
-            (Pending::Space, 'b') => return Outcome::Effect(Effect::PickBuffer),
-            (Pending::Register, name) => {
-                self.register = Some(name);
-                return Outcome::Handled;
-            }
-            (Pending::View, 'z' | 'c') => return Outcome::Effect(Effect::View(Place::Middle)),
-            (Pending::View, 't') => return Outcome::Effect(Effect::View(Place::Top)),
-            (Pending::View, 'b') => return Outcome::Effect(Effect::View(Place::Bottom)),
-            (Pending::Next(forward), 'd') => return Outcome::Effect(Effect::Diagnostic { forward }),
-            (Pending::Next(next), ch) if let Some(name) = syntax_object(ch) => {
-                self.motion(Motion::Node(NodeMove::Object { name, next, count }), t);
-                return Outcome::Handled;
-            }
-            (Pending::Next(forward), 'p') => {
-                self.motion(Motion::Paragraph { forward, count }, t);
-                return Outcome::Handled;
-            }
-            // `] space`, `[ space`: blank lines below the selection, or above.
-            (Pending::Next(below), ' ') => {
-                let (first, last) = (b.line_of(sel.from()), b.line_of(b.prev(sel.to()).max(sel.from())));
-                let at = movement::start_of(b, if below { last + 1 } else { first });
-                let moved = |p: usize| if p > at || (p == at && !below) { p + count } else { p };
-                let after = Range::new(moved(sel.anchor), moved(sel.head));
-                self.edit(t, at..at, &"\n".repeat(count), after, self.mode);
-                return Outcome::Handled;
-            }
-            (Pending::Space, 'y') => {
-                regs.set_clipboard(b.slice(sel.min_width_1(text).bytes()).to_string());
-                return Outcome::Handled;
-            }
-            (Pending::Space, p @ ('p' | 'P')) => {
-                let pasted = regs.clipboard().unwrap_or_default();
-                self.paste(t, sel.min_width_1(text), &pasted, p == 'p', 1);
-                return Outcome::Handled;
-            }
-            _ => None,
-        };
-        if let Some(at) = to {
-            *t.selection = sel.put_cursor(text, at, extend);
+            SelectTextobjectAround | SelectTextobjectInner => self.motion(Motion::Object { ch, around: command == SelectTextobjectAround, count }, t),
+            _ => {}
         }
         Outcome::Handled
     }

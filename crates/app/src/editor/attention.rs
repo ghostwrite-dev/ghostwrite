@@ -138,7 +138,7 @@ impl Editor {
         let theme = theme(cx);
         let mark = self.story_mark()?;
         let (said, color, mark) = match mark {
-            Mark::Thinking if let Some((path, _)) = &state.asking_to_read => {
+            Mark::Thinking if let Some(path) = &state.asking_to_read => {
                 (format!("read {}? ⇥ yes · ⏎ no", ghostwrite_ai::tools::shown(path)), theme.foreground, Some(mark))
             }
             Mark::Thinking if story.error.is_some() => (super::story_view::waiting_hint(Some(story)), theme.danger, Some(mark)),

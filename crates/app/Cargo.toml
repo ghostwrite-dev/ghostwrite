@@ -15,7 +15,7 @@ ghostwrite-page.workspace = true
 ghostwrite-project.workspace = true
 ghostwrite-terminal.workspace = true
 ghostwrite-plugin.workspace = true
-ghostwrite-typst = { workspace = true, optional = true }
+ghostwrite-view.workspace = true
 ghostwrite-wasm = { workspace = true, optional = true }
 ghostwrite-lean = { workspace = true, optional = true }
 
@@ -31,7 +31,6 @@ unicode-width.workspace = true
 [features]
 default = ["lean", "local-models", "wasm-plugins"]
 local-models = ["ghostwrite-model/llama"]
-typst = ["dep:ghostwrite-typst"]
 wasm-plugins = ["dep:ghostwrite-wasm"]
 lean = ["dep:ghostwrite-lean"]
 

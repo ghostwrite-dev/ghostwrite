@@ -496,3 +496,62 @@ fn a_bracket_with_no_other_half_isnt_marked(cx: &mut TestAppContext) {
     t.keys("5 l");
     assert_eq!(t.read(|e| e.matching_brackets(e.tab().unwrap())), None);
 }
+
+/// Keys of yours, as the config's `"keys"` gives them.
+fn your_keys(keys: &[(&str, &str)]) -> (&'static ghostwrite_core::Keymap, Vec<String>) {
+    let keys: Vec<(String, String)> = keys.iter().map(|(keys, to)| (keys.to_string(), to.to_string())).collect();
+    let (keymap, wrong) = ghostwrite_core::Keymap::default().with_yours(&keys);
+    (Box::leak(Box::new(keymap)), wrong)
+}
+
+#[gpui::test]
+fn your_keys_run_commands_by_name_or_a_colon_command_and_no_op_unbinds(cx: &mut TestAppContext) {
+    let mut t = open("one two\nthree\n", &[], cx);
+    let (keymap, wrong) =
+        your_keys(&[("Z", "extend_line_below"), ("x", "no_op"), ("ctrl-s", ":w"), ("space w", ":wa"), ("Y Y", ":w"), ("q", "extend_lin_below")]);
+    t.editor.update(t.cx, |e, _| e.use_keys(keymap, &wrong));
+    let status = t.status().unwrap_or_default();
+    assert!(status.contains("no command \"extend_lin_below\""), "a name that isn't a command is said: {status}");
+    t.keys("Z d");
+    assert_eq!(t.text(), "three\n", "Z selects the line, as x did");
+    t.keys("x d");
+    assert_eq!(t.text(), "hree\n", "x does nothing now: d takes the char");
+    assert_eq!(t.file("doc.txt"), "one two\nthree\n");
+    t.keys("ctrl-s");
+    assert_eq!(t.file("doc.txt"), "hree\n", "ctrl-s is :w");
+    t.keys("i").input("t").keys("escape space w");
+    assert_eq!(t.file("doc.txt"), "three\n", "space w is :wa");
+    t.keys("d Y Y");
+    assert_eq!(t.file("doc.txt"), "tree\n", "Y leads on to a binding of your own");
+    t.keys("u q");
+    assert_eq!(t.status(), Some("no macro yet: Q records one".into()), "q is as it was");
+    // The cheatsheet has them.
+    let sheet = crate::editor::view::cheatsheet(keymap);
+    let row = |what: &str| sheet.iter().flat_map(|(_, rows)| rows).find(|row| row.what.starts_with(what)).map(|row| row.keys.clone());
+    assert_eq!(row("select line").as_deref(), Some("X alt-x % Z"));
+    assert_eq!(row(":wa").as_deref(), Some("space w"));
+    t.keys("space ?");
+    t.cx.update(|window, _| window.refresh());
+    t.cx.run_until_parked();
+    assert!(t.read(|e| e.cheatsheet));
+}
+
+/// The cheatsheet shows every key the keymap binds, and every key it shows
+/// from the keymap is bound: they can't drift apart.
+#[test]
+fn the_cheatsheet_and_the_keymap_agree() {
+    use std::collections::HashSet;
+    let (yours, _) = your_keys(&[("Z", "extend_line_below"), ("x", "no_op"), ("ctrl-s", ":w"), ("g", "goto_file_start")]);
+    for keymap in [ghostwrite_core::Keymap::standard(), yours] {
+        let sheet = crate::editor::view::cheatsheet(keymap);
+        let shown: Vec<&Vec<ghostwrite_core::Key>> = sheet.iter().flat_map(|(_, rows)| rows).flat_map(|row| &row.bound).collect();
+        let bound: HashSet<Vec<ghostwrite_core::Key>> = keymap.bindings().into_iter().map(|(keys, _)| keys).collect();
+        assert_eq!(shown.len(), bound.len(), "each binding once");
+        assert_eq!(shown.into_iter().cloned().collect::<HashSet<_>>(), bound);
+        for row in sheet.iter().flat_map(|(_, rows)| rows).filter(|row| !row.bound.is_empty()) {
+            for keys in &row.bound {
+                assert!(row.keys.contains(&ghostwrite_core::modal::sequence(keys)), "{} shows {keys:?}", row.keys);
+            }
+        }
+    }
+}

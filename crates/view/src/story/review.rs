@@ -1,7 +1,7 @@
 //! The story in the code: where each item is (opening its file when it's
 //! shown), what's wrong with one that can't be shown as it is (it goes back
 //! to Claude to rewrite), carrying out what's accepted, and moving on to
-//! what to show next.
+//! what to show next ([`Show`], for the app to bring into view).
 
 use std::ops::Range as Lines;
 use std::path::PathBuf;
@@ -14,12 +14,12 @@ use ghostwrite_project::fs;
 use ghostwrite_project::tree::Proposal;
 
 use super::StoryState;
-use crate::editor::project::ProjectFiles;
-use crate::editor::{Autoscroll, DocId, Project};
+use crate::project::ProjectFiles;
+use crate::{Autoscroll, DocId, Project};
 
 /// Where an item is in the code: its tab (if its file is open), its file
 /// (`None`: the one asked about), and its lines (or the lines to look near).
-pub(in crate::editor) struct Located {
+pub struct Located {
     pub tab: Option<usize>,
     pub path: Option<PathBuf>,
     pub near: Lines<usize>,
@@ -27,7 +27,7 @@ pub(in crate::editor) struct Located {
 
 /// How a file in the tree is waiting on the story.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(in crate::editor) enum Waiting {
+pub enum Waiting {
     /// The current item is here (or Claude's answer is coming here).
     Here,
     /// Later items are here.
@@ -46,7 +46,7 @@ enum Problem {
 
 /// What to show after the story moved on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Show {
+pub enum Show {
     /// Nothing new (still waiting, or already showing it).
     Nothing,
     /// A step's ready, and the user is looking elsewhere: it waits for Tab.
@@ -63,7 +63,7 @@ pub(super) enum Show {
 
 impl StoryState {
     /// Where the story's items show, in `project` as it is now.
-    pub(super) fn layout<'a>(&'a self, project: &'a Project) -> Option<Layout<'a, ProjectFiles<'a>>> {
+    pub fn layout<'a>(&'a self, project: &'a Project) -> Option<Layout<'a, ProjectFiles<'a>>> {
         let asked = project.tabs.by_id(self.doc)?;
         Some(Layout {
             story: self.story.as_ref()?,
@@ -74,25 +74,25 @@ impl StoryState {
     }
 
     /// Where item `id` is in the code.
-    pub(in crate::editor) fn locate(&self, project: &Project, id: ItemId) -> Option<Located> {
+    pub fn locate(&self, project: &Project, id: ItemId) -> Option<Located> {
         Some(self.in_tab(project, self.layout(project)?.spot(id)?))
     }
 
     /// The lines item `id` shows at, in the code.
-    pub(in crate::editor) fn lines_of(&self, project: &Project, id: ItemId) -> Option<Located> {
+    pub fn lines_of(&self, project: &Project, id: ItemId) -> Option<Located> {
         Some(self.in_tab(project, self.layout(project)?.lines(id)?))
     }
 
     /// Where Claude's answer is coming while there's nothing to review:
     /// under what was asked about, or the marked lines.
-    pub(in crate::editor) fn waiting_spot(&self, project: &Project) -> Option<Place> {
+    pub fn waiting_spot(&self, project: &Project) -> Option<Place> {
         match self.layout(project) {
             Some(layout) => layout.waiting_spot(),
             None => Some(Place { path: None, near: self.lines.clone() }),
         }
     }
 
-    pub(in crate::editor) fn in_tab(&self, project: &Project, place: Place) -> Located {
+    pub fn in_tab(&self, project: &Project, place: Place) -> Located {
         let tab = match &place.path {
             None => project.tabs.index_of_id(self.doc),
             Some(path) => project.tabs.index_of_path(path),
@@ -114,7 +114,7 @@ impl StoryState {
 
     /// The files the story is waiting in: where the current item is (or
     /// where Claude's answer is coming), and where later items are.
-    pub(in crate::editor) fn files(&self, project: &Project) -> Vec<(PathBuf, Waiting)> {
+    pub fn files(&self, project: &Project) -> Vec<(PathBuf, Waiting)> {
         let asked = || project.tabs.by_id(self.doc)?.doc.path.clone();
         let file_of = |located: Located| located.path.or_else(asked);
         let current = self.story.as_ref().and_then(Story::current);
@@ -135,13 +135,13 @@ impl StoryState {
     }
 
     /// Whether item `id` is the one brought into view.
-    pub(in crate::editor) fn showing(&self, id: ItemId) -> bool {
+    pub fn showing(&self, id: ItemId) -> bool {
         self.shown == Some(id)
     }
 
     /// What the tree should show for item `id`: a new file made by an edit,
     /// or a file removed or renamed.
-    pub(in crate::editor) fn proposal(&self, project: &Project, id: ItemId, item: &Item) -> Option<Proposal> {
+    pub fn proposal(&self, project: &Project, id: ItemId, item: &Item) -> Option<Proposal> {
         let path = self.locate(project, id)?.path;
         match item {
             Item::Step(Step { op: Some(FileOp::Remove), .. }) => path.map(Proposal::Remove),
@@ -209,17 +209,17 @@ impl StoryState {
         self.shown = None;
     }
 
-    /// The command accepting the current item runs, if it's one: the editor
+    /// The command accepting the current item runs, if it's one: the app
     /// runs it in the terminal before it's [accepted](Self::accept).
-    pub(in crate::editor) fn command_to_run(&self) -> Option<ghostwrite_ai::protocol::Run> {
+    pub fn command_to_run(&self) -> Option<ghostwrite_ai::protocol::Run> {
         match self.story.as_ref()?.current_item()? {
             Item::Run(run) => Some(run),
             _ => None,
         }
     }
 
-    /// Accept the current item, carrying it out (a command, the editor runs).
-    pub(super) fn accept(&mut self, project: &mut Project) -> Result<(), String> {
+    /// Accept the current item, carrying it out (a command, the app runs).
+    pub(super) fn accept_item(&mut self, project: &mut Project) -> Result<(), String> {
         let Some((id, item)) = self.story.as_ref().and_then(|s| Some((s.current()?, s.current_item()?))) else { return Ok(()) };
         self.apply(project, id, &item)?;
         if let Some(story) = self.story.as_mut() {
@@ -295,10 +295,17 @@ impl StoryState {
 
     /// After anything changes: move on, and put a newly current item where
     /// it'll be seen: its lines selected and centered in its file's tab, or
-    /// its proposal in the tree.
-    pub(super) fn settle(&mut self, project: &mut Project) -> Show {
+    /// its proposal in the tree. Something to look at ends the wait for it,
+    /// timed for `model`.
+    pub fn settle(&mut self, project: &mut Project, model: &str) -> Show {
         let show = self.move_on(project);
         self.take_adopted();
+        if matches!(show, Show::Tab(_) | Show::Tree | Show::Finished)
+            && let Some(timer) = self.timer.take()
+            && !matches!(show, Show::Finished)
+        {
+            timer.shown(model);
+        }
         show
     }
 
@@ -408,7 +415,7 @@ impl StoryState {
     }
 
     /// The story is over: say what came of it, keep Claude's notes, and log it.
-    pub(super) fn finish(&self, project: &mut Project) {
+    pub fn finish(&self, project: &mut Project) {
         let Some(story) = self.story.as_ref() else { return };
         let (kept, total) = story.summary();
         if total > 0 {

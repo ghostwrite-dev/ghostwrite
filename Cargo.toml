@@ -10,16 +10,16 @@
 #   plugin   what a plugin can add, the plugins there are, and installing them
 #   plugin-api what a plugin written in Rust compiles against, and the interface itself
 #   wasm     (optional) runs plugins compiled to WebAssembly, sandboxed, and their grammars
-#   typst    Typst compiled natively (the app's `typst` feature); by default it's plugins/typst
 #   lsp      language-server client
 #   lean     (a plugin) Lean: its language, its server, its goals
 #   model    a local model: llama.cpp, in a process of its own
 #   ai       the model: prompts, reply parsing, backends, the review story
+#   view     the editor's state: documents, tabs, the project, search, registers, jumps
 #   app      the gpui application (binary `ghostwrite`)
 [workspace]
 exclude = ["examples", "plugins", "crates/wasm/tests/fixture"]
 resolver = "3"
-members = ["crates/core", "crates/project", "crates/terminal", "crates/page", "crates/typst", "crates/lsp", "crates/dap", "crates/plugin", "crates/plugin-api", "crates/wasm", "crates/lean", "crates/model", "crates/ai", "crates/app"]
+members = ["crates/core", "crates/project", "crates/terminal", "crates/page", "crates/lsp", "crates/dap", "crates/plugin", "crates/plugin-api", "crates/wasm", "crates/lean", "crates/model", "crates/ai", "crates/view", "crates/app"]
 default-members = ["crates/app"]
 
 [workspace.package]
@@ -40,15 +40,14 @@ ghostwrite-terminal = { path = "crates/terminal" }
 ghostwrite-lsp = { path = "crates/lsp" }
 ghostwrite-dap = { path = "crates/dap" }
 ghostwrite-page = { path = "crates/page" }
-ghostwrite-typst = { path = "crates/typst" }
 ghostwrite-wasm = { path = "crates/wasm" }
 ghostwrite-plugin = { path = "crates/plugin" }
 ghostwrite-lean = { path = "crates/lean" }
 ghostwrite-model = { path = "crates/model", default-features = false }
 ghostwrite-ai = { path = "crates/ai" }
+ghostwrite-view = { path = "crates/view" }
 
 alacritty_terminal = { version = "0.26", default-features = false }
-comemo = "0.5"
 futures = "0.3"
 # Shaders compile at launch: building them needs the Metal toolchain.
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
@@ -63,14 +62,10 @@ encoding_rs = "0.8"
 similar = "2"
 serde_json = "1"
 trash = "5"
-typst = "0.15.1"
 # Versions tree-sitter's own `wasm` feature asks for: grammars and plugins share them.
 wasmtime = { version = "48", default-features = false, features = ["cache", "component-model", "cranelift", "gc", "gc-null", "parallel-compilation", "runtime", "std"] }
 wasmtime-wasi = "48"
 wit-bindgen = "0.57"
-typst-kit = { version = "0.15.1", features = ["datetime", "embedded-fonts", "scan-fonts", "system-downloader", "system-files"] }
-typst-layout = "0.15.1"
-typst-render = "0.15.1"
 ureq = { version = "3", features = ["json"] }
 
 tree-sitter = "0.27"
@@ -89,7 +84,6 @@ tree-sitter-rust = "0.24"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-typescript = "0.23"
 tree-sitter-yaml = "0.7"
-codebook-tree-sitter-typst = "0.12"
 
 [profile.dev]
 debug = "line-tables-only"

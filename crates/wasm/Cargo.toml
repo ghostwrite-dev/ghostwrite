@@ -17,7 +17,8 @@ tree-sitter-highlight.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 
-# To hold the plugin to what the native crate does, as long as there is one.
 [dev-dependencies]
-ghostwrite-typst.workspace = true
+ghostwrite-lsp.workspace = true
+futures.workspace = true
+serde_json.workspace = true
 image = { workspace = true, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }

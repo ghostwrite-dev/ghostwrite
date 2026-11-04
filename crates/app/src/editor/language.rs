@@ -5,57 +5,15 @@
 
 use ghostwrite_core::{Key, MenuKey, Mode, Range};
 use ghostwrite_lsp::{Completion, convert};
+use ghostwrite_view::document::next_problem;
 use gpui::{AnyElement, Bounds, Context, Pixels, Window, anchored, deferred, div, point, prelude::*};
 
 use super::{Autoscroll, DocId, Editor, Project};
 use crate::theme::{Theme, pt};
 
+pub(super) use ghostwrite_view::latest::Latest;
+
 const MENU_ROWS: usize = 10;
-
-/// Questions to a server where only the latest answer counts (completions,
-/// the signature, a panel's): a newer question cancels the ones still
-/// out, and an older one's answer, if it comes anyway, is dropped.
-#[derive(Default)]
-pub(super) struct Latest {
-    asked: u64,
-    /// The questions still out, to cancel.
-    pending: Vec<i64>,
-}
-
-impl Latest {
-    /// Ask `method` about `offset` in `text`, cancelling what's still out:
-    /// the answer, and the question's number, to check it's still the latest.
-    pub(super) fn ask(&mut self, lsp: &ghostwrite_lsp::Document, method: &str, text: &str, offset: usize) -> (ghostwrite_lsp::document::Answer, u64) {
-        self.cancel(lsp);
-        self.asked += 1;
-        let (id, answer) = lsp.ask_cancelable(method, text, offset);
-        self.pending.push(id);
-        (answer, self.asked)
-    }
-
-    /// Another question with the latest (asked together, both answers wanted).
-    pub(super) fn also(&mut self, lsp: &ghostwrite_lsp::Document, method: &str, text: &str, offset: usize) -> ghostwrite_lsp::document::Answer {
-        let (id, answer) = lsp.ask_cancelable(method, text, offset);
-        self.pending.push(id);
-        answer
-    }
-
-    /// Whether question `n`'s answer is the one wanted; if it is, nothing's out.
-    pub(super) fn answered(&mut self, n: u64) -> bool {
-        let latest = n == self.asked;
-        if latest {
-            self.pending.clear();
-        }
-        latest
-    }
-
-    /// Cancel what's still out: its answers aren't wanted.
-    pub(super) fn cancel(&mut self, lsp: &ghostwrite_lsp::Document) {
-        for id in self.pending.drain(..) {
-            lsp.cancel(id);
-        }
-    }
-}
 
 /// The completion menu: what the server offered at the cursor, and which is chosen.
 pub(super) struct CompletionMenu {
@@ -126,19 +84,6 @@ impl CompletionMenu {
         .with_priority(1)
         .into_any_element()
     }
-}
-
-/// The problem `space j` goes to from `cursor`, and which of how many of
-/// its kind it is: the next error after it (round to the first), or with
-/// no errors, the next warning.
-fn next_problem(diagnostics: &[ghostwrite_lsp::Diagnostic], cursor: usize) -> Option<(&ghostwrite_lsp::Diagnostic, usize, usize)> {
-    use ghostwrite_lsp::Severity;
-    let worst = [Severity::Error, Severity::Warning].into_iter().find(|s| diagnostics.iter().any(|d| d.severity == *s))?;
-    let mut kind: Vec<&ghostwrite_lsp::Diagnostic> = diagnostics.iter().filter(|d| d.severity == worst).collect();
-    kind.sort_by_key(|d| d.range.start);
-    kind.dedup_by_key(|d| d.range.start);
-    let ix = kind.iter().position(|d| d.range.start > cursor).unwrap_or(0);
-    Some((kind[ix], ix + 1, kind.len()))
 }
 
 impl Editor {
@@ -316,25 +261,5 @@ impl Editor {
     pub(super) fn render_completion(&self, theme: &Theme) -> Option<AnyElement> {
         let menu = self.completion.as_ref().filter(|m| self.tab().is_some_and(|t| t.doc.id == m.doc))?;
         Some(menu.render(self.measured.cursor?, theme))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use ghostwrite_lsp::{Diagnostic, Severity};
-
-    use super::next_problem;
-
-    #[test]
-    fn space_j_goes_to_the_next_error_round_to_the_first_then_warnings() {
-        let d = |at: usize, severity| Diagnostic { range: at..at + 1, severity, message: format!("at {at}") };
-        let all = [d(30, Severity::Error), d(5, Severity::Warning), d(10, Severity::Error), d(20, Severity::Info)];
-        let at = |cursor| next_problem(&all, cursor).map(|(d, nth, of)| (d.range.start, nth, of));
-        assert_eq!(at(0), Some((10, 1, 2)));
-        assert_eq!(at(10), Some((30, 2, 2)));
-        assert_eq!(at(30), Some((10, 1, 2)), "round to the first");
-        let warnings = [d(5, Severity::Warning), d(20, Severity::Info)];
-        assert_eq!(next_problem(&warnings, 9).map(|(d, ..)| d.range.start), Some(5), "no errors: the warnings");
-        assert!(next_problem(&[d(20, Severity::Info)], 0).is_none(), "info isn't a problem");
     }
 }

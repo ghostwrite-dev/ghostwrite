@@ -1,6 +1,6 @@
 //! The plugins this build has: the one place that names them. Each can be left
 //! out with its cargo feature. Those that come with the app as WebAssembly (PDFs, images,
-//! and Typst unless its native crate is built in: the `typst` feature) are in a folder beside it.
+//! Typst) are in a folder beside it.
 
 /// Where plugins that aren't built in are.
 pub fn folder() -> Option<std::path::PathBuf> {
@@ -29,8 +29,6 @@ pub fn install() {
     ghostwrite_plugin::set_runtime(Box::new(ghostwrite_wasm::Runtime));
     ghostwrite_plugin::install(|| {
         let mut plugins: Vec<Box<dyn ghostwrite_plugin::Plugin>> = vec![];
-        #[cfg(feature = "typst")]
-        plugins.push(Box::new(ghostwrite_typst::Plugin));
         #[cfg(feature = "lean")]
         plugins.push(Box::new(ghostwrite_lean::Plugin));
         // And those from the plugins folder.
@@ -46,8 +44,7 @@ pub fn install() {
             let (found, wrong) = ghostwrite_plugin::manifest::Manifest::in_folder(&folder);
             NOT_READ.lock().unwrap_or_else(|e| e.into_inner()).extend(wrong);
             for manifest in found {
-                let built_in = cfg!(feature = "typst") && manifest.name == "typst";
-                if !built_in && plugins.iter().all(|plugin| plugin.name() != manifest.name) {
+                if plugins.iter().all(|plugin| plugin.name() != manifest.name) {
                     plugins.push(Box::new(manifest));
                 }
             }
@@ -92,7 +89,7 @@ mod tests {
     fn only_the_plugins_name_themselves() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let mut found = vec![];
-        for krate in ["core", "lsp", "dap", "ai", "project", "terminal", "page", "model", "plugin", "wasm", "app"] {
+        for krate in ["core", "lsp", "dap", "ai", "project", "terminal", "page", "model", "plugin", "wasm", "view", "app"] {
             walk(&root.join(krate).join("src"), &mut found);
         }
         assert!(found.is_empty(), "these name a plugin:\n{}", found.join("\n"));

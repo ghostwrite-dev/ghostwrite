@@ -70,7 +70,7 @@ impl Editor {
             None => self.tab_mut(),
         };
         let Some(tab) = tab else { return };
-        tab.view.scroll_top = (tab.view.scroll_top - delta.y).max(px(0.));
+        tab.view.scroll_top = (tab.view.scroll_top - f32::from(delta.y)).max(0.);
         if other.is_none() && delta.y != px(0.) {
             self.wander();
         }

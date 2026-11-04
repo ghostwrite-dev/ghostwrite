@@ -4,22 +4,23 @@
 //! adds keys, focus, prompts and drawing, and decides when to switch tabs.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ghostwrite_core::Range;
 use ghostwrite_project::store::Session;
 use ghostwrite_project::tree::{Listing, Row, Tree};
-use gpui::SharedString;
 
-use super::{Autoscroll, Document, Tab, Tabs, document};
+use crate::document::{self, Document};
+use crate::tabs::{Autoscroll, Tab, Tabs};
 
 pub struct Project {
     pub root: PathBuf,
     pub tabs: Tabs,
     pub tree: Tree,
     /// What the status line says, until something else does.
-    pub status: Option<SharedString>,
+    pub status: Option<Arc<str>>,
     /// What's happened that plugins want to hear of, since they were last told.
-    pub heard: Vec<super::plugin_host::Heard>,
+    pub heard: Vec<crate::plugin_host::Heard>,
     servers: ghostwrite_lsp::Registry,
     /// What's beside files is shown (`:preview`).
     pub aside_shown: bool,
@@ -82,7 +83,7 @@ impl Project {
         Self { tree: Tree::new(root.clone()), root, tabs: Tabs::default(), status: None, heard: vec![], servers, aside_shown }
     }
 
-    pub fn say(&mut self, message: impl Into<SharedString>) {
+    pub fn say(&mut self, message: impl Into<Arc<str>>) {
         self.status = Some(message.into());
     }
 

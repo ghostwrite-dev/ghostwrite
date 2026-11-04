@@ -1,59 +1,46 @@
-//! What Claude is asked, and running it. A request is the story so far,
-//! the file asked about and the others it's in, and what's around it in the
-//! editor; the terminal is told as it was when the story started, and
-//! again in a follow-up when it's changed. The
-//! reply streams in on a background thread. While an item is reviewed, the
-//! next one is asked for ahead, assuming this one's accepted, in a fork of
-//! the Claude Code session.
+//! Running what Claude is asked. What a request is, and what's done with
+//! what comes back, is the story's state's
+//! ([`ghostwrite_view::story::request`]); here it's sent to the backend
+//! and the reply streams in on a background thread, each thing it reports
+//! handed on as an [`Event`]. While an item is reviewed, the next one is
+//! asked for ahead the same way.
 
-use std::collections::HashMap;
-use std::ops::Range as Lines;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt as _;
 use ghostwrite_ai::backend::Listener;
-use ghostwrite_ai::context::Shown;
-use ghostwrite_ai::placement::{Asked, Assumed, Files as _, Overlay, Place};
-use ghostwrite_ai::timing::{Timer, Wait};
-use ghostwrite_ai::{Item, Request, Story, Surroundings, lines};
+use ghostwrite_view::story::Event;
 use gpui::{AppContext as _, Context, Task};
 
-use super::StoryState;
-use crate::editor::{Editor, Project};
+use super::Live;
+use crate::editor::Editor;
 
-/// How the story talks with Claude: its session, and the requests on their way.
+/// The requests on their way, and how to stop them.
 #[derive(Default)]
-pub(super) struct Conversation {
-    /// The Claude Code session the story is in, resumed for each follow-up.
-    session: Option<String>,
-    /// The terminal, as Claude is told it.
-    terminal: Told,
+pub(super) struct Requests {
     /// Stops the reply on its way.
     cancel: Arc<AtomicBool>,
     _task: Option<Task<()>>,
     /// The request sent ahead of time that's on its way, and how to stop it.
     prefetching: Option<(u64, Arc<AtomicBool>)>,
     _prefetch_task: Option<Task<()>>,
-    /// The sessions requests sent ahead are in: the next one continues from there, and
-    /// the story's session becomes one once its reply is needed.
-    ahead_sessions: HashMap<u64, String>,
-    /// The items each request sent ahead assumed accepted, to check its reply against.
-    ahead_accepted: HashMap<u64, Vec<Item>>,
-    /// A reply sent ahead was needed before its session was known.
-    session_from: Option<u64>,
+    /// What the user has let the model read outside the project, during this story.
+    readable: Readable,
+    /// Where the answer goes, while the model asks to read outside the project.
+    pub(super) read_answer: Option<std::sync::mpsc::Sender<bool>>,
 }
 
 /// A story that's dropped (its window closed) stops what it asked: nothing
 /// more is spent on replies no one will read.
-impl Drop for Conversation {
+impl Drop for Requests {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-impl Conversation {
+impl Requests {
     /// Stop the reply on its way (something else was said).
     pub(super) fn stop_reply(&self) {
         self.cancel.store(true, Ordering::SeqCst);
@@ -68,45 +55,27 @@ impl Conversation {
     }
 }
 
-/// Something about the editor Claude is told as it was when the story
-/// started, and again in the newest turn whenever it's changed since.
-#[derive(Default)]
-struct Told {
-    /// What the first request said: `None` until it's sent. Kept, so the
-    /// conversation's start stays the same.
-    first: Option<Option<String>>,
-    /// What Claude was last told.
-    last: Option<String>,
-}
-
-impl Told {
-    /// It's `now` as a request goes out: what's changed since Claude was
-    /// last told, if anything (the first request is told it as it starts).
-    fn tell(&mut self, now: Option<String>) -> Option<String> {
-        let changed = self.first.is_some() && now != self.last;
-        self.last.clone_from(&now);
-        self.first.get_or_insert_with(|| now.clone());
-        now.filter(|_| changed)
-    }
-
-    /// What the conversation starts with.
-    fn started(&self) -> Option<String> {
-        self.first.clone().flatten()
+impl Live {
+    /// The request asked ahead that's on its way is the one the story's
+    /// state has: one it's let go of runs on, but isn't stopped from here.
+    fn keep_up_with_ahead(&mut self) {
+        if self.requests.prefetching.as_ref().is_some_and(|(id, _)| self.state.asking_ahead() != Some(*id)) {
+            self.requests.prefetching = None;
+        }
     }
 }
 
 /// What a running request reports, on its way to the editor.
 enum Message {
-    Text(String),
-    Looking(String),
-    Session(String),
-    Used(u64, u64),
-    /// The model's process is up: started ahead of time, or just now.
-    Started(bool),
+    Said(Event),
     /// The model would read this, outside the project: the user's asked, and the answer goes back.
     MayRead(PathBuf, std::sync::mpsc::Sender<bool>),
-    Done,
-    Failed(String),
+}
+
+impl Message {
+    fn ends(&self) -> bool {
+        matches!(self, Message::Said(event) if event.ends())
+    }
 }
 
 struct Forward(futures::channel::mpsc::UnboundedSender<Message>, Readable);
@@ -115,10 +84,14 @@ struct Forward(futures::channel::mpsc::UnboundedSender<Message>, Readable);
 struct Ahead(futures::channel::mpsc::UnboundedSender<Message>, Readable);
 
 /// What the user has let the model read outside the project, during this story.
-pub(super) type Readable = Arc<std::sync::Mutex<Vec<PathBuf>>>;
+type Readable = Arc<std::sync::Mutex<Vec<PathBuf>>>;
 
 fn allowed(readable: &Readable, path: &std::path::Path) -> bool {
     readable.lock().is_ok_and(|ok| ok.iter().any(|ok| path.starts_with(ok)))
+}
+
+fn say(tx: &futures::channel::mpsc::UnboundedSender<Message>, event: Event) {
+    tx.unbounded_send(Message::Said(event)).ok();
 }
 
 impl Listener for Ahead {
@@ -128,17 +101,17 @@ impl Listener for Ahead {
     }
 
     fn used(&mut self, input: u64, output: u64) {
-        self.0.unbounded_send(Message::Used(input, output)).ok();
+        say(&self.0, Event::Used(input, output));
     }
 
     fn text(&mut self, chunk: &str) {
-        self.0.unbounded_send(Message::Text(chunk.to_string())).ok();
+        say(&self.0, Event::Text(chunk.to_string()));
     }
 
     fn looking(&mut self, _what: String) {}
 
     fn session(&mut self, id: String) {
-        self.0.unbounded_send(Message::Session(id)).ok();
+        say(&self.0, Event::Session(id));
     }
 }
 
@@ -160,200 +133,38 @@ impl Listener for Forward {
     }
 
     fn used(&mut self, input: u64, output: u64) {
-        self.0.unbounded_send(Message::Used(input, output)).ok();
+        say(&self.0, Event::Used(input, output));
     }
 
     fn text(&mut self, chunk: &str) {
-        self.0.unbounded_send(Message::Text(chunk.to_string())).ok();
+        say(&self.0, Event::Text(chunk.to_string()));
     }
 
     fn looking(&mut self, what: String) {
-        self.0.unbounded_send(Message::Looking(what)).ok();
+        say(&self.0, Event::Looking(what));
     }
 
     fn session(&mut self, id: String) {
-        self.0.unbounded_send(Message::Session(id)).ok();
+        say(&self.0, Event::Session(id));
     }
 
     fn started(&mut self, ahead: bool) {
-        self.0.unbounded_send(Message::Started(ahead)).ok();
+        say(&self.0, Event::Started(ahead));
     }
 }
 
-impl StoryState {
-    /// The Claude Code session a follow-up would resume.
-    pub(in crate::editor) fn conversation_session(&self) -> Option<&str> {
-        self.conversation.session.as_deref()
-    }
-
-    /// The request for the story so far.
-    pub(in crate::editor) fn request(&self, project: &Project) -> Option<Request> {
-        self.request_ahead(project, &[])
-    }
-
-    /// The request as it would be with `accepted` applied too, as a request
-    /// sent ahead assumes: the files it shows are as they'd be then.
-    pub(in crate::editor) fn request_ahead(&self, project: &Project, accepted: &[Item]) -> Option<Request> {
-        let story = self.story.as_ref()?;
-        let doc = &project.tabs.by_id(self.doc)?.doc;
-        let assumed = self.assume(project, accepted)?;
-        Some(Request {
-            path: doc.path.clone(),
-            language: doc.language_name(),
-            // In the text as it's assumed, not as it is: they can be different lengths.
-            range: ghostwrite_ai::lines::bytes_of(&assumed.asked, self.lines.clone()),
-            others: self.others(project, &assumed),
-            text: assumed.asked,
-            instruction: story.instruction.clone(),
-            followups: story.followups().to_vec(),
-            root: Some(project.root.clone()),
-            surroundings: Surroundings { terminal: self.conversation.terminal.started(), ..self.surroundings(project) },
-            session: self.conversation.session.clone(),
-            fork: false,
-            small: 0,
-        })
-    }
-
-    /// The files as they'd be with `accepted` applied.
-    fn assume(&self, project: &Project, accepted: &[Item]) -> Option<Assumed> {
-        let asked = project.tabs.by_id(self.doc)?;
-        let asked = Asked { path: asked.doc.path.as_deref(), text: asked.doc.text(), lines: self.lines.clone() };
-        Some(self.placer.assume(&asked, &project.files(), accepted))
-    }
-
-    /// The files the story is in besides the one asked about, as `assumed`
-    /// has them: where its items are, and where the steps assumed accepted
-    /// went. Each is shown around the last place the story was at in it.
-    fn others(&self, project: &Project, assumed: &Assumed) -> Vec<Shown> {
-        let mut spots: Vec<(PathBuf, Lines<usize>)> = vec![];
-        if let Some(layout) = self.layout(project) {
-            for (id, _) in layout.story.items() {
-                if let Some(Place { path: Some(path), near }) = layout.lines(id).or_else(|| layout.spot(id)) {
-                    spots.push((path, near));
-                }
-            }
-        }
-        spots.extend(assumed.changed_at.iter().cloned());
-        let base = project.files();
-        let files = Overlay { files: &base, changed: &assumed.others };
-        let mut shown: Vec<Shown> = vec![];
-        for (path, focus) in spots {
-            let path_name = project.display(&path);
-            match shown.iter_mut().find(|s| s.path == path_name) {
-                Some(seen) => seen.focus = focus,
-                None => shown.extend(files.text(&path).map(|text| Shown { path: path_name, text, focus })),
-            }
-        }
-        shown
-    }
-
-    /// What's around the request in the editor: the open files, and
-    /// diagnostics within a few lines of the marked ones.
-    fn surroundings(&self, project: &Project) -> Surroundings {
-        const NEAR: usize = 5;
-        let open_files = project.tabs.iter().filter_map(|t| t.doc.path.as_deref().map(|p| project.display(p))).collect();
-        let near = self.lines.start.saturating_sub(NEAR)..self.lines.end + NEAR;
-        let diagnostics = project
-            .tabs
-            .by_id(self.doc)
-            .map(|t| {
-                t.doc
-                    .diagnostics
-                    .iter()
-                    .filter_map(|d| {
-                        let line = t.doc.buffer.line_of(d.range.start);
-                        near.contains(&line).then(|| format!("line {}: {}: {}", line + 1, d.severity.label(), d.message.lines().next().unwrap_or_default()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Surroundings { open_files, diagnostics, terminal: None }
+impl Live {
+    /// The model asks to read `path`, outside the project: the story asks the
+    /// user, and `answer` is where what they say goes.
+    pub(in crate::editor) fn may_read(&mut self, path: PathBuf, answer: std::sync::mpsc::Sender<bool>) {
+        self.requests.read_answer = Some(answer);
+        self.state.receive(Event::MayRead(path));
     }
 
     fn receive(&mut self, message: Message) {
-        if let Message::Session(id) = message {
-            self.conversation.session = Some(id);
-            return;
-        }
-        if let Message::Used(input, output) = message {
-            self.used.add(input, output);
-            return;
-        }
-        if let Some(timer) = self.timer.as_mut() {
-            match message {
-                Message::Started(ahead) => timer.started(ahead),
-                Message::Text(_) => timer.text(),
-                _ => {}
-            }
-        }
-        if let Message::MayRead(path, answer) = message {
-            self.asking_to_read = Some((path, answer));
-            return;
-        }
-        let Some(story) = self.story.as_mut() else { return };
         match message {
-            Message::Session(_) | Message::Used(..) | Message::Started(_) | Message::MayRead(..) => {}
-            Message::Text(chunk) => story.push_text(&chunk),
-            Message::Looking(what) => story.looking = Some(what),
-            Message::Done => story.finished_writing(),
-            Message::Failed(e) => story.failed(e),
-        }
-        if !story.is_writing() {
-            ghostwrite_ai::memory::save_transcript(&story.transcript());
-        }
-    }
-
-    /// What a request sent ahead (`id`) reports.
-    fn receive_ahead(&mut self, id: u64, message: Message) {
-        let Some(story) = self.story.as_mut() else { return };
-        if let Message::Used(input, output) = message {
-            self.used.add(input, output);
-            return;
-        }
-        match message {
-            Message::Session(session) => {
-                if self.conversation.session_from == Some(id) {
-                    self.conversation.session = Some(session.clone());
-                }
-                self.conversation.ahead_sessions.insert(id, session);
-            }
-            Message::Text(chunk) => story.ahead_text(id, &chunk),
-            Message::Looking(_) | Message::Used(..) | Message::Started(_) | Message::MayRead(..) => {}
-            Message::Done => story.ahead_finished(id, None),
-            Message::Failed(e) => story.ahead_finished(id, Some(e)),
-        }
-        if matches!(self.conversation.prefetching, Some((on_way, _)) if on_way == id) && !story.wants(id) {
-            self.conversation.prefetching = None;
-        }
-    }
-
-    /// A reply sent ahead became the next one: its session is the story's now.
-    pub(super) fn take_adopted(&mut self) {
-        let Some(id) = self.story.as_mut().and_then(Story::take_adopted) else { return };
-        match self.conversation.ahead_sessions.get(&id) {
-            Some(session) => self.conversation.session = Some(session.clone()),
-            None => self.conversation.session_from = Some(id),
-        }
-    }
-
-    /// Place a reply asked ahead (`id`) once, in the files as it assumed them,
-    /// and keep where as its anchor.
-    pub(super) fn anchor_ahead(&mut self, project: &Project, id: u64) {
-        let Some(item @ Item::Step(_)) = self.story.as_ref().and_then(|s| s.ahead_item(id)) else { return };
-        let Some(asked) = project.tabs.by_id(self.doc) else { return };
-        let accepted = self.conversation.ahead_accepted.get(&id).map(Vec::as_slice).unwrap_or_default();
-        let Some(assumed) = self.assume(project, accepted) else { return };
-        let base = project.files();
-        let files = Overlay { files: &base, changed: &assumed.others };
-        let place = self.placer.place(&item, &Asked { path: asked.doc.path.as_deref(), text: &assumed.asked, lines: self.lines.clone() }, &files);
-        let text = match &place.path {
-            None => Some(assumed.asked.clone()),
-            Some(path) => files.text(path),
-        };
-        if let Some(found) = text.and_then(|text| lines::find(&text, item.quoted(), place.near, item.line().is_some()))
-            && let Some(story) = self.story.as_mut()
-        {
-            story.anchor_ahead(id, found.lines);
+            Message::Said(event) => self.state.receive(event),
+            Message::MayRead(path, answer) => self.may_read(path, answer),
         }
     }
 }
@@ -365,39 +176,31 @@ impl Editor {
         self.project.write_all();
         let Some(backend) = self.backend.clone() else { return };
         let terminal = self.terminal_context();
-        let Some(state) = self.story.as_mut() else { return };
-        // The first request says what's in the terminal; a follow-up, what it shows now.
-        let seen = state.conversation.terminal.tell(terminal);
-        if let (Some(terminal), Some(story)) = (seen, state.story.as_mut()) {
-            story.saw_terminal(terminal);
-        }
-        let Some(req) = state.request(&self.project) else { return };
-        // Timed until there's something to look at; a rewrite of a step that wouldn't place is part of the same wait.
-        if state.timer.is_none() {
-            state.timer = Some(Timer::start(if req.followups.is_empty() { Wait::Ask } else { Wait::FollowUp }));
-        }
+        let Some(live) = self.story.as_mut() else { return };
+        let Some(req) = live.state.to_send(&self.project, terminal) else { return };
         // Whatever was still coming is superseded, and what it asked goes unanswered (no).
-        state.asking_to_read = None;
-        state.conversation.cancel.store(true, Ordering::SeqCst);
-        state.conversation.cancel = Arc::new(AtomicBool::new(false));
-        let cancel = state.conversation.cancel.clone();
+        let requests = &mut live.requests;
+        requests.read_answer = None;
+        requests.cancel.store(true, Ordering::SeqCst);
+        requests.cancel = Arc::new(AtomicBool::new(false));
+        let cancel = requests.cancel.clone();
         let mine = cancel.clone();
-        let readable = state.readable.clone();
+        let readable = requests.readable.clone();
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
         cx.background_spawn(async move {
             let result =
                 ghostwrite_project::contained("asking the model", || backend.run(&req, &mut Forward(tx.clone(), readable), &cancel)).and_then(|result| result);
-            tx.unbounded_send(result.map_or_else(Message::Failed, |()| Message::Done)).ok();
+            say(&tx, result.map_or_else(Event::Failed, |()| Event::Done));
         })
         .detach();
-        state.conversation._task = Some(cx.spawn(async move |this, cx| {
+        requests._task = Some(cx.spawn(async move |this, cx| {
             while let Some(message) = rx.next().await {
-                let done = matches!(message, Message::Done | Message::Failed(_));
+                let done = message.ends();
                 let alive = this
                     .update(cx, |this, cx| {
                         // A newer request (a correction sent mid-reply) supersedes this one.
-                        let Some(state) = this.story.as_mut().filter(|s| Arc::ptr_eq(&s.conversation.cancel, &mine)) else { return false };
-                        state.receive(message);
+                        let Some(live) = this.story.as_mut().filter(|s| Arc::ptr_eq(&s.requests.cancel, &mine)) else { return false };
+                        live.receive(message);
                         this.settle_story(cx);
                         true
                     })
@@ -415,46 +218,35 @@ impl Editor {
     /// longer wanted is stopped.
     pub(super) fn prefetch(&mut self, cx: &mut Context<Self>) {
         let Some(backend) = self.backend.clone() else { return };
-        let Some(state) = self.story.as_mut() else { return };
-        let Some(story) = state.story.as_mut() else { return };
-        if let Some((id, cancel)) = &state.conversation.prefetching {
-            if story.wants(*id) {
-                return;
-            }
+        let Some(live) = self.story.as_mut() else { return };
+        let ahead = live.state.ask_ahead(&self.project, backend.asks_ahead());
+        if ahead.stop
+            && let Some((_, cancel)) = live.requests.prefetching.take()
+        {
             cancel.store(true, Ordering::SeqCst);
-            state.conversation.prefetching = None;
         }
-        let Some(ahead) = story.prefetch(backend.asks_ahead()) else { return };
-        let Some(mut req) = state.request_ahead(&self.project, &ahead.accepted) else { return };
-        req.followups = ahead.followups;
-        req.session = match ahead.after {
-            None => state.conversation.session.clone(),
-            Some(before) => state.conversation.ahead_sessions.get(&before).cloned(),
-        };
-        req.fork = req.session.is_some();
-        state.conversation.ahead_accepted.insert(ahead.id, ahead.accepted);
-        let (id, cancel) = (ahead.id, Arc::new(AtomicBool::new(false)));
-        let readable = state.readable.clone();
-        state.conversation.prefetching = Some((id, cancel.clone()));
+        live.keep_up_with_ahead();
+        let Some((id, req)) = ahead.ask else { return };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let readable = live.requests.readable.clone();
+        live.requests.prefetching = Some((id, cancel.clone()));
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
         cx.background_spawn(async move {
             let result =
                 ghostwrite_project::contained("asking ahead", || backend.run(&req, &mut Ahead(tx.clone(), readable), &cancel)).and_then(|result| result);
-            tx.unbounded_send(result.map_or_else(Message::Failed, |()| Message::Done)).ok();
+            say(&tx, result.map_or_else(Event::Failed, |()| Event::Done));
         })
         .detach();
-        state.conversation._prefetch_task = Some(cx.spawn(async move |this, cx| {
+        live.requests._prefetch_task = Some(cx.spawn(async move |this, cx| {
             while let Some(message) = rx.next().await {
-                let done = matches!(message, Message::Done | Message::Failed(_));
+                let done = message.ends();
                 let alive = this
                     .update(cx, |this, cx| {
-                        let Some(state) = this.story.as_mut() else { return false };
-                        state.receive_ahead(id, message);
-                        if done {
-                            state.anchor_ahead(&this.project, id);
-                        }
-                        if done && matches!(state.conversation.prefetching, Some((on_way, _)) if on_way == id) {
-                            state.conversation.prefetching = None;
+                        let Some(live) = this.story.as_mut() else { return false };
+                        // Asked ahead, it doesn't ask to read: it's only told what's allowed.
+                        if let Message::Said(event) = message {
+                            live.state.receive_ahead(&this.project, id, event);
+                            live.keep_up_with_ahead();
                         }
                         this.settle_story(cx);
                         true
@@ -465,43 +257,5 @@ impl Editor {
                 }
             }
         }));
-    }
-}
-
-/// What a story has used of the model, as it's reported.
-#[derive(Default, Debug, Clone, Copy, PartialEq)]
-pub(super) struct Used {
-    input: u64,
-    output: u64,
-}
-
-impl Used {
-    fn add(&mut self, input: u64, output: u64) {
-        self.input += input;
-        self.output += output;
-    }
-
-    /// ` · 12.4k tokens in, 800 out`, if anything's known.
-    pub(super) fn said(&self) -> String {
-        if self.input + self.output == 0 {
-            return String::new();
-        }
-        let count = |n: u64| if n < 1000 { n.to_string() } else { format!("{:.1}k", n as f64 / 1000.) };
-        format!(" · {} tokens in, {} out", count(self.input), count(self.output))
-    }
-}
-
-#[cfg(test)]
-mod used_tests {
-    use super::Used;
-
-    #[test]
-    fn what_a_story_used_is_added_up_and_said() {
-        let mut used = Used::default();
-        assert_eq!(used.said(), "");
-        used.add(12_000, 500);
-        assert_eq!(used.said(), " · 12.0k tokens in, 500 out");
-        used.add(400, 300);
-        assert_eq!(used.said(), " · 12.4k tokens in, 800 out");
     }
 }

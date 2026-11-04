@@ -3,31 +3,12 @@
 //! its first key back to normal mode; `Q` records keys until `Q` again,
 //! and `q` plays them.
 
-use ghostwrite_core::{Key, Mode};
+use ghostwrite_core::{Command, Key, Mode};
 use gpui::{Context, Window};
 
 use super::{DocId, Editor};
-
-/// A key, or text typed in insert mode.
-#[derive(Debug, Clone)]
-pub(super) enum Recorded {
-    Key(Key),
-    Text(String),
-}
-
-#[derive(Default)]
-pub(super) struct Recorder {
-    /// The command being typed, and the file and its version as it began.
-    change: Vec<Recorded>,
-    began: Option<(DocId, u64)>,
-    /// The last command that changed the text: `.` plays it.
-    last_change: Vec<Recorded>,
-    /// Keys recorded for a macro (`Q` … `Q`), and the last macro.
-    recording: Option<Vec<Recorded>>,
-    last_macro: Vec<Recorded>,
-    /// Playing keys back: they aren't recorded again.
-    playing: bool,
-}
+use ghostwrite_view::repeat::Recorded;
+pub(super) use ghostwrite_view::repeat::Recorder;
 
 impl Editor {
     /// The file and version the cursor's in.
@@ -35,45 +16,30 @@ impl Editor {
         self.tab().map(|t| (t.doc.id, t.doc.buffer.version()))
     }
 
-    /// Before a key: record it (a command starts in normal mode with nothing typed toward it).
-    pub(super) fn record_key(&mut self, key: Key) {
-        if self.recorder.playing {
-            return;
-        }
-        if matches!(self.modal.mode, Mode::Normal | Mode::Select) && self.modal.pending_label().is_empty() {
-            self.recorder.change.clear();
-            self.recorder.began = self.version();
-        }
-        self.recorder.change.push(Recorded::Key(key));
-        if let Some(keys) = self.recorder.recording.as_mut().filter(|_| key != Key::Char('Q')) {
-            keys.push(Recorded::Key(key));
-        }
+    /// Before a key, which runs `command` if any: record it (a command
+    /// starts in normal mode with nothing typed toward it).
+    pub(super) fn record_key(&mut self, key: Key, command: Option<Command>) {
+        let at_rest = matches!(self.modal.mode, Mode::Normal | Mode::Select) && self.modal.pending_label().is_empty();
+        let now = self.version();
+        self.recorder.key(key, command, at_rest, now);
     }
 
-    /// After a key: a finished command that changed the text is what `.` plays.
-    pub(super) fn recorded_key(&mut self, key: Key) {
+    /// After a key, which ran `command` if any: a finished command that
+    /// changed the text is what `.` plays.
+    pub(super) fn recorded_key(&mut self, command: Option<Command>) {
         let done = matches!(self.modal.mode, Mode::Normal | Mode::Select) && self.modal.pending_label().is_empty();
-        let changed = self.recorder.began.is_some_and(|(doc, version)| self.version().is_some_and(|(d, v)| d == doc && v != version));
-        if !self.recorder.playing && done && changed && key != Key::Char('.') {
-            self.recorder.last_change = std::mem::take(&mut self.recorder.change);
-            self.recorder.began = None;
-        }
+        let now = self.version();
+        self.recorder.keyed(command, done, now);
     }
 
     /// Text typed in insert mode, as part of the command and any macro.
     pub(super) fn record_text(&mut self, text: &str) {
-        if self.recorder.playing {
-            return;
-        }
-        self.recorder.change.push(Recorded::Text(text.to_string()));
-        if let Some(keys) = self.recorder.recording.as_mut() {
-            keys.push(Recorded::Text(text.to_string()));
-        }
+        self.recorder.text(text);
     }
 
     /// `.`: the last change again, here.
     pub(super) fn repeat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let keys = self.recorder.last_change.clone();
+        let keys = self.recorder.last_change().to_vec();
         if keys.is_empty() {
             return self.project.say("nothing to repeat yet");
         }
@@ -82,24 +48,18 @@ impl Editor {
 
     /// `Q`: start recording a macro, or stop.
     pub(super) fn record_macro(&mut self) {
-        match self.recorder.recording.take() {
-            Some(keys) => {
-                self.project.say(format!("recorded {} keys: q plays them", keys.len()));
-                self.recorder.last_macro = keys;
-            }
-            None => {
-                self.recorder.recording = Some(vec![]);
-                self.project.say("recording: Q stops");
-            }
+        match self.recorder.record_macro() {
+            Some(n) => self.project.say(format!("recorded {n} keys: q plays them")),
+            None => self.project.say("recording: Q stops"),
         }
     }
 
     /// `q`: the recorded macro, played.
     pub(super) fn play_macro(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recorder.recording.is_some() {
+        if self.recorder.recording() {
             return self.project.say("still recording: Q stops first");
         }
-        let keys = self.recorder.last_macro.clone();
+        let keys = self.recorder.last_macro().to_vec();
         if keys.is_empty() {
             return self.project.say("no macro yet: Q records one");
         }
@@ -122,6 +82,6 @@ impl Editor {
 
     /// Whether a macro's being recorded (the status line says so).
     pub(super) fn recording_macro(&self) -> bool {
-        self.recorder.recording.is_some()
+        self.recorder.recording()
     }
 }

@@ -35,104 +35,52 @@ impl gpui::Render for DraggedTab {
     }
 }
 
-/// The `space ?` cheatsheet: every key. Helix's keys are as in helix;
-/// Ghostwrite's own are under `space`; ⌘ is for the app and its windows.
-pub(super) const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
-    (
-        "Move",
-        &[
-            ("h j k l", "left down up right"),
-            ("w b e", "next word, back, word end (W B E: WORD)"),
-            ("f t ‹c›  F T", "find / till a char, over lines (⏎: line end; F T: back)"),
-            ("alt-.", "find again (and mi ma ]p [p)"),
-            ("gg ge  10G", "file start, last line; line 10"),
-            ("gh gl gs", "line start, end, first non-blank"),
-            ("gt gc gb", "top, middle, bottom line on screen"),
-            ("zz zt zb", "scroll: this line to the middle, top, bottom"),
-            ("]d [d  ]p [p", "next, previous diagnostic; paragraph"),
-            ("g.", "where the last change was"),
-            ("ctrl-d ctrl-u", "half page down, up"),
-            ("gn gp", "next, previous tab (4gn: four along)"),
-            ("gN gP", "move the tab along (4gN: four places)"),
-            ("gd  gr", "go to definition; through the references"),
-            ("gf", "the file named here (path:line:col)"),
-            ("ctrl-o ctrl-i", "back where a jump came from, forward"),
-        ],
-    ),
-    (
-        "Select",
-        &[
-            ("v", "select mode (motions extend)"),
-            ("C  alt-C", "copy the selection to the line below, above"),
-            ("s  alt-s", "a cursor on each match in the selection; each line"),
-            (",  esc  alt-,", "back to one cursor; drop the main one"),
-            ("( )", "the main cursor: the one before, after"),
-            ("alt-minus  alt-_  &", "merge selections (those touching); line them up"),
-            ("click  ⇧click", "move there; select to there (or click after v)"),
-            ("drag  2×  3× click", "select; word; line"),
-            ("x X  alt-x  %", "select line (again: next line), out to, in to whole lines; all"),
-            (";  alt-;  _", "collapse, flip, trim selection"),
-        ],
-    ),
+/// A line of the cheatsheet: the keys as shown, what they do, and the keys
+/// bound in the keymap it shows (none, for a line written by hand).
+pub(super) struct Row {
+    pub keys: String,
+    pub what: String,
+    /// What keeps the cheatsheet and the keymap in step reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub bound: Vec<Vec<ghostwrite_core::Key>>,
+}
+
+/// The `space ?` cheatsheet: every key, as the keymap has them (and yours
+/// with them), and what it can't say: [`BY_HAND`]. Sections are in its order.
+pub(super) fn cheatsheet(keymap: &ghostwrite_core::Keymap) -> Vec<(String, Vec<Row>)> {
+    let mut sections: Vec<(String, Vec<Row>)> = BY_HAND.iter().map(|(title, _)| (title.to_string(), vec![])).collect();
+    for section in keymap.cheatsheet() {
+        let rows = section.lines.iter().map(|line| Row { keys: line.shown(), what: line.what.clone(), bound: line.keys.clone() });
+        match sections.iter_mut().find(|(title, _)| title == section.title) {
+            Some((_, lines)) => lines.extend(rows),
+            None => sections.push((section.title.to_string(), rows.collect())),
+        }
+    }
+    for ((_, lines), (_, by_hand)) in sections.iter_mut().zip(BY_HAND) {
+        lines.extend(by_hand.iter().map(|(keys, what)| Row { keys: keys.to_string(), what: what.to_string(), bound: vec![] }));
+    }
+    sections
+}
+
+/// What the cheatsheet says that isn't in the keymap, after what is, by
+/// section: typing (insert mode), the mouse, the terminal, reviewing, the
+/// tree, `:` commands and ⌘ keys. Helix's keys are as in helix; Ghostwrite's
+/// own are under `space`; ⌘ is for the app and its windows. Keep it in step
+/// with insert mode's, tree mode's and the terminal's keys by hand.
+const BY_HAND: &[(&str, &[(&str, &str)])] = &[
+    ("Move", &[]),
+    ("Select", &[("click  ⇧click", "move there; select to there (or click after v)"), ("drag  2×  3× click", "select; word; line")]),
     (
         "Edit",
         &[
-            ("i a I A", "insert before, after, line start, end"),
-            ("o O", "open line below, above (3o: three, a cursor each)"),
-            ("d c  alt-d alt-c", "delete, change selection (alt: no yank)"),
-            ("y p P  R", "yank, paste after, before; replace with yanked"),
-            ("\"‹r›", "use register r for the next y d c p (+: clipboard)"),
-            ("r‹c›  ~ ` alt-`", "replace with char; switch case, lower, upper"),
-            ("> <  J alt-J", "indent, unindent; join lines (alt: select the spaces)"),
-            ("] space  [ space", "blank line below, above"),
-            ("ctrl-a ctrl-x  ctrl-c", "number up, down; comment out / in"),
-            (".  Q q", "repeat the last change; record, play a macro"),
-            ("u U", "undo, redo"),
             ("ctrl-w ⌥⌫  alt-d", "(typing) delete the word before, after"),
             ("ctrl-u  ctrl-k", "(typing) delete to line start, end"),
             ("ctrl-r ‹r›", "(typing) type out register r"),
         ],
     ),
-    (
-        "Match  m",
-        &[
-            ("mm", "matching bracket"),
-            ("ms‹c›", "surround with a pair"),
-            ("mr‹a›‹b›", "replace surrounding pair"),
-            ("md‹c›", "delete surrounding pair"),
-            ("mi‹o›  ma‹o›", "select inside / around: w W p ( [ { < ' \" ` m"),
-            ("mif maf  ]f [f", "a function; next, previous (t type, a argument, c comment, T test, e entry)"),
-            ("alt-o alt-i", "out to the syntax node around, back in"),
-            ("alt-n alt-p  alt-a alt-I", "next, previous node; a cursor on each beside, inside"),
-            ("alt-e alt-b", "to the end, start of the node"),
-        ],
-    ),
-    (
-        "Search",
-        &[
-            ("/  ?", "search the file, forward, back (esc goes back)"),
-            ("n N", "next match, previous (select mode: add it)"),
-            ("*  alt-*", "search for the selection (as a word; anywhere)"),
-        ],
-    ),
-    (
-        "Space",
-        &[
-            ("space a", "ask about the line or selection"),
-            ("space e  ⌘B", "file tree"),
-            ("space t  ⌘J", "terminal: type in it; esc esc reads it"),
-            ("space f  space b", "pick a file, an open file (fuzzy)"),
-            ("space /", "search the project"),
-            ("space k  space d", "docs here; this file's diagnostics"),
-            ("space r  space .", "rename; the server's code actions here"),
-            ("space s", "pick one of the file's symbols"),
-            ("space j", "next error (or warning); a file's pages follow"),
-            ("space y  space p", "clipboard yank, paste"),
-            ("space ?", "this, every key"),
-            ("ctrl-w v", "two panes: this file's pages, or the next tab"),
-            ("ctrl-w w  ctrl-w q", "the other pane; only this one (ctrl-w o too)"),
-        ],
-    ),
+    ("Match  m", &[]),
+    ("Search", &[]),
+    ("Space", &[]),
     (
         "Reading the terminal",
         &[
@@ -400,13 +348,13 @@ impl Editor {
                     .when(!active, |d| d.text_color(theme.tab_foreground))
                     .debug_selector(move || format!("tab-{ix}"))
                     .on_click(cx.listener(move |this, _, _, cx| this.activate(ix, cx)))
-                    .on_drag(DraggedTab { ix, name: doc.name() }, |tab, _, _, cx| cx.new(|_| tab.clone()))
+                    .on_drag(DraggedTab { ix, name: doc.name().into() }, |tab, _, _, cx| cx.new(|_| tab.clone()))
                     .drag_over::<DraggedTab>({
                         let accent = theme.accent;
                         move |style, _, _, _| style.border_l_2().border_color(accent)
                     })
                     .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.move_tab(dragged.ix, ix, cx)))
-                    .child(doc.name())
+                    .child(SharedString::from(doc.name()))
                     .child(
                         div()
                             .id(("close", ix))
@@ -468,7 +416,8 @@ impl Editor {
                 tab.and_then(Tab::diagnostic_at_cursor).map(|d| format!("{}: {}", d.severity.label(), d.message.lines().next().unwrap_or_default()).into())
             })
             .or_else(|| tab.map(|t| t.doc.name()))
-            .unwrap_or_else(|| "no file open".into());
+            .unwrap_or_else(|| "no file open".into())
+            .into();
         let position = tab.map(|t| {
             let (line, column) = t.cursor_position();
             format!("{}:{}", line + 1, column + 1)
@@ -545,25 +494,28 @@ impl Editor {
 
     fn render_cheatsheet(&self, cx: &Context<Self>) -> AnyElement {
         let theme = theme(cx);
-        let section = |(title, keys): &(&str, &[(&str, &str)])| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.warning).child(title.to_string()))
-                .children(keys.iter().map(|(k, what)| {
+        let section = |(title, keys): &(String, Vec<(String, String)>)| {
+            div().flex().flex_col().gap_1().child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.warning).child(title.clone())).children(
+                keys.iter().map(|(k, what)| {
                     div()
                         .flex()
                         .gap_3()
                         .text_xs()
                         .child(div().w(pt(132.)).flex_none().font_family(theme.mono_font.clone()).text_color(theme.foreground).child(crate::keys::shown(k)))
-                        .child(div().text_color(theme.muted_foreground).child(what.to_string()))
-                }))
+                        .child(div().text_color(theme.muted_foreground).child(what.clone()))
+                }),
+            )
         };
-        let columns: [&[usize]; 3] = [&[0, 1, 2], &[3, 4, 5], &[6, 7, 8]];
+        let mut sections: Vec<(String, Vec<(String, String)>)> =
+            cheatsheet(self.modal.keymap()).into_iter().map(|(title, rows)| (title, rows.into_iter().map(|row| (row.keys, row.what)).collect())).collect();
         // What plugins bind for this file, in a section of their own at the end.
-        let bound: Vec<(&str, &str)> = ghostwrite_plugin::keys(self.active_language()).iter().map(|b| (b.keys, b.what)).collect();
-        let mut this_file = (!bound.is_empty()).then(|| section(&("Plugin keys", bound.as_slice())));
+        let bound: Vec<(String, String)> = ghostwrite_plugin::keys(self.active_language()).iter().map(|b| (b.keys.to_string(), b.what.to_string())).collect();
+        if !bound.is_empty() {
+            sections.push(("Plugin keys".into(), bound));
+        }
+        let columns: [&[usize]; 3] = [&[0, 1, 2], &[3, 4, 5], &[6, 7, 8]];
+        // Yours and the plugins' (after those written by hand) go at the end of the last.
+        let mut at_the_end = sections.split_off(BY_HAND.len().min(sections.len()));
         let last = columns.len() - 1;
         div()
             .absolute()
@@ -599,8 +551,15 @@ impl Editor {
                     )
                     .child(div().id("cheatsheet").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.cheatsheet_scroll).min_w_0().child(
                         div().flex().items_start().gap_6().min_w_0().children(columns.iter().enumerate().map(|(n, col)| {
-                            let extra = if n == last { this_file.take() } else { None };
-                            div().flex_none().min_w_0().flex().flex_col().gap_4().children(col.iter().map(|&i| section(&CHEATSHEET[i]))).children(extra)
+                            let extra = if n == last { std::mem::take(&mut at_the_end) } else { vec![] };
+                            div()
+                                .flex_none()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap_4()
+                                .children(col.iter().map(|&i| section(&sections[i])))
+                                .children(extra.iter().map(section))
                         })),
                     )),
             )

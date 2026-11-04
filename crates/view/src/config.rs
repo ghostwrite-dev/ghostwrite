@@ -1,8 +1,11 @@
 //! User settings, read once at launch from `~/.config/ghostwrite/config.json`.
-//! A missing or broken file, or a missing key, means the default.
+//! A missing or broken file, or a missing key, means the default; keys
+//! that can't be bound are said at launch, and keep theirs.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+use ghostwrite_core::Keymap;
 
 pub struct Config {
     /// Files bigger than this aren't opened, so a stray log or binary can't hang the editor.
@@ -30,8 +33,14 @@ pub struct Config {
     pub animations: bool,
     /// The debug adapter `:debug` runs: the program and its arguments.
     pub debugger: Vec<String>,
-    /// Your own keys in normal and select mode: `"ctrl-s": ":w"`, `"space w": ":wa"`.
+    /// Your own keys in normal and select mode: a `:` command (`"ctrl-s":
+    /// ":w"`, `"space w": ":wa"`), a command by name (`"x":
+    /// "extend_line_below"`), or `"no_op"` to unbind a key.
     pub keys: Vec<(String, String)>,
+    /// The keymap, with your keys over the default one.
+    pub keymap: Keymap,
+    /// What's wrong with your keys, if anything is.
+    pub problems: Vec<String>,
     /// The theme for light and dark appearance, by name, from `themes/` beside the config.
     pub theme_light: Option<String>,
     pub theme_dark: Option<String>,
@@ -54,6 +63,8 @@ impl Default for Config {
             animations: true,
             debugger: if cfg!(target_os = "macos") { vec!["/usr/bin/xcrun".into(), "lldb-dap".into()] } else { vec!["lldb-dap".into()] },
             keys: vec![],
+            keymap: Keymap::default(),
+            problems: vec![],
             theme_light: None,
             theme_dark: None,
         }
@@ -71,10 +82,15 @@ pub fn get() -> &'static Config {
 }
 
 fn load() -> Config {
+    match path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) {
+        Some(json) => from_json(&json),
+        None => Config::default(),
+    }
+}
+
+/// The settings `json` gives.
+fn from_json(json: &serde_json::Value) -> Config {
     let mut config = Config::default();
-    let Some(json) = path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) else {
-        return config;
-    };
     if let Some(animations) = json.get("animations").and_then(|v| v.as_bool()) {
         config.animations = animations;
     }
@@ -82,7 +98,8 @@ fn load() -> Config {
         config.debugger = debugger.iter().filter_map(|word| Some(word.as_str()?.to_string())).collect();
     }
     if let Some(keys) = json.get("keys").and_then(|v| v.as_object()) {
-        config.keys = keys.iter().filter_map(|(key, command)| Some((key.clone(), command.as_str()?.trim_start_matches(':').to_string()))).collect();
+        config.keys = keys.iter().filter_map(|(key, command)| Some((key.clone(), command.as_str()?.to_string()))).collect();
+        (config.keymap, config.problems) = Keymap::default().with_yours(&config.keys);
     }
     config.theme_light = json.get("theme_light").and_then(|v| v.as_str()).map(str::to_string);
     config.theme_dark = json.get("theme_dark").and_then(|v| v.as_str()).map(str::to_string);
@@ -120,4 +137,22 @@ fn load() -> Config {
         config.max_recent_projects = n;
     }
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use ghostwrite_core::{Key, Modal};
+
+    #[test]
+    fn your_keys_are_bound_and_those_that_cant_be_are_said() {
+        let json = serde_json::json!({ "keys": { "ctrl-s": ":w", "Z": "extend_line_below", "x": "no_op", "q": "extend_lin_below" } });
+        let config: &'static super::Config = Box::leak(Box::new(super::from_json(&json)));
+        let mut modal = Modal::default();
+        modal.set_keymap(&config.keymap);
+        assert_eq!(modal.command_for(Key::Char('Z')), Some(ghostwrite_core::Command::ExtendLineBelow));
+        assert!(!modal.binds(Key::Char('x')), "unbound");
+        assert!(modal.binds(Key::Ctrl('s')));
+        assert_eq!(modal.command_for(Key::Char('q')), Some(ghostwrite_core::Command::ReplayMacro), "as it was");
+        assert_eq!(config.problems, ["\"q\": no command \"extend_lin_below\" (a : command starts with :)"]);
+    }
 }

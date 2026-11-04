@@ -1,6 +1,6 @@
 //! The editor: everything inside a project window is one modal editor.
 //!
-//! The model is the [`Project`]: the open files ([`Tabs`] of [`Document`]s
+//! The model is the [`Project`]: the open files ([`Tabs`](tabs::Tabs) of [`Document`](document::Document)s
 //! and their views), the file tree, the language servers. Each feature is a
 //! type that works on it: a [`story`] (asked of the model, or one of the
 //! editor's [`stops`]: command output, diagnostics, search matches), and the
@@ -15,7 +15,7 @@
 //! terminal mode sends them to the terminal's shell. Text typed in insert
 //! mode arrives through the platform's input handler.
 //!
-//! - [`project`], [`tabs`], [`document`]: the model
+//! - [`project`], [`tabs`], [`document`]: the model, from [`ghostwrite_view`]
 //! - [`commands`]: `:` commands, in the [`prompt`]
 //! - [`input`]: text from the platform; [`pointer`]: the mouse in the code
 //! - [`story`], [`stops`], [`shell`], [`terminal`], [`tree`], [`find`], [`picker`], [`jumps`], [`repeat`]: features
@@ -33,7 +33,6 @@ pub(crate) mod attention;
 mod commands;
 mod cursors;
 mod debug;
-mod document;
 mod element;
 mod find;
 mod input;
@@ -43,7 +42,6 @@ mod page_view;
 mod picker;
 mod plugin_host;
 mod pointer;
-mod project;
 mod prompt;
 mod reading;
 mod recovery;
@@ -55,7 +53,6 @@ mod split;
 mod stops;
 mod story;
 mod story_view;
-mod tabs;
 mod terminal;
 mod terminal_view;
 mod tree;
@@ -65,7 +62,6 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
 use std::ops::Range as Bytes;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,9 +76,9 @@ use gpui::{
     Subscription, Window,
 };
 
-pub use document::{DocId, Document};
-pub use project::Project;
-pub use tabs::{Autoscroll, Tab, Tabs};
+use ghostwrite_view::registers::Registers;
+pub use ghostwrite_view::{Autoscroll, DocId, Project, Tab};
+use ghostwrite_view::{document, project, tabs};
 
 use crate::keys::key_of;
 use prompt::{Prompt, PromptKind};
@@ -144,7 +140,7 @@ pub struct Editor {
     // Features.
     /// What `space a` asks, if Claude can be reached.
     backend: Option<Arc<Backend>>,
-    story: Option<story::StoryState>,
+    story: Option<story::Live>,
     find: find::Find,
     picker: Option<picker::Picker>,
     cheatsheet: bool,
@@ -177,7 +173,7 @@ pub struct Editor {
     /// The next redraw while Claude is thinking.
     ticking: Option<gpui::Task<()>>,
     /// What the last story changed: each document, its steps, and its version when the story ended.
-    last_story: Vec<(DocId, usize, u64)>,
+    last_story: ghostwrite_view::story::Undo,
     /// Copies of unsaved changes, for after a crash.
     recovery: recovery::Recovery,
     /// Watches the project for changes made by other programs.
@@ -191,13 +187,6 @@ impl Focusable for Editor {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
-}
-
-/// The yank register, shared by all documents, and the named ones (`"a y`).
-#[derive(Default)]
-struct Registers {
-    yanked: String,
-    named: HashMap<char, String>,
 }
 
 /// The registers and the clipboard, for modal commands: the yank
@@ -343,9 +332,23 @@ impl Editor {
             _watcher: watcher,
             _subscriptions: subscriptions,
         };
+        // A test has the default keys, not those of whoever runs it.
+        if !cfg!(test) {
+            let config = crate::config::get();
+            editor.use_keys(&config.keymap, &config.problems);
+        }
         editor.start_recovery(cx);
         editor.check_for_update(false, cx);
         editor
+    }
+
+    /// Keys looked up in `keymap` from now on (yours, from the config), and
+    /// what's wrong with those that couldn't be bound said.
+    fn use_keys(&mut self, keymap: &'static ghostwrite_core::Keymap, problems: &[String]) {
+        self.modal.set_keymap(keymap);
+        if !problems.is_empty() {
+            self.project.say(format!("config.json \"keys\": {}", problems.join("; ")));
+        }
     }
 
     /// Write every file with unsaved changes; whether they all were.
@@ -645,14 +648,16 @@ impl Editor {
         // A message lasts until the next key (which may say something new),
         // and so do the marked matches, unless it's about searching.
         self.project.status = None;
-        if !matches!(key, ghostwrite_core::Key::Char('n' | 'N' | '*') | ghostwrite_core::Key::Alt('*')) {
+        let command = self.modal.command_for(key);
+        use ghostwrite_core::Command::*;
+        if !matches!(command, Some(SearchNext | SearchPrev | SearchSelectionDetectWordBounds | SearchSelection)) {
             self.find.shown = false;
         }
         let from = self.before_jump();
-        self.record_key(key);
+        self.record_key(key, command);
         let handled = (self.modal.mode == Mode::Insert && self.menu_key(key, cx)) || self.mode_key(key, window, cx);
-        self.recorded_key(key);
-        if !matches!(key, ghostwrite_core::Key::Ctrl('o' | 'i')) {
+        self.recorded_key(command);
+        if !matches!(command, Some(JumpBackward | JumpForward)) {
             self.note_jump(from);
         }
         if self.modal.take_refused() {
@@ -693,7 +698,7 @@ impl Editor {
         if let Some(handled) = self.reading_key(key, window, cx) {
             return handled;
         }
-        if !reading && self.cursor_key(key, window, cx) {
+        if !reading && self.cursor_key(key, cx) {
             return true;
         }
         if let Some(command) = self.plugin_key(key).filter(|_| !reading) {
@@ -724,8 +729,9 @@ impl Editor {
     }
 
     /// The command a plugin binds this key to, the keys so far included.
+    /// The keymap comes first: yours are in it.
     fn plugin_key(&self, key: Key) -> Option<&'static str> {
-        if !matches!(self.modal.mode, Mode::Normal | Mode::Select) {
+        if !matches!(self.modal.mode, Mode::Normal | Mode::Select) || self.modal.binds(key) {
             return None;
         }
         let name = match key {
@@ -735,10 +741,6 @@ impl Editor {
         };
         let pending = self.modal.pending_keys();
         let typed = if pending.is_empty() { name } else { format!("{pending} {name}") };
-        // Yours come first.
-        if let Some((_, command)) = crate::config::get().keys.iter().find(|(keys, _)| *keys == typed) {
-            return Some(command);
-        }
         ghostwrite_plugin::keys(self.active_language()).into_iter().find(|binding| binding.keys == typed).map(|binding| binding.command)
     }
 
@@ -808,6 +810,14 @@ impl Editor {
             match effect {
                 Effect::Assist => return self.ask_about_output(window, cx),
                 Effect::View(_) | Effect::ScreenLine(_) | Effect::Repeat => return,
+                // There's one cursor on the terminal.
+                Effect::CopySelections { .. }
+                | Effect::KeepPrimarySelection
+                | Effect::RemovePrimarySelection
+                | Effect::RotateSelections { .. }
+                | Effect::MergeSelections { .. }
+                | Effect::AlignSelections
+                | Effect::SelectRegex => return,
                 Effect::Find { .. }
                 | Effect::FindNext { .. }
                 | Effect::FindSelection { .. }
@@ -863,6 +873,18 @@ impl Editor {
             Effect::NextProblem => self.next_problem(cx),
             Effect::Diagnostics => self.diagnostics_story(cx),
             Effect::Terminal => self.enter_terminal(cx),
+            Effect::Run(command) => {
+                if let Err(why) = self.run_command(command, window, cx) {
+                    self.project.say(why);
+                }
+            }
+            Effect::CopySelections { .. }
+            | Effect::KeepPrimarySelection
+            | Effect::RemovePrimarySelection
+            | Effect::RotateSelections { .. }
+            | Effect::MergeSelections { .. }
+            | Effect::AlignSelections
+            | Effect::SelectRegex => self.cursors(effect, window, cx),
         }
     }
 }

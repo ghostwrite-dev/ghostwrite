@@ -627,26 +627,6 @@ fn a_lone_esc_reaches_the_shell_and_esc_esc_doesnt_eat_the_next_key(cx: &mut Tes
     wait_for(&mut t, printed("safe"));
 }
 
-#[test]
-fn links_on_the_terminal_are_web_addresses_and_files_that_are_there() {
-    use crate::editor::terminal::{LinkTo, link_in};
-    let root = ghostwrite_project::scratch_dir("terminal-links");
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
-    let row = |text: &str| text.chars().enumerate().collect::<Vec<_>>();
-    let line = row("see (https://example.com/a_(b)), then");
-    let (cols, to) = link_in(&line, 10, &root).unwrap();
-    assert_eq!(to, LinkTo::Web("https://example.com/a_(b)".into()), "the brackets it opens, not the one around it");
-    assert_eq!(cols, 5..30);
-    assert_eq!(link_in(&line, 2, &root), None, "a word that's neither");
-    assert_eq!(link_in(&line, 3, &root), None, "a space");
-    let line = row("error: --> src/main.rs:1:4: here");
-    let (cols, to) = link_in(&line, 14, &root).unwrap();
-    assert_eq!(to, LinkTo::File(root.join("src/main.rs"), 0, 3), "where the compiler said");
-    assert_eq!(cols, 11..26, "the path and its numbers, not the colon after");
-    assert_eq!(link_in(&row("src/nothere.rs"), 3, &root), None, "a file that isn't there isn't one");
-}
-
 #[gpui::test]
 fn command_click_on_a_file_in_the_terminal_opens_it(cx: &mut TestAppContext) {
     let mut t = open("one\n", &[], cx);

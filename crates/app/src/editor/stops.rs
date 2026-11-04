@@ -1,43 +1,14 @@
 //! Stories the editor gives: `space d` goes through the file's diagnostics,
 //! `:grep` and `space /` the project's matches. Each stop is a note, reviewed like any
 //! story's: Tab reads on, and Enter asks the model about it, which takes over
-//! from there.
-
-use std::path::Path;
+//! from there. The items themselves are made in [`ghostwrite_view::story::stops`].
 
 use ghostwrite_ai::Item;
-use ghostwrite_ai::protocol::{Note, Step};
 use ghostwrite_project::files::{MAX_FOUND, grep, search_pattern};
+use ghostwrite_view::story::stops::{note_at, replacing};
 use gpui::{AppContext as _, Context, Window};
 
 use super::Editor;
-
-/// A note at `line` of `path`, whose text there is `text`.
-fn note_at(root: &Path, path: &Path, line: usize, text: &str, say: String) -> Item {
-    let file = ghostwrite_project::platform::with_slashes(path.strip_prefix(root).unwrap_or(path));
-    // No text (a line too long to keep): the note is at the line by its number.
-    let at = if text.is_empty() { vec![] } else { vec![text.to_string()] };
-    Item::Note(Note { file: Some(file), at, text: say, line: Some(line) })
-}
-
-/// Each matching line once, with the matches in it replaced: a step for each that changes.
-fn replacing(root: &Path, pattern: &regex::Regex, with: &str, found: &[ghostwrite_project::files::Found]) -> Vec<Item> {
-    let mut items: Vec<Item> = vec![];
-    let mut last = None;
-    for f in found {
-        if f.text.is_empty() || last == Some((&f.path, f.line)) {
-            continue;
-        }
-        last = Some((&f.path, f.line));
-        let new = pattern.replace_all(&f.text, with).into_owned();
-        if new != f.text {
-            let file = ghostwrite_project::platform::with_slashes(f.path.strip_prefix(root).unwrap_or(&f.path));
-            let say = format!("{} → {}", pattern.as_str().trim_start_matches("(?i)"), with);
-            items.push(Item::Step(Step { file: Some(file), old: vec![f.text.clone()], line: Some(f.line), new: vec![new], say, op: None, complete: true }));
-        }
-    }
-    items
-}
 
 impl Editor {
     /// `:replace old new`: search the project, and go through the changes as

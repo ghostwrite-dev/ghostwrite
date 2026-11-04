@@ -97,7 +97,7 @@ impl Element for PageView {
             let pages = tab.doc.rendered.as_ref()?.pages.clone()?;
             let scroll = &tab.view.pages;
             let max_width = pages.max_width().map(|width| px(width * theme.zoom));
-            let stack = Stack::new(pages.sizes(), bounds.size.width, max_width, scroll.zoom, scroll.left);
+            let stack = Stack::new(pages.sizes(), bounds.size.width, max_width, scroll.zoom, px(scroll.left));
             let buffer = &tab.doc.buffer;
             let (selection, text) = (tab.view.selection, buffer.text());
             let cursor = selection.cursor(text);
@@ -109,7 +109,7 @@ impl Element for PageView {
                 pages.covering(start..end).first().copied().or_else(|| pages.cursor(start)).map(|place| rect(&stack, place))
             };
             let own = editor.tab().is_some_and(|active| active.doc.id == id);
-            let mut top = scroll.top;
+            let mut top = px(scroll.top);
             let cursor_line = buffer.line_of(cursor);
             match tab.view.autoscroll.as_ref().filter(|_| own) {
                 Some(Autoscroll::Fit) => {
@@ -163,7 +163,7 @@ impl Element for PageView {
         self.editor.update(cx, |editor, _| {
             let own = editor.tab().is_some_and(|active| active.doc.id == id);
             if let Some(tab) = editor.project.tabs.by_id_mut(id) {
-                (tab.view.pages.top, tab.view.pages.left, tab.view.pages.reveal) = (scroll_top, stack.scroll_left, None);
+                (tab.view.pages.top, tab.view.pages.left, tab.view.pages.reveal) = (scroll_top.into(), stack.scroll_left.into(), None);
                 if own {
                     tab.view.autoscroll = None;
                 }

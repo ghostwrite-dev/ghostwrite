@@ -18,7 +18,7 @@ pub mod textobject;
 
 pub use buffer::{Buffer, Edit};
 pub use language::Language;
-pub use modal::{Effect, Key, MenuKey, Modal, Mode, Outcome, Place, Registers, Review, Target, TreeCommand};
+pub use modal::{Command, Effect, Key, Keymap, MenuKey, Modal, Mode, Outcome, Place, Registers, Review, Target, TreeCommand};
 pub use selection::Range;
 
 /// The boundary after the character at `i` (or the end): a character as

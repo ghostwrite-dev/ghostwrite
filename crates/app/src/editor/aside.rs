@@ -9,22 +9,13 @@ use ghostwrite_plugin::{Block, Panel};
 use gpui::{AnyElement, Context, Hsla, MouseButton, MouseDownEvent, div, prelude::*};
 use serde_json::Value;
 
+pub use ghostwrite_view::aside::Aside;
+
 use super::document::DocId;
-use super::language::Latest;
 use super::page_view::PageView;
 use super::{Editor, Tab};
 use crate::theme::{Theme, pt, theme};
 use crate::ui::pane::{Edge, Resizable};
-
-/// A document's panel, and the editor's side of keeping it up to date.
-pub struct Aside {
-    pub panel: Box<dyn Panel>,
-    /// The buffer version and cursor asked about last.
-    asked: Option<(u64, usize)>,
-    /// Only the latest answer counts: a server may answer only once it's got as far
-    /// as the cursor, so a cursor that's moved on doesn't wait for the old one.
-    latest: Latest,
-}
 
 /// The pane: half the room, until its edge is dragged.
 pub(super) fn width() -> Resizable {
@@ -86,7 +77,7 @@ impl Editor {
         }
         if doc.aside.is_none() {
             let Some(panel) = doc.language.and_then(ghostwrite_plugin::panel) else { return };
-            doc.aside = Some(Aside { panel, asked: None, latest: Latest::default() });
+            doc.aside = Some(Aside::new(panel));
         }
         let (Some(lsp), Some(aside)) = (doc.lsp.as_ref(), doc.aside.as_mut()) else { return };
         let now = (doc.buffer.version(), cursor);

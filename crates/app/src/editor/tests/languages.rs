@@ -423,7 +423,8 @@ fn a_plugin_binds_keys_for_its_files(cx: &mut TestAppContext) {
 #[gpui::test]
 fn plugins_keys_are_free(cx: &mut TestAppContext) {
     let _t = open("", &[], cx);
-    let builtin: Vec<&str> = crate::editor::view::CHEATSHEET.iter().flat_map(|(_, rows)| rows.iter().map(|(keys, _)| *keys)).collect();
+    let cheatsheet = crate::editor::view::cheatsheet(ghostwrite_core::Keymap::standard());
+    let builtin: Vec<&str> = cheatsheet.iter().flat_map(|(_, rows)| rows.iter().map(|row| row.keys.as_str())).collect();
     let mut seen = 0;
     for language in ghostwrite_core::Language::all().into_iter().map(Some).chain([None]) {
         for binding in ghostwrite_plugin::keys(language) {
@@ -507,7 +508,7 @@ fn pages_zoom_and_scroll_across_on_their_own(cx: &mut TestAppContext) {
     t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![pdf.clone()], cx)));
     until_it_has_pages(&mut t);
     let zooms = |t: &mut Setup| {
-        let pages = t.read(|e| e.tab().map(|tab| (tab.view.pages.zoom, tab.view.pages.left)).unwrap());
+        let pages = t.read(|e| e.tab().map(|tab| (tab.view.pages.zoom, gpui::px(tab.view.pages.left))).unwrap());
         (pages, t.cx.update(|_, cx| crate::theme::theme(cx).zoom))
     };
     let redraw = |t: &mut Setup| {

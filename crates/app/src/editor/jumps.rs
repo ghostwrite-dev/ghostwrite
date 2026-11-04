@@ -6,29 +6,7 @@ use super::{Autoscroll, DocId, Editor};
 use ghostwrite_core::Range;
 use gpui::Context;
 
-/// How many places are kept.
-const KEPT: usize = 100;
-
-#[derive(Default)]
-pub(super) struct Jumps {
-    places: Vec<(DocId, usize)>,
-    /// Where `ctrl-o` goes from: the place before this one. At the end, nothing's been gone back to.
-    at: usize,
-}
-
-impl Jumps {
-    /// A jump from `from`: it's where `ctrl-o` goes back to (what was ahead is dropped).
-    fn jumped(&mut self, from: (DocId, usize)) {
-        self.places.truncate(self.at);
-        if self.places.last() != Some(&from) {
-            self.places.push(from);
-        }
-        if self.places.len() > KEPT {
-            self.places.remove(0);
-        }
-        self.at = self.places.len();
-    }
-}
+pub(super) use ghostwrite_view::jumps::Jumps;
 
 impl Editor {
     /// Where the cursor is: its file, and where in it.
@@ -53,22 +31,8 @@ impl Editor {
     /// `ctrl-o` (`back`) and `ctrl-i`, `count` jumps along (if there are that many).
     pub(super) fn jump(&mut self, back: bool, count: usize, cx: &mut Context<Self>) {
         let here = self.place();
-        if back {
-            let Some(to) = self.jumps.at.checked_sub(count) else { return self.project.say("no jumps to go back to") };
-            // Leaving the end: remember it, for ctrl-i to come back to.
-            if self.jumps.at == self.jumps.places.len()
-                && let Some(here) = here
-            {
-                self.jumps.places.push(here);
-            }
-            self.jumps.at = to;
-        } else {
-            if self.jumps.at + count >= self.jumps.places.len() {
-                return self.project.say("no jumps ahead");
-            }
-            self.jumps.at += count;
-        }
-        let (doc, at) = self.jumps.places[self.jumps.at];
+        let to = if back { self.jumps.back(count, here) } else { self.jumps.forward(count) };
+        let Some((doc, at)) = to else { return self.project.say(if back { "no jumps to go back to" } else { "no jumps ahead" }) };
         let Some(ix) = self.project.tabs.index_of_id(doc) else { return self.project.say("that file was closed") };
         // Going through the list isn't jumping: it stays as it is.
         let jumps = std::mem::take(&mut self.jumps);

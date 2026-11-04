@@ -346,7 +346,7 @@ fn the_tree_marks_where_the_story_is_waiting(cx: &mut TestAppContext) {
     std::fs::write(t.dir.join("src/lib.rs"), "pub fn run() {}\n").unwrap();
     let waiting = |t: &mut Setup| {
         let dir = t.dir.clone();
-        let mut files: Vec<(String, crate::editor::story::Waiting)> = t
+        let mut files: Vec<(String, ghostwrite_view::story::Waiting)> = t
             .read(|e| e.story.as_ref().map(|s| s.files(&e.project)).unwrap_or_default())
             .into_iter()
             .map(|(p, w)| (p.strip_prefix(&dir).unwrap().display().to_string(), w))
@@ -355,11 +355,11 @@ fn the_tree_marks_where_the_story_is_waiting(cx: &mut TestAppContext) {
         files
     };
     t.keys("space a");
-    assert_eq!(waiting(&mut t), [("doc.txt".into(), crate::editor::story::Waiting::Here)], "asking about this file");
+    assert_eq!(waiting(&mut t), [("doc.txt".into(), ghostwrite_view::story::Waiting::Here)], "asking about this file");
     t.input("add a verbose flag").keys("enter");
-    assert_eq!(waiting(&mut t), [("src/lib.rs".into(), crate::editor::story::Waiting::Here)]);
+    assert_eq!(waiting(&mut t), [("src/lib.rs".into(), ghostwrite_view::story::Waiting::Here)]);
     t.keys("tab");
-    assert_eq!(waiting(&mut t), [("doc.txt".into(), crate::editor::story::Waiting::Here)], "on to the next item");
+    assert_eq!(waiting(&mut t), [("doc.txt".into(), ghostwrite_view::story::Waiting::Here)], "on to the next item");
 }
 
 #[gpui::test]
@@ -749,7 +749,7 @@ fn reading_outside_the_project_waits_for_tab_or_enter(cx: &mut TestAppContext) {
     t.ask("implement it");
     let ask = |t: &mut Setup| {
         let (tx, rx) = std::sync::mpsc::channel();
-        t.editor.update(t.cx, |e, _| e.story.as_mut().unwrap().asking_to_read = Some(("/etc/hosts".into(), tx)));
+        t.editor.update(t.cx, |e, _| e.story.as_mut().unwrap().may_read("/etc/hosts".into(), tx));
         rx
     };
     let answered = ask(&mut t);

@@ -7,5 +7,5 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 scripts/build-plugins.sh
 cargo test --workspace
-# With Typst's native crate built in instead of its plugin.
-cargo test -p ghostwrite --no-default-features --features typst,lean,wasm-plugins
+# Without local models, as it can be built without a C++ compiler.
+cargo check -p ghostwrite --no-default-features --features lean,wasm-plugins

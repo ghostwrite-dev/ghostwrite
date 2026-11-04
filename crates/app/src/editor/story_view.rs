@@ -9,10 +9,11 @@
 use ghostwrite_ai::placement;
 use ghostwrite_ai::protocol::{self, FileOp, Note};
 use ghostwrite_ai::{Item, Story, lines};
+use ghostwrite_view::story::Located;
 use gpui::{AnyElement, Entity, Hsla, div, prelude::*, px};
 
 use super::element::{Block, BlockSizes, Decoration};
-use super::story::{Located, StoryState};
+use super::story::Live;
 use super::tree::Annex;
 use super::{Project, Tab};
 use crate::theme::{Theme, pt};
@@ -45,7 +46,7 @@ struct BlockSpec {
     prompt: Option<(Entity<TextField>, &'static str)>,
 }
 
-impl StoryState {
+impl Live {
     /// What shows under a proposal in the tree, if the story is at one.
     pub(super) fn annex(&self, project: &Project, asking: bool) -> Option<Annex> {
         let story = self.story.as_ref()?;
@@ -63,11 +64,6 @@ impl StoryState {
             _ => return None,
         };
         Some(Annex { note, keys, asking })
-    }
-
-    /// Whether Claude is working and nothing is shown yet, so the dots animate.
-    pub(super) fn thinking(&self) -> bool {
-        self.story.as_ref().is_some_and(|s| s.error.is_none() && s.current().is_none())
     }
 
     /// The command the story is at, not yet run, for the terminal to show.

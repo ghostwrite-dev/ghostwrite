@@ -12,11 +12,14 @@
 //!
 //! [`Document::view_of`]: super::document::Document::view_of
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ghostwrite_core::{Key, Mode, Range};
-use ghostwrite_page::{OnlyPages, Pages, Renderer};
+use ghostwrite_page::{OnlyPages, Pages};
 use gpui::{AppContext as _, Context, Pixels, Point, px};
+
+pub use ghostwrite_view::rendered::Rendered;
+use ghostwrite_view::rendered::tab_of_only_pages;
 
 use super::Editor;
 use super::document::{DocId, Document};
@@ -24,78 +27,6 @@ use super::tabs::Autoscroll;
 
 /// How far a key scrolls pages.
 const LINE: f32 = 40.;
-
-/// A document's pages, and what makes them.
-#[derive(Default)]
-pub struct Rendered {
-    /// The pages, once there are any.
-    pub pages: Option<Arc<dyn Pages>>,
-    /// Why the text as it is now can't be made into pages.
-    pub error: Option<String>,
-    renderer: Option<Arc<Mutex<Box<dyn Renderer>>>>,
-    /// The buffer version made into pages last, or being made.
-    pub(super) made: Option<u64>,
-    making: bool,
-}
-
-impl Rendered {
-    /// Whether pages are being made right now.
-    #[cfg(test)]
-    pub(super) fn is_making(&self) -> bool {
-        self.making
-    }
-
-    fn made_by(renderer: Result<Box<dyn Renderer>, String>) -> Self {
-        match renderer {
-            Ok(renderer) => Self { renderer: Some(Arc::new(Mutex::new(renderer))), ..Self::default() },
-            Err(error) => Self { error: Some(error), ..Self::default() },
-        }
-    }
-}
-
-/// A file that's only pages has them: its text is its lines for them, as it's now made.
-fn tab_of_only_pages(tab: &mut super::tabs::Tab, done: Result<Arc<dyn Pages>, String>, cx: &mut Context<Editor>) {
-    let Some(rendered) = tab.doc.rendered.as_mut() else { return };
-    rendered.making = false;
-    match done {
-        Ok(pages) => {
-            let text = pages.text().unwrap_or_default().to_string();
-            (rendered.pages, rendered.error) = (Some(pages), None);
-            if tab.doc.buffer.text() != text {
-                tab.reload(text);
-            }
-            let version = tab.doc.buffer.version();
-            if let Some(rendered) = tab.doc.rendered.as_mut() {
-                rendered.made = Some(version);
-            }
-        }
-        Err(why) => rendered.error = Some(why),
-    }
-    cx.notify();
-}
-
-/// Where a document's pages are scrolled to, and how far they're zoomed: their own,
-/// whatever the editor's zoom.
-pub struct PagesScroll {
-    pub top: Pixels,
-    pub left: Pixels,
-    /// Times as wide as fits the view.
-    pub zoom: f32,
-    /// A byte of the text to bring into view next time they're drawn, and
-    /// whether to even if it's in view (`space j`).
-    pub reveal: Option<(usize, bool)>,
-    /// The line they were last brought to.
-    pub(super) line: Option<usize>,
-}
-
-impl Default for PagesScroll {
-    fn default() -> Self {
-        Self { top: px(0.), left: px(0.), zoom: 1., reveal: None, line: None }
-    }
-}
-
-/// The steps ⌘= and ⌘- zoom pages through.
-const PAGE_ZOOMS: [f32; 15] = [0.1, 0.15, 0.25, 0.33, 0.5, 0.67, 0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0];
 
 impl Editor {
     /// Keep the pages of the document `id` up to date: make them again when its
@@ -135,7 +66,8 @@ impl Editor {
                 }
                 let Some(tab) = this.project.tabs.by_id_mut(id) else { return };
                 if only_pages {
-                    return tab_of_only_pages(tab, done, cx);
+                    tab_of_only_pages(tab, done);
+                    return cx.notify();
                 }
                 let cursor = tab.cursor();
                 let line = tab.doc.buffer.line_of(cursor);
@@ -214,7 +146,7 @@ impl Editor {
         let shown = doc.map_or_else(|| self.shown_pages(), |doc| self.pages_of(doc));
         if let Some(file) = shown.and_then(|id| self.project.tabs.by_id_mut(id)) {
             let scroll = &mut file.view.pages;
-            (scroll.top, scroll.left) = ((scroll.top - delta.y).max(px(0.)), (scroll.left - delta.x).max(px(0.)));
+            (scroll.top, scroll.left) = ((scroll.top - f32::from(delta.y)).max(0.), (scroll.left - f32::from(delta.x)).max(0.));
             cx.notify();
         }
     }
@@ -228,8 +160,9 @@ impl Editor {
         let zoom = (scroll.zoom * by).clamp(*crate::ui::pages::ZOOMS.start(), *crate::ui::pages::ZOOMS.end());
         let ratio = zoom / scroll.zoom;
         scroll.zoom = zoom;
-        scroll.top = ((scroll.top + around.y) * ratio - around.y).max(px(0.));
-        scroll.left = ((scroll.left + around.x) * ratio - around.x).max(px(0.));
+        let around = (f32::from(around.x), f32::from(around.y));
+        scroll.top = ((scroll.top + around.1) * ratio - around.1).max(0.);
+        scroll.left = ((scroll.left + around.0) * ratio - around.0).max(0.);
         cx.notify();
     }
 
@@ -240,16 +173,7 @@ impl Editor {
             return false;
         }
         let Some(file) = self.shown_pages().and_then(|id| self.project.tabs.by_id_mut(id)) else { return false };
-        let scroll = &mut file.view.pages;
-        let now = PAGE_ZOOMS.iter().position(|&z| z >= scroll.zoom - 0.001).unwrap_or(PAGE_ZOOMS.len() - 1);
-        let zoom = match by {
-            0 => 1.,
-            // Between steps, in goes to the next one up and out to the one below.
-            _ if by < 0 && PAGE_ZOOMS[now] > scroll.zoom + 0.001 => PAGE_ZOOMS[now.saturating_sub(1)],
-            _ => PAGE_ZOOMS[now.saturating_add_signed(by as isize).min(PAGE_ZOOMS.len() - 1)],
-        };
-        let ratio = zoom / scroll.zoom;
-        (scroll.zoom, scroll.top, scroll.left) = (zoom, scroll.top * ratio, if by == 0 { px(0.) } else { scroll.left * ratio });
+        file.view.pages.zoom_step(by);
         cx.notify();
         true
     }

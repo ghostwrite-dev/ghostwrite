@@ -20,8 +20,10 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
 
+mod links;
 mod screen;
 
+pub use links::{LinkTo, link_in, located, path_at};
 pub use screen::{Cell, Color, Cursor, CursorShape, Screen};
 
 /// The grid's size, as the emulator takes it.

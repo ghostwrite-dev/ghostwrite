@@ -10,10 +10,8 @@ use ghostwrite_core::modal::Target;
 use ghostwrite_lsp::Diagnostic;
 use std::time::Instant;
 
-use gpui::{Pixels, Point, px};
-
-use super::document::{DocId, Document};
-use super::rendered::PagesScroll;
+use crate::document::{DocId, Document};
+use crate::rendered::PagesScroll;
 
 /// Where the view should move to show the cursor (or some lines), next time it's drawn.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,8 +30,8 @@ pub struct View {
     /// More cursors, besides the main one that's `selection`.
     pub others: Vec<Range>,
     /// Where it's scrolled to. What's drawn may still be on its way there: see [`Motion`].
-    pub scroll_top: Pixels,
-    pub scroll_left: Pixels,
+    pub scroll_top: f32,
+    pub scroll_left: f32,
     pub autoscroll: Option<Autoscroll>,
     /// Where its pages are scrolled to.
     pub pages: PagesScroll,
@@ -46,13 +44,20 @@ impl Default for View {
         Self {
             selection: Range::point(0),
             others: vec![],
-            scroll_top: px(0.),
-            scroll_left: px(0.),
+            scroll_top: 0.,
+            scroll_left: 0.,
             autoscroll: None,
             pages: PagesScroll::default(),
             motion: Motion::default(),
         }
     }
+}
+
+/// A place on screen, in points: the app's are gpui's.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
 }
 
 /// What glides rather than jumps, so the eye can follow: the view scrolled by
@@ -61,13 +66,13 @@ impl Default for View {
 #[derive(Debug, Clone, Default)]
 pub struct Motion {
     /// Where the text is drawn scrolled to.
-    pub drawn_top: Pixels,
+    pub drawn_top: f32,
     /// Scrolling from a place to another, since when.
-    pub scroll: Option<(Pixels, Pixels, Instant)>,
+    pub scroll: Option<(f32, f32, Instant)>,
     /// Where the cursor was drawn, in the text (scrolling doesn't move it).
-    pub cursor: Option<Point<Pixels>>,
+    pub cursor: Option<Point>,
     /// The cursor on its way from a place to another, since when.
-    pub cursor_glide: Option<(Point<Pixels>, Point<Pixels>, Instant)>,
+    pub cursor_glide: Option<(Point, Point, Instant)>,
     /// Text just changed, lit up and fading, since when.
     pub flash: Option<(std::ops::Range<usize>, Instant)>,
 }

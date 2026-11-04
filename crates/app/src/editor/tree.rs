@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use ghostwrite_core::Mode;
 use ghostwrite_core::modal::TreeCommand;
 use ghostwrite_project::fs;
+use ghostwrite_view::story::Waiting;
 use gpui::{
     AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, PromptLevel, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*,
     uniform_list,
 };
 
-use super::story::Waiting;
 use super::{Editor, PromptKind};
 use crate::theme::{pt, theme};
 use crate::ui::pane::{Edge, Resizable};
