@@ -1,11 +1,14 @@
-//! More than one cursor, as in helix: `C` adds one on the line below (`alt-C`
-//! above), `s` makes one of each match of a regex in the selection, and `,`
-//! goes back to one. A key is carried out at each of them, the last in the text
-//! first, so that an edit only moves those already done, and all of it is one
-//! undo. What a key does once (`:`, `u`, a jump to another file) stays with the
-//! main cursor, which is the one the view follows.
+//! More than one cursor, as in helix: `C` copies each selection to the line
+//! below (`alt-C` above), `s` makes one of each match of a regex in the
+//! selection, and `,` goes back to one (`alt-,`: all but the main one). `(`
+//! and `)` make another the main one, `alt-minus` and `alt-_` merge them, and
+//! `&` lines them up. A key is carried out at each of them, the last in the
+//! text first, so that an edit only moves those already done, and all of it is
+//! one undo; selections a key makes besides (`3o`, `alt-s`) join them. What a
+//! key does once (`:`, `u`, a jump to another file) stays with the main
+//! cursor, which is the one the view follows.
 
-use ghostwrite_core::{Key, Mode, Outcome, Range, Registers};
+use ghostwrite_core::{Key, Mode, Outcome, Range, Registers, movement};
 use gpui::Context;
 use regex::Regex;
 
@@ -48,6 +51,7 @@ pub(super) fn key_at_each(modal: &mut ghostwrite_core::Modal, key: Key, register
         if at_rest && matches!(key, Key::Char('u' | 'U')) {
             tab.view.others.clear();
         }
+        tab.view.others.extend(modal.take_added());
         return outcome;
     }
     let main = tab.view.selection;
@@ -74,6 +78,7 @@ pub(super) fn key_at_each(modal: &mut ghostwrite_core::Modal, key: Key, register
             *later = moved(*later, by);
         }
         done.push((tab.view.selection, is_main));
+        done.extend(modal.take_added().into_iter().map(|added| (added, false)));
     }
     let kept = apart(done);
     let main = kept.iter().find(|(_, is_main)| *is_main).map_or(main, |(selection, _)| *selection);
@@ -85,6 +90,27 @@ pub(super) fn key_at_each(modal: &mut ghostwrite_core::Modal, key: Key, register
         tab.doc.buffer.release(main);
     }
     Outcome::Handled
+}
+
+/// Every selection of `tab` in text order, and which is the main one.
+fn in_order(tab: &Tab) -> (Vec<Range>, usize) {
+    let mut all: Vec<Range> = tab.view.others.iter().copied().chain([tab.view.selection]).collect();
+    all.sort_by_key(|selection| (selection.from(), selection.to()));
+    let main = all.iter().position(|selection| *selection == tab.view.selection).unwrap_or(0);
+    (all, main)
+}
+
+/// `selections` as the tab's, with the one at `main` the main one.
+fn set_all(tab: &mut Tab, mut selections: Vec<Range>, main: usize) {
+    tab.view.selection = selections.remove(main.min(selections.len() - 1));
+    tab.view.others = selections;
+}
+
+/// Two selections as one, from the first's start to the last's end (facing
+/// back only if both did), as helix's `Range::merge`.
+fn merged(a: Range, b: Range) -> Range {
+    let (from, to) = (a.from().min(b.from()), a.to().max(b.to()));
+    if a.head < a.anchor && b.head < b.anchor { Range::new(to, from) } else { Range::new(from, to) }
 }
 
 impl Editor {
@@ -114,31 +140,47 @@ impl Editor {
         if !matches!(self.modal.mode, Mode::Normal | Mode::Select) || !self.modal.pending_keys().is_empty() {
             return false;
         }
+        let several = self.tab().is_some_and(|tab| !tab.view.others.is_empty());
         match key {
-            Key::Char('C') => self.add_cursor(true),
-            Key::Alt('C' | 'c') => self.add_cursor(false),
+            Key::Char('C') | Key::Alt('C') => {
+                let count = self.modal.take_count().unwrap_or(1);
+                self.copy_selections(key == Key::Char('C'), count);
+            }
             Key::Char(',') => self.one_cursor(),
+            Key::Alt(',') => self.drop_main(),
+            Key::Char(c @ ('(' | ')')) => {
+                let count = self.modal.take_count().unwrap_or(1);
+                self.rotate(c == ')', count);
+            }
+            Key::Alt('-') => self.merge(false),
+            Key::Alt('_') => self.merge(true),
+            Key::Char('&') => self.align(),
             Key::Char('s') if self.tab().is_some_and(|tab| !tab.doc.read_only()) => self.open_prompt(super::PromptKind::SelectIn, "", window, cx),
-            Key::Escape if self.tab().is_some_and(|tab| !tab.view.others.is_empty()) => self.one_cursor(),
+            // Esc in select mode ends it, keeping the cursors, as in helix; in normal mode it's back to one.
+            Key::Escape if several && self.modal.mode == Mode::Select => self.modal.mode = Mode::Normal,
+            Key::Escape if several => self.one_cursor(),
             _ => return false,
         }
         cx.notify();
         true
     }
 
-    /// One more cursor at the same column of the line past the furthest one.
-    fn add_cursor(&mut self, below: bool) {
+    /// `C`, `alt-C`: each selection copied to the line below (or above),
+    /// `count` times, as helix's `copy_selection_on_line`; the main one's
+    /// last copy is the main one.
+    fn copy_selections(&mut self, below: bool, count: usize) {
         let Some(tab) = self.project.tabs.active_mut() else { return };
-        let all = || tab.view.others.iter().chain([&tab.view.selection]).map(|selection| selection.head);
-        let Some(from) = (if below { all().max() } else { all().min() }) else { return };
-        let buffer = &tab.doc.buffer;
-        let line = buffer.line_of(from);
-        let column = from - buffer.line_start(line);
-        let Some(next) = (if below { Some(line + 1).filter(|next| *next <= buffer.last_line()) } else { line.checked_sub(1) }) else { return };
-        let length = buffer.line_end(next) - buffer.line_start(next);
-        let text = buffer.text();
-        let at = text.floor_char_boundary(buffer.line_start(next) + column.min(length));
-        tab.view.others.push(Range::point(at));
+        let (buffer, width) = (&tab.doc.buffer, tab.doc.indent.width);
+        let mut all = vec![];
+        for (selection, is_main) in tab.view.others.iter().map(|other| (*other, false)).chain([(tab.view.selection, true)]) {
+            let copies = movement::copy_to_lines(buffer, selection, below, count, width);
+            let last = copies.len();
+            all.push((selection, is_main && last == 0));
+            all.extend(copies.into_iter().enumerate().map(|(i, copy)| (copy, is_main && i + 1 == last)));
+        }
+        let kept = apart(all);
+        let main = kept.iter().position(|(_, is_main)| *is_main).unwrap_or(0);
+        set_all(tab, kept.into_iter().map(|(selection, _)| selection).collect(), main);
     }
 
     /// `,`: only the main cursor.
@@ -146,6 +188,111 @@ impl Editor {
         if let Some(tab) = self.project.tabs.active_mut() {
             tab.view.others.clear();
         }
+    }
+
+    /// `alt-,`: all but the main cursor; the next one is the main one.
+    fn drop_main(&mut self) {
+        let Some(tab) = self.project.tabs.active_mut() else { return };
+        if tab.view.others.is_empty() {
+            return self.project.say("no other selection to keep");
+        }
+        let (mut all, main) = in_order(tab);
+        all.remove(main);
+        set_all(tab, all, main);
+    }
+
+    /// `)`, `(`: the main one is the `count`th selection on (or back), round the ends.
+    fn rotate(&mut self, forward: bool, count: usize) {
+        let Some(tab) = self.project.tabs.active_mut() else { return };
+        let (all, main) = in_order(tab);
+        let n = all.len();
+        let next = if forward { (main + count) % n } else { (main + n - count % n) % n };
+        set_all(tab, all, next);
+    }
+
+    /// `alt-minus`: every selection merged into one; `alt-_` (`touching`): only those that touch.
+    fn merge(&mut self, touching: bool) {
+        let Some(tab) = self.project.tabs.active_mut() else { return };
+        let text = tab.doc.text();
+        let (all, main) = in_order(tab);
+        let all: Vec<Range> = all.iter().map(|selection| selection.min_width_1(text)).collect();
+        if !touching {
+            let one = all.iter().copied().reduce(merged).expect("there's always the main one");
+            return set_all(tab, vec![one], 0);
+        }
+        let mut kept: Vec<(Range, bool)> = vec![];
+        for (i, selection) in all.into_iter().enumerate() {
+            match kept.last_mut() {
+                Some((last, last_main)) if last.to() == selection.from() => {
+                    *last = merged(*last, selection);
+                    *last_main |= i == main;
+                }
+                _ => kept.push((selection, i == main)),
+            }
+        }
+        let main = kept.iter().position(|(_, is_main)| *is_main).unwrap_or(0);
+        set_all(tab, kept.into_iter().map(|(selection, _)| selection).collect(), main);
+    }
+
+    /// `&`: the selections lined up in columns, as helix's `align_selections`:
+    /// the first selection on each line is in the first column, and so on,
+    /// and spaces go before each so that its column starts at the same place.
+    fn align(&mut self) {
+        let Some(tab) = self.project.tabs.active_mut().filter(|tab| !tab.doc.read_only()) else { return };
+        let (all, main) = in_order(tab);
+        let (buffer, tab_width) = (&tab.doc.buffer, tab.doc.indent.width);
+        let text = buffer.text();
+        // Where each one's head is: its line, and its column on screen.
+        let mut places = vec![];
+        for selection in all.iter().map(|selection| selection.min_width_1(text)) {
+            let line = buffer.line_of(selection.head);
+            if line != buffer.line_of(selection.anchor) {
+                return self.project.say("selections over more than one line can't be lined up");
+            }
+            places.push((line, ghostwrite_core::display_width(&text[buffer.line_start(line)..selection.head], tab_width)));
+        }
+        // Which column each is in, and how wide each column is (the most any
+        // in it is from the one before on its line).
+        let (mut nths, mut widths) = (vec![], vec![]);
+        let (mut line, mut nth, mut before) = (usize::MAX, 0, 0);
+        for &(on, column) in &places {
+            if on != line {
+                (line, nth, before) = (on, 0, 0);
+            }
+            let width = column.saturating_sub(before);
+            match widths.get_mut(nth) {
+                Some(most) => *most = width.max(*most),
+                None => widths.push(width),
+            }
+            nths.push(nth);
+            (nth, before) = (nth + 1, column);
+        }
+        let stops: Vec<usize> = widths
+            .iter()
+            .scan(0, |sum, width| {
+                *sum += width;
+                Some(*sum)
+            })
+            .collect();
+        // The spaces each needs, given those put in before it on its line, from the first on.
+        tab.doc.buffer.begin(tab.view.selection);
+        let (mut line, mut added, mut shift) = (usize::MAX, 0, 0);
+        let mut aligned = vec![];
+        for ((&(on, column), &nth), selection) in places.iter().zip(&nths).zip(&all) {
+            if on != line {
+                (line, added) = (on, 0);
+            }
+            let spaces = stops[nth].saturating_sub(column + added);
+            let at = selection.from() + shift;
+            tab.doc.buffer.edit(at..at, &" ".repeat(spaces));
+            (added, shift) = (added + spaces, shift + spaces);
+            aligned.push(moved(*selection, shift as isize));
+        }
+        set_all(tab, aligned, main);
+        tab.doc.buffer.commit(tab.view.selection);
+        tab.view.autoscroll = Some(Autoscroll::Fit);
+        tab.sync();
+        self.modal.mode = Mode::Normal;
     }
 
     /// `s`: a cursor on each match of `typed` in the selection, or in the whole file if there isn't one.

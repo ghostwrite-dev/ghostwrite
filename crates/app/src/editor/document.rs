@@ -50,6 +50,9 @@ pub struct Document {
     /// The file as it was when last read or written: if the disk's
     /// differs, another program changed it, and saving would lose that.
     disk: Option<Stamp>,
+    /// Its text then (line endings made `\n`): what unsaved changes and another
+    /// program's are both changes from, to merge them.
+    pub read: Arc<str>,
     /// Another program changed the file while this had unsaved changes.
     pub conflict: bool,
     /// The file has `\r\n` line endings: the buffer has `\n`, and they're put back on save.
@@ -69,6 +72,8 @@ pub struct Document {
     /// A tab that shows another document (its pages): which, and it's called this.
     /// It has no text of its own, and it goes when that document does.
     pub view_of: Option<(DocId, String)>,
+    /// It's what's on the terminal, to read through.
+    pub output: bool,
     /// The buffer version the language server (and `dirty`) last saw.
     synced: u64,
     /// The colors shown, for a version of the text.
@@ -86,6 +91,7 @@ impl Document {
         let buffer = Buffer::new(text);
         Self {
             disk: path.as_deref().and_then(Stamp::of),
+            read: Arc::from(buffer.text()),
             conflict: false,
             crlf,
             encoding: Default::default(),
@@ -103,6 +109,7 @@ impl Document {
             lsp,
             diagnostics: vec![],
             view_of: None,
+            output: false,
             highlights: (u64::MAX, vec![]),
             grammar: (u64::MAX, Arc::from(""), vec![]),
             highlighting: false,
@@ -137,7 +144,7 @@ impl Document {
 
     /// Whether it can't be edited: its text is what its pages say, or it has none.
     pub fn read_only(&self) -> bool {
-        self.pages_are_the_text() || self.view_of.is_some()
+        self.pages_are_the_text() || self.view_of.is_some() || self.output
     }
 
     pub fn name(&self) -> SharedString {
@@ -168,6 +175,11 @@ impl Document {
     /// After the buffer changed: mark it dirty and tell the language server.
     pub fn sync(&mut self) {
         if self.buffer.version() == self.synced {
+            return;
+        }
+        // The terminal's text: what reads it keeps it as the terminal has it.
+        if self.output {
+            self.synced = self.buffer.version();
             return;
         }
         // Every edit comes through here; those of what can't change are undone.
@@ -316,6 +328,46 @@ impl Document {
         self.dirty = false;
         self.conflict = false;
         self.disk = self.path.as_deref().and_then(Stamp::of);
+        self.read = Arc::from(self.buffer.text());
+    }
+
+    /// Another program changed the file to `text` while this had unsaved
+    /// changes: theirs go in with them if they're to other lines (as one undo
+    /// step, the selection moving with the text). Whether they did.
+    pub fn merge_from_disk(&mut self, text: &str, selection: Range) -> Option<Range> {
+        let (theirs, _) = normalize(text.to_string());
+        let merged = ghostwrite_project::merge::merge(&self.read, self.buffer.text(), &theirs)?;
+        // Each of their changes on its own, last first: what's between (the cursor) stays put.
+        let edits = ghostwrite_project::merge::edits(self.buffer.text(), &merged);
+        // Where a byte is once they're in: after a change (or at lines put in above it), moved
+        // by it; inside one, as far into what replaced it as there is.
+        let map = |at: usize| {
+            let mut moved = at;
+            for (range, with) in &edits {
+                if range.end <= at {
+                    moved = moved + with.len() - range.len();
+                } else if range.start < at {
+                    moved = moved - (at - range.start) + (at - range.start).min(with.len());
+                }
+            }
+            moved
+        };
+        let after = Range::new(map(selection.anchor), map(selection.head));
+        if !edits.is_empty() {
+            self.buffer.begin(selection);
+            for (range, with) in edits.iter().rev() {
+                self.buffer.edit(range.clone(), with);
+            }
+            self.buffer.commit(after);
+        }
+        let selection = after;
+        self.sync();
+        // Still unsaved (it has what's on disk and more), but saving won't lose theirs.
+        self.disk = self.path.as_deref().and_then(Stamp::of);
+        self.read = Arc::from(theirs.as_str());
+        self.conflict = false;
+        self.dirty = merged != theirs;
+        Some(selection)
     }
 
     pub fn set_diagnostics(&mut self, diagnostics: Vec<ghostwrite_lsp::RawDiagnostic>) {

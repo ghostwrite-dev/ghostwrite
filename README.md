@@ -7,7 +7,10 @@ comes as small whole-line steps you accept with Tab, one at a time, like
 autocomplete, and commands to run in your terminal (a build, the tests); one
 you don't want, you redirect. Nothing changes until you accept it, and
 anything you say mid-review (a question, a correction) is a follow-up that
-can revise what comes next.
+can revise what comes next. While a story is up you can look around freely (move,
+open files with `space f` or `space b`, switch tabs, scroll): a step that comes
+meanwhile waits in the corner rather than pulling you away, and the first Tab
+brings you back to it; the next one accepts.
 
 ## Install
 
@@ -66,18 +69,24 @@ that isn't there.
 
 The keys are helix's, as helix has them; `space ?` shows them all. Ghostwrite's
 own are under `space`, and ⌘ is for the app: tabs, windows, files. As in
-helix, brackets and quotes close themselves while you type.
+helix, brackets and quotes close themselves while you type (and `$` in Typst), and the
+bracket matching the one at the cursor is marked.
 
 | Keys | What it does |
 | --- | --- |
 | `space a` | ask about the line or selection; Tab accepts, Enter (or `space a`) says what you want instead, Esc stops |
 | `space e`, `⌘B` | the file tree (`a` `r` `d`: add, rename, trash); Claude's file operations are proposed there |
-| `space t`, `⌘J` | terminal mode: your shell, under the code, has the keys; Esc Esc goes back, `⌘J` hides it |
-| `/`, `?`, `n`, `N`, `*` | search the file (as you type, every match marked), go to the next and previous match, search for the selection |
+| `space t`, `⌘J` | terminal mode: your shell, under the code, has the keys; Esc Esc reads it instead (below), `⌘J` hides it |
+| `/`, `?`, `n`, `N`, `*` | search the file (as you type, every match marked); the next and previous match, whichever way the search went (`3n`: three on; in select mode, as another selection); `*` makes the selection the search, as a whole word (`alt-*`: anywhere), and `n` finds it |
 | `space f`, `space b` | pick a file of the project, or an open one, by typing a few of its letters |
 | `.`, `Q`/`q`, `"a` | repeat the last change; record and play a macro; use a named register (`"+` is the clipboard) |
-| `J`, `ctrl-a`/`ctrl-x`, `ctrl-c` | join lines; a number up or down; comment lines out and back in |
-| `ctrl-o`, `ctrl-i` | back to where a jump (`gd`, `G`, a search, another file) came from, and forward again |
+| `J`, `alt-J`, `ctrl-a`/`ctrl-x`, `ctrl-c` | join lines, a comment's leader taken off the lines joined (`alt-J` selects the spaces put in); a number up or down; comment lines out and back in |
+| `ctrl-o`, `ctrl-i` | back to where a jump (`gd`, `10G`, `ge`, a search, another file) came from, and forward again (`3ctrl-o`: three back) |
+| `i` `a`, `o` `O`, `c` | as in helix: the selection stays while you type, and after `a` takes in what's typed; `3o` opens three lines with a cursor each, indented, a line comment going on; `c` on whole lines types on a line of their own; `alt-c`, `alt-d` don't yank |
+| `f` `t` `F` `T`, `alt-.` | find a char, over lines too (Enter: a line's end, Tab: a tab); `alt-.` finds again (`mi`, `]p` too) |
+| `]p` `[p`, `] space` `[ space`, `g.` | the next and previous paragraph; blank lines below and above; where the last change was |
+| `alt-o` `alt-i`, `alt-n` `alt-p`, `alt-a` `alt-I`, `alt-e` `alt-b` | by the syntax tree, as in helix: out to the node around the selection and back in; the next and previous node beside it; a cursor on each node beside it, or inside it; to the end or start of the node it's in |
+| `maf` `mif`, `]f` `[f` | a function, all of it or inside; the next and previous one. Likewise `t` a type, `a` an argument, `c` a comment, `T` a test, `e` an entry, from helix's queries (in `crates/core/queries`) |
 | `space /`, `:grep` | search the project and go through the matches |
 | `space k`, `space d` | docs for what's under the cursor; go through the file's diagnostics, one note at a time |
 | `gr`, `space r`, `space .`, `space s` | the language server: go through the references, rename everywhere, its code actions here, pick one of the file's symbols |
@@ -87,17 +96,35 @@ helix, brackets and quotes close themselves while you type.
 | click | moves the cursor there; shift-click, or a click after `v`, selects to it; a double click is the word |
 | `⌘N` `⌘W`, `⌘⇧[` `⌘⇧]` | new and close tab, previous and next tab |
 | `gN` `gP` (`4gN`: four places), drag a tab, `⌘⌥→` `⌘⌥←`, `:tab-right` `:tab-left` | move a tab along the tab bar |
-| `⌘O`, `⌘⇧O`, `⌘⇧N` | open a file, a folder; a new window (each project is open in one window) |
+| `⌘O`, `⌘⇧O`, `⌘⇧N` | open a file, a folder; a new window (each project is open in one window); File › Open Recent has the projects opened lately |
+| `:clear` | start over: the story up ends, and Claude forgets its notes on the project and your recent requests, so the next story begins with nothing remembered |
+| `:timings` | how long the model has kept you waiting lately: until the first of its reply, and until there was something to look at |
 | `⌘=`, `⌘-`, `⌘0` | zoom the window in, out, and back to 100% |
 
 Claude reads the terminal: what's on it (and some scrollback) goes with
 each request, and again in a follow-up when it's changed. It types into it
 only what you accept: a command it proposes (to build, test, install) waits in
 the terminal as a step does in a file, grey at the prompt with its note above and
-its keys below, and Tab runs it and takes you there, with ✦ showing what's next. It can
-ask for a new tab of the terminal to run it in, or to press Ctrl-C, which Tab does just the same. Tab again once it's done comes back and goes on, with the model
-shown what it printed. A command runs as you'd type it, for all of its output:
+its keys below, and Tab sets it going and goes straight on to the next step (or, if
+it was the last, ends the story): nothing waits for it to finish. It can
+ask for a new tab of the terminal to run it in, or to press Ctrl-C, which Tab does just the same. A command runs as you'd type it, for all of its output:
 what a model adds to read less of it (`| tail`, `| grep`, `2>&1`, `; echo $?`) is taken off.
+
+Esc Esc in the terminal doesn't leave it: the keys read it instead, in normal
+mode, as a file that can't be edited. Its scrollback and screen are the text: the
+motions, select mode, `x`, `/` and `n`, `y` all work as in a file, and the selection
+shows on the terminal. What's printed meanwhile comes in under it, the selection staying
+on its text. Enter (or `gf`, which works in files too) opens the file a line names, at
+its line and column (`src/main.rs:12:5`), and `space a` asks about what's selected. `i`,
+`a` or `o` go back to typing on the shell's line, and Esc goes back to the code. An Esc
+on its own still reaches the shell, a moment later; two in a row never do. A story's
+command is reviewed the same way, in AI mode: look through what's on the terminal with
+the motions, and Tab runs it; if that was the last thing to do, the keys stay on the
+terminal in normal mode, to read what it prints.
+
+Hold ⌘ over a web address or a file the terminal printed (`src/main.rs:12:5`) and it's
+underlined: ⌘-click opens the address in your browser, or the file in the editor at that
+line.
 
 The terminal has tabs too, a shell in each. In terminal mode the Mac's tab keys
 are about them: `⌘T` another, `⌘W` closes it, `⌘⇧[` and `⌘⇧]` go through them,
@@ -111,6 +138,11 @@ Typst's cache, downloaded the first time. The cursor and the selection show
 on the pages too, on the glyphs they're on, and clicking a glyph puts the
 cursor on the text it came from, ready for when you go back to the file; a double click goes back to it. Moving around leaves the pages be; an edit
 that takes you to another line, or `space j`, brings them to the cursor.
+
+Pages zoom on their own, whatever the editor's zoom: `⌘`-scroll over them (around the pointer), or
+`⌘=` `⌘-` `⌘0` while their tab is in front, from a tenth of the view's width to four times it. Wider
+than the view, they scroll across too. Zoomed in, only the tiles on screen are drawn, as sharp as
+the screen, over the whole page drawn smaller, which shows until they're done.
 
 Colors come from the grammar, and from the language server over them where
 it has its own (semantic tokens): it knows what each name is, a local, a
@@ -136,12 +168,14 @@ the PDF itself, if it can see them (Claude can; local models are told they can't
 about it goes in the file it's made from. It's drawn again when the file changes, a rebuild say.
 
 An image opens the same way (`plugins/image`): PNG, JPEG, GIF (its first frame), WebP, BMP, TIFF or
-ICO, the way up the file says, and never shown bigger than it is. It's read-only, and it's drawn again
+ICO, the way up the file says, and shown no bigger than it is until you zoom in. It's read-only, and it's drawn again
 when the file changes. A model reads one with its usual `read`, the same as a PDF: what's too big, or in a format it doesn't
 take, is made into something it can be shown first.
 
-The tree and open files follow changes other programs make. A file you have
-unsaved changes in keeps them, and the status line says it changed on disk.
+The tree and open files follow changes other programs make, as they're made. In a
+file with unsaved changes, theirs come in alongside yours when they're to other
+lines; where both changed the same lines, yours are kept, the status line says it
+changed on disk, and saving won't write over theirs until `:w!`.
 
 ## Settings
 
@@ -203,8 +237,20 @@ cargo test -p ghostwrite-ai -- --ignored     # live checks against Claude Code
 
 ## Where to look
 
-When a story moves on to another file, the file tree or the terminal, that panel lights up for a
-moment, so your eye goes to it. `"animations": false` in the config turns that off.
+When a story moves on to a step, on other lines, in another file, the file tree or the terminal, a
+light stretches from where it was to where it is now, leading edge first, and settles there, so your eye
+follows it. While the model is thinking it isn't on any line: ✦ and what it's doing show in the
+top right of the code, under what you asked. The step's lines light up for a moment once it's
+accepted, and when the keys move the view more than a couple of lines it glides there, the cursor
+sliding after (the wheel and the trackpad scroll as they always have). `"animations": false` in
+the config turns all of this off.
+
+So that it's ready by the time you press Enter, Claude Code is started as you open the prompt
+(and, during a review, started on the conversation so far).
+
+The model reads the project as it likes, and nothing else unless you let it: when it would read a
+file or folder elsewhere (a config file, another project), the top right asks, `⇥` lets it (that
+file, or everything in that folder, for the rest of the story) and `⏎` doesn't.
 
 ## Debugging
 
@@ -287,7 +333,10 @@ For highlighting, add a grammar and a query. A grammar is what `tree-sitter buil
 ```
 
 A plugin can color files itself instead (`"highlights": true`), and make a file's pages for a tab
-of their own (`"pages": true`), as Typst's does. Asking for more is under `"access"`, in
+of their own (`"pages": true`), as Typst's does. Pages are drawn by one call, `draw`, for any
+region of a page at any scale: the whole page is the region as big as it, and zoomed in the
+editor asks for the tiles on screen. `ghostwrite_page::check_regions` tests that a plugin's pieces
+meet as its whole pages do. Asking for more is under `"access"`, in
 `crates/plugin/src/manifest.rs`. A file type that isn't text says `"only_pages": true`, as PDFs do. Panels still take a crate built into the editor, as Lean's does.
 
 ## Two panes
@@ -300,9 +349,12 @@ cursor in the file without taking the keys away.
 
 ## More than one cursor
 
-`C` adds a cursor on the line below and `alt-C` above, `s` asks for a regex and puts one on
-each match in the selection (or in the file), and `,` or Esc goes back to one. Keys and
-typing happen at all of them, as one undo.
+`C` copies each selection to the next line below it's as long as (`alt-C` above; `3C` three
+times), `s` asks for a regex and puts one on each match in the selection (or in the file),
+`alt-s` puts one on each line, and `,` (or Esc in normal mode) goes back to one; `alt-,` drops
+the main one. `(` and `)` make the one before or after the main one, `alt-minus` merges them
+all (`alt-_`: those that touch), and `&` lines them up in columns. Keys and typing happen at
+all of them, as one undo.
 
 ## Your own keys and theme
 

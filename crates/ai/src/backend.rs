@@ -65,6 +65,13 @@ pub trait Listener {
     fn session(&mut self, _id: String) {}
     /// What a turn used: tokens in and out.
     fn used(&mut self, _input: u64, _output: u64) {}
+    /// The model's process is up: one started ahead of time (`true`), or just now.
+    fn started(&mut self, _ahead: bool) {}
+    /// The model would read `path`, outside the project: whether the user lets it
+    /// (and what's under it, if it's a folder). Blocks until they've said.
+    fn may_read(&mut self, _path: &std::path::Path) -> bool {
+        false
+    }
 }
 
 /// Tokens read for a request: its own, and what came from or went into the cache.
@@ -118,11 +125,17 @@ impl Backend {
         (on_path || local_claude().is_some()).then(|| Backend::ClaudeCode { model: model.to_string() })
     }
 
-    /// Get ready to be asked soon: the user has started typing a request, and
-    /// a local model takes seconds to load.
-    pub fn warm(&self) {
-        if let Backend::Local { model, .. } = self {
-            local::warm(model);
+    /// Get ready to be asked soon, in `root`, resuming `session` if it's a
+    /// follow-up: the user has started typing a request. A local model takes
+    /// seconds to load; Claude Code a few tenths of a second to start.
+    pub fn warm(&self, root: Option<&std::path::Path>, session: Option<&str>) {
+        match self {
+            Backend::Local { model, .. } => local::warm(model),
+            Backend::ClaudeCode { model } => {
+                let startup = Startup::new(model, root, session, false);
+                std::thread::spawn(move || start_ahead(startup));
+            }
+            Backend::Api { .. } | Backend::Scripted(_) => {}
         }
     }
 
@@ -220,6 +233,8 @@ fn converse(replier: &mut dyn Replier, req: &Request, listener: &mut dyn Listene
     let mut next: Option<(String, String, Vec<Attachment>)> = None;
     let sees = replier.sees_files();
     let mut shown = 0;
+    // What the user let it read outside the project.
+    let mut allowed: Vec<PathBuf> = vec![];
     for round in 0..MAX_TOOL_ROUNDS {
         let mut reply = ToolFilter::new(listener, req.root.is_some());
         replier.reply(next.as_ref().map(|(block, result, files)| Turn { block, result, files }), &mut reply, cancel)?;
@@ -232,8 +247,18 @@ fn converse(replier: &mut dyn Replier, req: &Request, listener: &mut dyn Listene
         let commands = tools::commands(&block);
         listener.looking(commands.iter().map(|c| tools::describe(c)).collect::<Vec<_>>().join(", "));
         let fresh: Vec<&str> = commands.iter().copied().filter(|c| seen.insert(c.to_string())).collect();
+        // Outside the project, the user's asked first, one at a time.
+        for path in fresh.iter().filter_map(|command| tools::outside(root, command)) {
+            if !allowed.iter().any(|ok| path.starts_with(ok)) && listener.may_read(&path) {
+                allowed.push(path);
+            }
+            if cancel.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+        }
+        let allowed = &allowed;
         let looked_at: Vec<tools::Looked> = std::thread::scope(|scope| {
-            let running: Vec<_> = fresh.iter().map(|command| scope.spawn(move || tools::look(root, command, room, sees))).collect();
+            let running: Vec<_> = fresh.iter().map(|command| scope.spawn(move || tools::look(root, command, room, sees, allowed))).collect();
             running.into_iter().map(|r| r.join().unwrap_or(tools::Looked { text: String::new(), file: None })).collect()
         });
         let mut files = vec![];
@@ -529,27 +554,101 @@ impl Replier for Chat {
     }
 }
 
-/// Claude Code in the project folder, its own tools off. It stays up through
-/// the rounds of a reply, so looking around doesn't start it again each time.
-fn run_claude_code(model: &str, req: &Request, resume: Option<&str>, listener: &mut dyn Listener, cancel: &AtomicBool) -> Result<(), String> {
-    let mut command = ghostwrite_project::platform::command(local_claude().unwrap_or_else(|| PathBuf::from("claude")));
-    command
-        .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages", "--verbose"])
-        .args(["--setting-sources", "", "--strict-mcp-config", "--tools", ""])
-        .args(["--model", model, "--effort", &effort(), "--system-prompt", protocol::system()])
-        .current_dir(req.root.clone().unwrap_or_else(std::env::temp_dir));
-    if let Some(session) = resume {
-        command.args(["--resume", session]);
-        if req.fork {
-            command.arg("--fork-session");
+/// How a Claude Code is started: two started alike are interchangeable.
+#[derive(Clone, Debug, PartialEq)]
+struct Startup {
+    model: String,
+    effort: String,
+    root: PathBuf,
+    resume: Option<String>,
+    fork: bool,
+}
+
+impl Startup {
+    fn new(model: &str, root: Option<&std::path::Path>, resume: Option<&str>, fork: bool) -> Self {
+        let root = root.map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
+        Self { model: model.to_string(), effort: effort(), root, resume: resume.map(str::to_string), fork: fork && resume.is_some() }
+    }
+
+    fn spawn(&self) -> Result<Child, String> {
+        let mut command = ghostwrite_project::platform::command(local_claude().unwrap_or_else(|| PathBuf::from("claude")));
+        command
+            .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages", "--verbose"])
+            .args(["--setting-sources", "", "--strict-mcp-config", "--tools", ""])
+            .args(["--model", &self.model, "--effort", &self.effort, "--system-prompt", protocol::system()])
+            .current_dir(&self.root);
+        if let Some(session) = &self.resume {
+            command.args(["--resume", session]);
+            if self.fork {
+                command.arg("--fork-session");
+            }
+        }
+        // In a process group of its own, so stopping it stops what it started too.
+        #[cfg(unix)]
+        command.process_group(0);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run `claude`: {e}"))
+    }
+}
+
+/// Claude Codes started before they're asked, waiting on their stdin for the
+/// first message: by then what it takes to start (a few tenths of a second)
+/// is out of the way. The user has opened the prompt, so a request is likely.
+static STARTED: Mutex<Vec<(Startup, Child, std::time::Instant)>> = Mutex::new(Vec::new());
+/// The most kept waiting, and for how long: they're cheap, but not free.
+const STARTED_KEPT: usize = 2;
+const STARTED_FOR: Duration = Duration::from_secs(10 * 60);
+
+/// Start a Claude Code like `startup` to be taken by the next request like it.
+fn start_ahead(startup: Startup) {
+    let mut started = STARTED.lock().unwrap_or_else(|e| e.into_inner());
+    // Those gone, or waiting too long, go.
+    for (waiting, mut child, at) in std::mem::take(&mut *started) {
+        if at.elapsed() < STARTED_FOR && child_running(&mut child) {
+            started.push((waiting, child, at));
+        } else {
+            stop(&Mutex::new(child));
         }
     }
+    if started.iter().any(|(waiting, ..)| *waiting == startup) {
+        return;
+    }
+    if let Ok(child) = startup.spawn() {
+        started.push((startup, child, std::time::Instant::now()));
+    }
+    while started.len() > STARTED_KEPT {
+        let (_, child, _) = started.remove(0);
+        stop(&Mutex::new(child));
+    }
+}
+
+/// A Claude Code started like `startup` and still waiting, if there is one.
+fn take_started(startup: &Startup) -> Option<Child> {
+    let mut started = STARTED.lock().unwrap_or_else(|e| e.into_inner());
+    let ix = started.iter_mut().position(|(waiting, child, at)| waiting == startup && at.elapsed() < STARTED_FOR && child_running(child))?;
+    Some(started.remove(ix).1)
+}
+
+fn child_running(child: &mut Child) -> bool {
+    matches!(child.try_wait(), Ok(None))
+}
+
+/// Claude Code in the project folder, its own tools off. It stays up through
+/// the rounds of a reply, so looking around doesn't start it again each time.
+/// One started ahead ([`Backend::warm`]) is taken if it's like this one.
+fn run_claude_code(model: &str, req: &Request, resume: Option<&str>, listener: &mut dyn Listener, cancel: &AtomicBool) -> Result<(), String> {
+    let startup = Startup::new(model, req.root.as_deref(), resume, req.fork);
     // Resuming, the session has the conversation so far: only the newest turn is new.
     let message = if resume.is_some() { req.latest() } else { req.prompt() };
-    // In a process group of its own, so stopping it stops what it started too.
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run `claude`: {e}"))?;
+    let mut child = match take_started(&startup) {
+        Some(child) => {
+            listener.started(true);
+            child
+        }
+        None => {
+            listener.started(false);
+            startup.spawn()?
+        }
+    };
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take();
@@ -738,14 +837,14 @@ mod tests {
     fn a_model_that_cant_see_is_told_and_nothing_is_sent() {
         let (root, _) = with_files();
         for file in ["figure.png", "paper.pdf"] {
-            let looked = tools::look(&root, &format!("read {file}"), 1000, false);
+            let looked = tools::look(&root, &format!("read {file}"), 1000, false, &[]);
             assert!(looked.file.is_none() && looked.text.contains("this model can only read text"), "{}", looked.text);
         }
-        let reading = tools::look(&root, "read util.py", 1000, false);
+        let reading = tools::look(&root, "read util.py", 1000, false, &[]);
         assert!(reading.file.is_none() && reading.text.contains("def load"));
-        assert!(tools::look(&root, "head figure.png", 1000, true).file.is_some(), "however it's read");
-        assert!(tools::look(&root, "read figure.png:3", 1000, true).file.is_some());
-        assert!(tools::look(&root, "read ../../outside.png", 1000, true).file.is_none(), "only what's in the project");
+        assert!(tools::look(&root, "head figure.png", 1000, true, &[]).file.is_some(), "however it's read");
+        assert!(tools::look(&root, "read figure.png:3", 1000, true, &[]).file.is_some());
+        assert!(tools::look(&root, "read ../../outside.png", 1000, true, &[]).file.is_none(), "only what's in the project");
     }
 
     #[test]
@@ -885,6 +984,34 @@ mod tests {
         let (block, result) = &model.next[0];
         assert_eq!(block, "<tool>\nread util.py\n</tool>");
         assert!(result.contains("<result of=\"read util.py\">\n1│def load(): pass\n</result>"), "{result}");
+    }
+
+    #[test]
+    fn reading_outside_the_project_is_asked_about_first() {
+        /// Says yes or no, and notes what it was asked.
+        struct Asks(bool, Vec<std::path::PathBuf>);
+        impl Listener for Asks {
+            fn text(&mut self, _: &str) {}
+            fn looking(&mut self, _: String) {}
+            fn may_read(&mut self, path: &std::path::Path) -> bool {
+                self.1.push(path.to_path_buf());
+                self.0
+            }
+        }
+        let root = util_project("tools-asks");
+        let elsewhere = ghostwrite_project::scratch_dir("tools-asks-elsewhere");
+        std::fs::write(elsewhere.join("notes.txt"), "remember this\n").unwrap();
+        let file = ghostwrite_project::platform::real(&elsewhere.join("notes.txt")).unwrap();
+        let block: &'static str = Box::leak(format!("<tool>\nread {}\nread util.py\n</tool>\n", file.display()).into_boxed_str());
+        for yes in [true, false] {
+            let mut model = Canned { replies: vec![block, DONE], ..Default::default() };
+            let mut asks = Asks(yes, vec![]);
+            converse(&mut model, &asked_in(&root), &mut asks, &AtomicBool::new(false)).unwrap();
+            assert_eq!(asks.1, std::slice::from_ref(&file), "asked once, about that file (not the project's)");
+            let result = &model.next[0].1;
+            assert_eq!(result.contains("remember this"), yes, "{result}");
+            assert!(result.contains("def load"), "the project's file is read either way");
+        }
     }
 
     #[test]

@@ -1,0 +1,38 @@
+; Text objects for go: what `maf`, `]f` and the like select. From helix
+; (https://github.com/helix-editor/helix, runtime/queries), under the Mozilla
+; Public License 2.0, with the files it inherits from put in this one.
+
+(function_declaration
+  body: (block)? @function.inside) @function.around
+
+(func_literal
+  body: (block)? @function.inside) @function.around
+
+(method_declaration
+  body: (block)? @function.inside) @function.around
+
+;; struct and interface declaration as class textobject?
+(type_declaration
+  (type_spec (type_identifier) (struct_type (field_declaration_list (_)?) @class.inside))) @class.around
+
+(type_declaration
+  (type_spec (type_identifier) (interface_type (method_elem)+ @class.inside))) @class.around
+
+(type_parameter_list
+  ((_) @parameter.inside . ","? @parameter.around) @parameter.around)
+
+(parameter_list
+  ((_) @parameter.inside . ","? @parameter.around) @parameter.around)
+
+(argument_list
+  ((_) @parameter.inside . ","? @parameter.around) @parameter.around)
+
+(comment) @comment.inside
+
+(comment)+ @comment.around
+
+; Go test/benchmark/example/fuzz functions (all live in _test.go).
+((function_declaration
+   name: (identifier) @_name
+   body: (block)? @test.inside) @test.around
+ (#match? @_name "^(Test|Benchmark|Example|Fuzz)"))

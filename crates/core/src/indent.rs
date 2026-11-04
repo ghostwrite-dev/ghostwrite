@@ -47,6 +47,16 @@ impl IndentUnit {
     }
 }
 
+/// The indent for a line opened after `before` (a line, or the part of
+/// one before the cursor): its indent, and a level more if it ends with
+/// something in `opens` (an open bracket, Python's `:`). Helix asks the
+/// syntax tree; this is the heuristic insert mode's Enter has always used.
+pub fn for_newline(before: &str, opens: &[char], unit: &IndentUnit) -> String {
+    let indent = &before[..before.len() - before.trim_start_matches([' ', '\t']).len()];
+    let deeper = before.trim_end_matches([' ', '\t']).ends_with(opens);
+    if deeper { format!("{indent}{}", unit.as_str()) } else { indent.to_string() }
+}
+
 /// `line` with `count` levels of indent taken off.
 pub fn unindent(line: &str, count: usize, width: usize) -> &str {
     let mut rest = line;
@@ -83,5 +93,12 @@ mod tests {
         assert_eq!(unindent("        x", 1, 4), "    x");
         assert_eq!(unindent("\t\tx", 2, 4), "x");
         assert_eq!(unindent("  x", 1, 4), "x");
+    }
+
+    #[test]
+    fn a_new_line_goes_in_after_an_opener() {
+        let unit = IndentUnit::default();
+        assert_eq!(for_newline("  call(x)", &['('], &unit), "  ");
+        assert_eq!(for_newline("  call(  ", &['('], &unit), "      ");
     }
 }

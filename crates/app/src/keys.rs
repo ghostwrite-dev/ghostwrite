@@ -26,16 +26,22 @@ pub fn key_of(ks: &Keystroke) -> Option<Key> {
     if m.control {
         return single(&ks.key).map(Key::Ctrl);
     }
-    // Option-Backspace deletes the word before, as ctrl-w does.
+    // Option-Backspace deletes the word before, as ctrl-w does; Option-Delete the one after, as alt-d.
     if m.alt && ks.key == "backspace" {
         return Some(Key::Ctrl('w'));
+    }
+    if m.alt && ks.key == "delete" {
+        return Some(Key::Alt('d'));
     }
     if m.alt {
         // On many layouts Option types ASCII (`[ ] { } | \\ @ $ ~` on Nordic
         // and German Macs): that's what was typed. Elsewhere it's Option
-        // with the key (`alt-;`), where it'd type `…`.
+        // with the key (`alt-;`), where it'd type `…`; with shift, a
+        // letter's a capital (`alt-C`).
         let typed = ks.key_char.as_deref().and_then(single).filter(|c| c.is_ascii_graphic() && Some(*c) != single(&ks.key));
-        return typed.map(Key::Char).or_else(|| single(&ks.key).map(Key::Alt));
+        let key = if ks.key == "minus" { Some('-') } else { single(&ks.key) };
+        let key = key.map(|c| if m.shift { shifted(c) } else { c });
+        return typed.map(Key::Char).or_else(|| key.map(Key::Alt));
     }
     let named = match ks.key.as_str() {
         "escape" => Some(Key::Escape),
@@ -61,6 +67,16 @@ pub fn key_of(ks: &Keystroke) -> Option<Key> {
     // What was typed; else a one-character key name (some sources send no `key_char`).
     let typed = ks.key_char.as_deref().map_or_else(|| single(&ks.key).map(|c| if m.shift { c.to_ascii_uppercase() } else { c }), single);
     typed.filter(|c| !c.is_control()).map(Key::Char)
+}
+
+/// What shift makes of a key with Option, where Option typed something
+/// else: a capital, and on a US layout `_` and `*` (`alt-_`, `alt-*`).
+fn shifted(c: char) -> char {
+    match c {
+        '-' => '_',
+        '8' => '*',
+        c => c.to_ascii_uppercase(),
+    }
 }
 
 /// The keys for the app, written as on a Mac, for this system. Elsewhere there's no ⌘, and
@@ -107,6 +123,9 @@ mod tests {
         assert_eq!(k("shift-g"), Some(Key::Char('G')));
         assert_eq!(k("ctrl-d"), Some(Key::Ctrl('d')));
         assert_eq!(k("alt-;"), Some(Key::Alt(';')));
+        assert_eq!(k("alt-C"), Some(Key::Alt('C')), "shift makes it a capital");
+        assert_eq!(k("alt-minus"), Some(Key::Alt('-')));
+        assert_eq!(k("alt-delete"), Some(Key::Alt('d')));
         let typing = |key: &str, typed: &str| key_of(&Keystroke { key_char: Some(typed.into()), ..Keystroke::parse(key).unwrap() });
         assert_eq!(typing("alt-8", "["), Some(Key::Char('[')), "Option-8 on a Swedish Mac is [");
         assert_eq!(typing("alt-shift-8", "{"), Some(Key::Char('{')));

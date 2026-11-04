@@ -1,8 +1,8 @@
 //! `space a`: ask Claude about the lines at the cursor (or the selection),
 //! then review its reply one item at a time where it applies, across the
 //! project's files, and the terminal: a command Claude proposes runs there
-//! when it's accepted, and once it's done (Tab again) Claude sees what it
-//! printed. Tab accepts (or reads on); there's no skipping: Enter
+//! when it's accepted, and the story goes on without waiting for it. Tab
+//! accepts (or reads on); there's no skipping: Enter
 //! says what you want instead, and the next item follows it. Esc stops. A
 //! file to create is shown in the file tree. An item that can't be found or
 //! applied goes back to the model to rewrite before it's shown, and so does
@@ -29,6 +29,7 @@ use std::path::PathBuf;
 
 use ghostwrite_ai::placement::Placer;
 use ghostwrite_ai::protocol::Note;
+use ghostwrite_ai::timing::{Timer, Wait};
 use ghostwrite_ai::{Item, ItemId, Story};
 use ghostwrite_core::{Mode, Range, Review};
 use gpui::{Context, Window};
@@ -49,16 +50,31 @@ pub(super) struct StoryState {
     docs_note: bool,
     /// The item last brought into view.
     shown: Option<ItemId>,
+    /// The user has looked elsewhere since the story last put them somewhere: a step
+    /// that comes now waits for them, and Tab brings them to it before it accepts.
+    pub(super) wandered: bool,
+    /// The story moved the user since this was last taken: that's not looking elsewhere.
+    pub(super) moved_them: bool,
     /// The tabs the story opened to show an item, closed as it moves on from them.
     opened: Vec<DocId>,
     /// Asked from select mode: the selection to give back afterwards.
     selection: Option<Range>,
+    /// Asked from the terminal: what was selected on it, which the question is about.
+    pub(super) quoted: Option<String>,
     placer: Placer,
     conversation: Conversation,
     /// What it has used of the model so far.
     used: request::Used,
     /// The documents its accepted steps changed, one entry a step, in order.
     applied: std::cell::RefCell<Vec<DocId>>,
+    /// The wait for the model being timed, until there's something to look at.
+    pub(super) timer: Option<Timer>,
+    /// What the user last said (asked, or said during the review): shown while waiting.
+    pub(super) said: Option<String>,
+    /// What the user has let the model read outside the project.
+    readable: request::Readable,
+    /// The model would read this, outside the project: Tab lets it, Enter doesn't.
+    pub(super) asking_to_read: Option<(PathBuf, std::sync::mpsc::Sender<bool>)>,
 }
 
 impl StoryState {
@@ -69,12 +85,19 @@ impl StoryState {
             lines,
             docs_note: false,
             shown: None,
+            wandered: false,
+            moved_them: false,
             opened: vec![],
             used: Default::default(),
             applied: Default::default(),
             selection: None,
+            quoted: None,
             placer: Placer::new(root),
             conversation: Conversation::default(),
+            timer: None,
+            said: None,
+            readable: Default::default(),
+            asking_to_read: None,
         }
     }
 
@@ -96,12 +119,12 @@ impl Editor {
             self.project.say("to ask, give it a Claude API key (`:api-key ‹key›`), install Claude Code (`claude`), or choose a local model (`:model`)");
             return;
         }
+        // Nothing open: ask from an empty tab, which stays while the story's up.
         if self.tab().is_none() {
-            self.project.say("open a file to ask about");
-            return;
+            self.new_buffer(cx);
         }
         if let Some(backend) = &self.backend {
-            backend.warm();
+            backend.warm(Some(&self.project.root), None);
         }
         // One story at a time: whatever was up ends first.
         if self.story.is_some() {
@@ -123,7 +146,7 @@ impl Editor {
         tab.view.selection = Range::new(span.start, end.max(span.start));
         let mut state = StoryState::new(tab.doc.id, lines, root);
         state.selection = kept;
-        self.story = Some(state);
+        self.begin_story(state);
         self.open_prompt(PromptKind::Ask, typed, window, cx);
     }
 
@@ -152,7 +175,7 @@ impl Editor {
         }
         self.leave_insert();
         self.modal.enter(Mode::Ai);
-        self.story = Some(state);
+        self.begin_story(state);
         self.settle_story(cx);
     }
 
@@ -170,8 +193,19 @@ impl Editor {
         self.modal.enter(Mode::Ai);
         state.docs_note = true;
         state.story = Some(Story::answered("Explain what's under the cursor; its documentation was shown.", text));
-        self.story = Some(state);
+        self.begin_story(state);
         self.settle_story(cx);
+    }
+
+    /// The story's up, and the tab it was asked from stays: its items are found from it.
+    fn begin_story(&mut self, state: StoryState) {
+        self.project.tabs.hold(Some(state.doc));
+        self.story = Some(state);
+    }
+
+    /// Whether the tab the story was asked from has been closed, which leaves nowhere to find its items.
+    fn story_lost_its_tab(&self) -> bool {
+        self.story.as_ref().is_some_and(|state| self.project.tabs.by_id(state.doc).is_none())
     }
 
     /// Enter in the prompt: the first ask, or (while reviewing) something
@@ -181,13 +215,22 @@ impl Editor {
             return;
         }
         let Some(state) = self.story.as_mut() else { return };
+        state.said = Some(said.trim().to_string());
         match state.story.as_mut() {
             Some(story) => {
                 state.conversation.stop_reply();
                 story.follow_up(said);
                 state.shown = None;
+                // A new wait.
+                state.timer = None;
             }
-            None => state.story = Some(Story::new(said)),
+            None => {
+                let said = match state.quoted.take() {
+                    Some(quoted) => format!("About this, in the terminal:\n```\n{quoted}\n```\n{said}"),
+                    None => said,
+                };
+                state.story = Some(Story::new(said));
+            }
         }
         self.close_prompt(window, cx);
         self.send_request(cx);
@@ -204,7 +247,29 @@ impl Editor {
 
     /// A review key for the story, which only goes forward.
     pub(super) fn story_review(&mut self, key: Review, window: &mut Window, cx: &mut Context<Self>) {
+        // Where it takes the user isn't somewhere they went themselves.
+        if let Some(state) = self.story.as_mut() {
+            state.moved_them = true;
+        }
+        // The model would read outside the project: Tab lets it, Enter doesn't.
+        if let Some((path, answer)) = self.story.as_mut().and_then(|state| state.asking_to_read.take()) {
+            match key {
+                Review::Next | Review::Ask => {
+                    let yes = key == Review::Next;
+                    answer.send(yes).ok();
+                    self.project.say(format!("{} {}", if yes { "let it read" } else { "didn't let it read" }, ghostwrite_ai::tools::shown(&path)));
+                    return cx.notify();
+                }
+                // Esc: still asking (Esc again ends the story, and with it the question).
+                _ => {
+                    if let Some(state) = self.story.as_mut() {
+                        state.asking_to_read = Some((path, answer));
+                    }
+                }
+            }
+        }
         match key {
+            Review::Next if self.story.as_ref().is_some_and(|state| state.wandered) => self.back_to_the_step(cx),
             Review::Next => self.accept(cx),
             Review::Ask => self.open_prompt(PromptKind::Ask, "", window, cx),
             Review::Stop => self.finish_story(cx),
@@ -212,13 +277,33 @@ impl Editor {
         }
     }
 
+    /// The user has looked elsewhere, while a story's up: what it shows next waits for them.
+    pub(super) fn wander(&mut self) {
+        if let Some(state) = self.story.as_mut() {
+            state.wandered = true;
+        }
+    }
+
+    /// Tab, having looked elsewhere: back to the step (or where it'll come), and the light
+    /// goes there from where the cursor was. The next Tab accepts it.
+    fn back_to_the_step(&mut self, cx: &mut Context<Self>) {
+        let cursor = self.measured.cursor;
+        let Some(state) = self.story.as_mut() else { return };
+        state.wandered = false;
+        state.shown = None;
+        if let Some(rect) = cursor {
+            self.came_back_from(rect);
+        }
+        self.settle_story(cx);
+    }
+
     fn accept(&mut self, cx: &mut Context<Self>) {
-        if self.command_running() {
-            self.back_to_the_command();
+        if self.story_lost_its_tab() {
+            return self.finish_story(cx);
         }
         let Some(command) = self.story.as_ref().map(StoryState::command_to_run) else { return };
-        if let Some(run) = command
-            && let Err(e) = self.run_in_terminal(&run, cx)
+        if let Some(run) = &command
+            && let Err(e) = self.run_in_terminal(run, cx)
         {
             return self.project.say(e);
         }
@@ -227,21 +312,23 @@ impl Editor {
             self.project.say(e);
             return;
         }
+        // Timed until the next step shows (if the story ends instead, it's dropped).
+        if state.story.as_ref().is_some_and(Story::involves_model) {
+            state.timer = Some(Timer::start(Wait::NextStep));
+        }
+        // A command is set going, and the story goes on without waiting for it.
         self.settle_story(cx);
-        // It's running: the keys go where it runs, and the next Tab comes from there.
-        if self.command_running() {
-            self.enter_terminal(cx);
-            self.look_at(Panel::Terminal, false, cx);
+        // It was the last thing to do: the keys stay on the terminal, in normal mode, to
+        // read what it prints.
+        if command.is_some() && self.story.is_none() {
+            self.modal.enter(Mode::Normal);
+            self.start_reading(false, cx);
         }
     }
 
-    /// Whether the story is waiting on a command it ran in the terminal.
-    pub(super) fn command_running(&self) -> bool {
-        self.story.as_ref().and_then(|state| state.story.as_ref()).is_some_and(|story| story.current().is_some_and(|id| story.running(id)))
-    }
-
-    /// Tab in the terminal, with the story waiting on its command: it's done, on to the next step.
-    pub(super) fn command_done(&mut self, cx: &mut Context<Self>) {
+    /// Tab in the terminal, at the story's command: it runs, and the story goes on
+    /// from where the next step is.
+    pub(super) fn run_from_the_terminal(&mut self, cx: &mut Context<Self>) {
         self.modal.leave(ghostwrite_core::Mode::Terminal);
         self.accept(cx);
     }
@@ -259,27 +346,44 @@ impl Editor {
     }
 
     /// Bring the story's current item into view (or finish).
-    fn settle_story(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn settle_story(&mut self, cx: &mut Context<Self>) {
+        if self.story_lost_its_tab() {
+            return self.finish_story(cx);
+        }
         // By the document: a tab closing can put another in the same place.
         let was_at = self.tab().map(|tab| tab.doc.id);
         let Some(state) = self.story.as_mut() else { return };
         let show = state.settle(&mut self.project);
-        // A command to run: the terminal it runs in shows.
-        if self.story.as_ref().and_then(|s| s.story.as_ref()?.current_item()).is_some_and(|item| matches!(item, Item::Run(_))) {
+        // A command to run: the terminal it runs in shows (unless the user's looking elsewhere).
+        if show != Show::Ready && self.story.as_ref().and_then(|s| s.story.as_ref()?.current_item()).is_some_and(|item| matches!(item, Item::Run(_))) {
             self.show_terminal_for_command(cx);
         }
-        let in_terminal = self.command_proposed() || self.command_running();
+        let in_terminal = self.command_proposed();
+        // Something to look at: the wait for it is over.
+        if matches!(show, Show::Tab(_) | Show::Tree | Show::Finished)
+            && let Some(timer) = self.story.as_mut().and_then(|state| state.timer.take())
+            && !matches!(show, Show::Finished)
+        {
+            timer.shown(&self.backend.as_ref().map(|b| b.id()).unwrap_or_default());
+        }
         match show {
-            Show::Nothing => {}
+            Show::Nothing | Show::Ready => {}
             Show::Revise => self.send_request(cx),
             Show::Tab(ix) => {
                 if ix != self.project.tabs.active_index() {
                     self.activate(ix, cx);
                 }
+                // The story put them there: that's not looking elsewhere.
+                if let Some(state) = self.story.as_mut() {
+                    state.wandered = false;
+                }
                 let another_file = self.tab().map(|tab| tab.doc.id) != was_at;
+                // A command: the keys read the terminal it's in, in AI mode, to look through it.
                 if in_terminal {
+                    self.start_reading(true, cx);
                     self.look_at(Panel::Terminal, false, cx);
                 } else {
+                    self.stop_reading();
                     self.look_at(Panel::Code, another_file, cx);
                 }
             }
@@ -346,7 +450,18 @@ impl Editor {
         Ok(())
     }
 
-    /// Whether a story with Claude in it is up (being asked, or under review).
+    /// `:clear`: start over. The story up ends (what it applied stays), and what
+    /// the model kept of the stories before (its notes, the recent requests) is
+    /// forgotten: the next one is told nothing of them.
+    pub(super) fn clear_context(&mut self, cx: &mut Context<Self>) {
+        if self.story.is_some() {
+            self.finish_story(cx);
+        }
+        let logged = ghostwrite_ai::memory::forget(&self.project.root);
+        self.project.say(format!("starting over: Claude's notes and {logged} earlier request{} are forgotten", if logged == 1 { "" } else { "s" }));
+        cx.notify();
+    }
+
     /// Ask `chosen` from now on (`:model`), and give back what the last one held.
     pub(in crate::editor) fn choose_model(&mut self, chosen: Backend) -> Result<(), String> {
         if self.reviewing_claude() {
@@ -357,11 +472,12 @@ impl Editor {
         }
         self.project.status = Some(format!("asking {} from now on", chosen.name()).into());
         ghostwrite_ai::models::remember(&chosen);
-        chosen.warm();
+        chosen.warm(Some(&self.project.root), None);
         self.backend = Some(std::sync::Arc::new(chosen));
         Ok(())
     }
 
+    /// Whether a story with Claude in it is up (being asked, or under review).
     fn reviewing_claude(&self) -> bool {
         self.story.as_ref().is_some_and(|state| state.story.as_ref().is_none_or(|story| story.involves_model()))
     }
@@ -376,6 +492,9 @@ impl Editor {
 
     fn close_story(&mut self, cx: &mut Context<Self>) {
         self.attention.on = Panel::Code;
+        self.story_left_the_terminal();
+        self.forget_where_the_story_was();
+        self.project.tabs.hold(None);
         if let Some(state) = self.story.take() {
             state.conversation.stop();
             self.remember_story(&state.applied.borrow());

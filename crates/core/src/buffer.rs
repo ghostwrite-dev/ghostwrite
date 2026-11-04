@@ -213,6 +213,14 @@ impl Buffer {
         self.open.as_ref().is_some_and(|tx| !tx.changes.is_empty())
     }
 
+    /// Where the latest change still in the text ended (`g.`): the last one
+    /// typed so far, or else the last of the step `u` would undo next.
+    pub fn last_edit(&self) -> Option<usize> {
+        let open = self.open.as_ref().filter(|tx| !tx.changes.is_empty());
+        let change = open.or(self.undo.last())?.changes.last()?;
+        Some((change.at + change.inserted.len()).min(self.len()))
+    }
+
     /// Undo the last transaction; returns the selection from before it.
     pub fn undo(&mut self) -> Option<Range> {
         if let Some(open) = &self.open {
@@ -419,6 +427,17 @@ mod tests {
         assert_eq!(b.text(), "Xbc!");
         assert_eq!(b.undo(), Some(Range::point(0)));
         assert_eq!(b.undo(), None);
+    }
+
+    #[test]
+    fn the_last_edit_is_where_the_last_change_ended() {
+        let mut b = Buffer::new("abc");
+        assert_eq!(b.last_edit(), None);
+        b.edit(1..1, "xy");
+        assert_eq!(b.last_edit(), Some(3));
+        b.commit(Range::point(3));
+        b.undo();
+        assert_eq!(b.last_edit(), None, "undone: what's left is from before");
     }
 
     #[test]

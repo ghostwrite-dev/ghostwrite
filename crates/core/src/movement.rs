@@ -167,31 +167,180 @@ pub fn word_move(b: &Buffer, r: Range, count: usize, target: Word) -> Range {
     range
 }
 
-/// `f`/`t`/`F`/`T`: select up to (`till`) or through the `count`th `ch` on the line.
+/// `f`/`t`/`F`/`T`: select up to (`till`) or through the `count`th `ch`
+/// after the cursor (or before it), over lines too, as in helix.
 pub fn find_char(b: &Buffer, r: Range, ch: char, forward: bool, till: bool, count: usize, extend: bool) -> Option<Range> {
     let text = b.text();
     let cursor = r.cursor(text);
-    let (start, end) = (b.line_start_at(cursor), b.line_end_at(cursor));
     let at = if forward {
         let mut from = b.next(cursor);
         if till {
             from = b.next(from);
         }
-        let from = from.min(end);
-        let found = text[from..end].char_indices().filter(|(_, c)| *c == ch).nth(count - 1)?.0 + from;
+        let found = text[from..].char_indices().filter(|(_, c)| *c == ch).nth(count - 1)?.0 + from;
         if till { b.prev(found) } else { found }
     } else {
-        let upto = if till { b.prev(cursor) } else { cursor }.max(start);
-        let found = text[start..upto].char_indices().rev().filter(|(_, c)| *c == ch).nth(count - 1)?.0 + start;
+        let upto = if till { b.prev(cursor) } else { cursor };
+        let found = text[..upto].char_indices().rev().filter(|(_, c)| *c == ch).nth(count - 1)?.0;
         if till { b.next(found) } else { found }
     };
-    Some(if extend {
-        r.put_cursor(text, at, true)
-    } else if forward {
-        Range::new(cursor, b.next(at))
+    Some(found_from(b, r, at, extend))
+}
+
+/// `f`/`t`/`F`/`T` then Enter: to the `count`th line's end on (or back),
+/// as helix's `find_char_line_ending_motion` goes.
+pub fn find_line_end(b: &Buffer, r: Range, forward: bool, till: bool, count: usize, extend: bool) -> Option<Range> {
+    let cursor = r.cursor(b.text());
+    let line = b.line_of(cursor);
+    let at = if forward {
+        let end = b.line_end(line);
+        let on_edge = end == cursor || (till && end == b.next(cursor));
+        let target = line + count - 1 + on_edge as usize;
+        if target >= b.line_count() - 1 {
+            return None;
+        }
+        if till { b.prev(b.line_end(target)) } else { b.line_end(target) }
+    } else if till {
+        let on_edge = b.line_start(line) == cursor;
+        b.line_start((line + 1).checked_sub(count + on_edge as usize).filter(|target| *target > 0)?)
     } else {
-        Range::new(b.next(cursor), at)
-    })
+        b.line_end(line.checked_sub(count)?)
+    };
+    Some(found_from(b, r, at, extend))
+}
+
+/// What a find selects: from the cursor to `at`, or, extending, the selection on to it.
+fn found_from(b: &Buffer, r: Range, at: usize, extend: bool) -> Range {
+    let text = b.text();
+    if extend { r.put_cursor(text, at, true) } else { Range::point(r.cursor(text)).put_cursor(text, at, true) }
+}
+
+/// Whether `line` is empty: nothing but its line break (the line after a
+/// trailing one has none, so isn't).
+pub(crate) fn empty_line(b: &Buffer, line: usize) -> bool {
+    line + 1 < b.line_count() && b.line(line).is_empty()
+}
+
+/// Where `line` starts; the end of the text for the line after the last.
+pub(crate) fn start_of(b: &Buffer, line: usize) -> usize {
+    b.lines_range(line..line).start
+}
+
+/// `[p`: back to the start of the `count`th paragraph, as helix's `move_prev_paragraph`.
+pub fn prev_paragraph(b: &Buffer, r: Range, count: usize, extend: bool) -> Range {
+    let text = b.text();
+    let r = r.min_width_1(text);
+    let cursor = r.cursor(text);
+    let mut line = b.line_of(cursor);
+    let first_char = b.line_start(line) == cursor;
+    let prev_empty_to_line = empty_line(b, line.saturating_sub(1)) && !empty_line(b, line);
+    if prev_empty_to_line && !first_char {
+        line += 1;
+    }
+    let mut last_line = line;
+    for _ in 0..count {
+        while line > 0 && empty_line(b, line - 1) {
+            line -= 1;
+        }
+        while line > 0 && !empty_line(b, line - 1) {
+            line -= 1;
+        }
+        if line == last_line {
+            break;
+        }
+        last_line = line;
+    }
+    let head = start_of(b, line);
+    let anchor = match () {
+        _ if extend => r.put_cursor(text, head, true).anchor,
+        _ if prev_empty_to_line && first_char => cursor,
+        _ => r.head,
+    };
+    Range::new(anchor, head)
+}
+
+/// `]p`: on to the start of the `count`th paragraph, as helix's `move_next_paragraph`.
+pub fn next_paragraph(b: &Buffer, r: Range, count: usize, extend: bool) -> Range {
+    let text = b.text();
+    let r = r.min_width_1(text);
+    let cursor = r.cursor(text);
+    let mut line = b.line_of(cursor);
+    let last_char = b.prev(start_of(b, line + 1)) == cursor;
+    let curr_empty_to_line = empty_line(b, line) && !empty_line(b, (b.line_count() - 1).min(line + 1));
+    if curr_empty_to_line && last_char {
+        line += 1;
+    }
+    let mut last_line = line;
+    for _ in 0..count {
+        while line < b.line_count() && !empty_line(b, line) {
+            line += 1;
+        }
+        while line < b.line_count() && empty_line(b, line) {
+            line += 1;
+        }
+        if line == last_line {
+            break;
+        }
+        last_line = line;
+    }
+    let head = start_of(b, line);
+    let anchor = match () {
+        _ if extend => r.put_cursor(text, head, true).anchor,
+        _ if curr_empty_to_line && last_char => r.head,
+        _ => cursor,
+    };
+    Range::new(anchor, head)
+}
+
+/// The line `at` is on, and its column on screen.
+fn screen_position(b: &Buffer, at: usize, tab_width: usize) -> (usize, usize) {
+    let line = b.line_of(at);
+    (line, crate::display_width(&b.text()[b.line_start(line)..at], tab_width))
+}
+
+/// Where on `line` the screen column `column` starts a character (or is
+/// the line's end); `None` if it's in the middle of one, or past the end.
+fn at_screen_column(b: &Buffer, line: usize, column: usize, tab_width: usize) -> Option<usize> {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    let (start, end) = (b.line_start(line), b.line_end(line));
+    let row = &b.text()[start..end];
+    let starts = row.grapheme_indices(true).map(|(i, _)| i).chain([row.len()]);
+    let mut widths = starts.map(|i| (i, crate::display_width(&row[..i], tab_width)));
+    widths.find(|&(_, width)| width >= column).filter(|&(_, width)| width == column).map(|(i, _)| start + i)
+}
+
+/// `C`, `alt-C`: copies of `r` on the lines below (or above), as helix's
+/// `copy_selection_on_line`: as wide, in the same screen columns, `count`
+/// of them, passing lines too short to hold one.
+pub fn copy_to_lines(b: &Buffer, r: Range, below: bool, count: usize, tab_width: usize) -> Vec<Range> {
+    let text = b.text();
+    let wide = r.min_width_1(text);
+    // The chars the head and anchor are on.
+    let (head, anchor) = if wide.anchor < wide.head { (b.prev(wide.head), wide.anchor) } else { (wide.head, b.prev(wide.anchor)) };
+    let (head_line, head_column) = screen_position(b, head, tab_width);
+    let (anchor_line, anchor_column) = screen_position(b, anchor, tab_width);
+    let height = head_line.abs_diff(anchor_line) + 1;
+    let mut copies = vec![];
+    for i in 1.. {
+        if copies.len() >= count {
+            break;
+        }
+        let (anchor_row, head_row) = match below {
+            true => (anchor_line + i * height, head_line + i * height),
+            false => (anchor_line.saturating_sub(i * height), head_line.saturating_sub(i * height)),
+        };
+        if anchor_row >= b.line_count() || head_row >= b.line_count() {
+            break;
+        }
+        let anchor = at_screen_column(b, anchor_row, anchor_column, tab_width);
+        if let (Some(anchor), Some(head)) = (anchor, at_screen_column(b, head_row, head_column, tab_width)) {
+            copies.push(if r.is_empty() { Range::point(anchor) } else { Range::point(anchor).put_cursor(text, head, true) });
+        }
+        if anchor_row == 0 && head_row == 0 {
+            break;
+        }
+    }
+    copies
 }
 
 /// `x`: select the whole line, or the next one if lines are already selected.
@@ -267,5 +416,36 @@ mod tests {
         assert_eq!(find_char(&b, Range::point(0), '(', true, true, 1, false), Some(Range::new(0, 11)));
         assert_eq!(find_char(&b, Range::point(0), 'z', true, false, 1, false), None);
         assert_eq!(find_char(&b, Range::point(12), 'x', false, false, 1, false), Some(Range::new(13, 4)));
+        let b = Buffer::new("ab\ncd\n");
+        assert_eq!(find_char(&b, Range::point(0), 'd', true, false, 1, false), Some(Range::new(0, 5)), "on the next line too");
+        assert_eq!(find_char(&b, Range::point(4), 'a', false, true, 1, false), Some(Range::new(5, 1)));
+    }
+
+    #[test]
+    fn find_then_enter_goes_to_line_ends() {
+        let b = Buffer::new("ab\ncd\nef\n");
+        assert_eq!(find_line_end(&b, Range::point(0), true, false, 1, false), Some(Range::new(0, 3)), "through this line's end");
+        assert_eq!(find_line_end(&b, Range::point(0), true, true, 1, false), Some(Range::new(0, 2)), "up to it");
+        assert_eq!(find_line_end(&b, Range::point(0), true, false, 2, false), Some(Range::new(0, 6)), "the second line's");
+        assert_eq!(find_line_end(&b, Range::point(4), false, false, 1, false), Some(Range::new(5, 2)), "back to the line before's end");
+        assert_eq!(find_line_end(&b, Range::point(8), true, false, 1, false), None, "on the last line's end: no line after it");
+    }
+
+    #[test]
+    fn paragraphs_forward_and_back() {
+        let b = Buffer::new("a\nb\n\nc\nd\n\ne\n");
+        assert_eq!(next_paragraph(&b, Range::point(0), 1, false), Range::new(0, 5), "the paragraph and the blank after");
+        assert_eq!(next_paragraph(&b, Range::point(0), 2, false), Range::new(0, 10));
+        assert_eq!(prev_paragraph(&b, Range::point(8), 1, false), Range::new(9, 5), "back to where it starts");
+    }
+
+    #[test]
+    fn copies_keep_their_columns_and_pass_short_lines() {
+        let b = Buffer::new("abcd\nx\nabcd\n");
+        assert_eq!(copy_to_lines(&b, Range::new(1, 3), true, 1, 4), vec![Range::new(8, 10)], "x is too short");
+        assert_eq!(copy_to_lines(&b, Range::point(2), true, 5, 4), vec![Range::point(9)], "as many as there's room for");
+        assert_eq!(copy_to_lines(&b, Range::point(9), false, 1, 4), vec![Range::point(2)]);
+        let b = Buffer::new("\tx\n    y\n");
+        assert_eq!(copy_to_lines(&b, Range::point(1), true, 1, 4), vec![Range::point(7)], "columns as shown, a tab four wide");
     }
 }

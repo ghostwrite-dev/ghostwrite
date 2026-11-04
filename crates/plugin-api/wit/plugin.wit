@@ -62,8 +62,21 @@ interface types {
         glyphs: list<glyph>,
     }
 
-    // A page drawn: a row at a time, four bytes a pixel, blue, green, red and
-    // alpha (premultiplied).
+    // What of a page to draw: the page drawn `scale` pixels to a point, and of
+    // that, `width` by `height` pixels from `x`, `y` (its top left is 0, 0). The
+    // whole page is the region from 0, 0 as big as it is at that scale; zoomed in,
+    // the editor asks for the parts on screen.
+    record region {
+        scale: f32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    }
+
+    // A region drawn: exactly as wide and as high as it, a row at a time, four
+    // bytes a pixel, blue, green, red and alpha (premultiplied). What's past the
+    // page's edge is see-through.
     record drawing {
         width: u32,
         height: u32,
@@ -78,7 +91,7 @@ interface host {
 }
 
 world plugin {
-    use types.{context, event, action, span, page, drawing};
+    use types.{context, event, action, span, page, region, drawing};
 
     import host;
 
@@ -93,7 +106,6 @@ world plugin {
     export open-pages: func(path: string, utc-offset-minutes: s32) -> result<_, string>;
     // Pages from the file's text as it is now.
     export make-pages: func(text: string) -> result<list<page>, string>;
-    // Draw the page with this key, of the last pages made or the ones before,
-    // about `pixels` wide.
-    export draw-page: func(key-high: u64, key-low: u64, pixels: u32) -> option<drawing>;
+    // Draw `region` of the page with this key, of the last pages made or the ones before.
+    export draw: func(key-high: u64, key-low: u64, region: region) -> option<drawing>;
 }

@@ -1,31 +1,35 @@
 //! The terminal under the code: the user's own shell. Terminal mode (`space t`,
-//! `:term` or `cmd-j`) gives it the keyboard; Esc Esc goes back to the mode
-//! it was entered from with the pane still showing (not while a full-screen
-//! program like vim has it: Esc is its; a click on the code leaves then),
+//! `:term` or `cmd-j`) gives it the keyboard; Esc Esc goes to reading it with the
+//! editor's keys, in the mode it was entered from (see [`super::reading`]; not
+//! while a full-screen program like vim has it: Esc is its; a click on the code leaves then),
 //! and `cmd-j` hides it. Dragging the mouse selects (a double click a word,
 //! a triple click a line), and `cmd-c` copies it.
 //! Claude is shown what's on it with every request (and, in a follow-up,
 //! again when it's changed); what it types there is only a command the
 //! user accepted ([`Editor::run_in_terminal`]). A command waiting to be accepted
 //! shows here as a step does in a file: its note above the prompt, the command in
-//! grey at the cursor, and the keys under it. It may go in a new tab, or be a Ctrl-C. While a story waits on one that's
-//! running the keyboard is here, ✦ says so, and Tab goes on to the next step
-//! (a full-screen program keeps its Tab). The shell
+//! grey at the cursor, and the keys under it. It may go in a new tab, or be a Ctrl-C.
+//! Tab sets it going and the story goes straight on: nothing waits for it to end. The shell
 //! keeps running while it's hidden; when it exits, its tab closes, and with the
 //! last the pane. Its top edge drags to resize it, and the height is kept for
 //! next time.
 //!
 //! It has tabs of its own, each a shell of its own: in terminal mode, where
 //! only ⌘ keys are the app's, the keys for tabs mean these. The tabs show once
-//! there are two. Claude reads the one in front; a story's command is followed
-//! back to the one it ran in when it's done, wherever you've been since.
+//! there are two. Claude reads the one in front; a story's Ctrl-C goes to the one
+//! its command ran in, wherever you've been since.
 //! [`super::terminal_view`] draws it.
+
+use std::path::{Path, PathBuf};
 
 use futures::StreamExt as _;
 use ghostwrite_ai::protocol::{Run, RunIn};
 use ghostwrite_core::Mode;
-use ghostwrite_terminal::Terminal;
-use gpui::{AnyElement, Context, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ScrollWheelEvent, Task, Window, div, prelude::*};
+use ghostwrite_terminal::{Button, Held, Modes, Press, Terminal};
+use gpui::{
+    AnyElement, Context, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, Task, Window, div,
+    prelude::*,
+};
 
 use super::Editor;
 use super::element::Metrics;
@@ -40,6 +44,8 @@ const MAX_CONTEXT: usize = 8_000;
 const HEIGHT: f32 = 290.;
 const MIN_HEIGHT: f32 = 60.;
 const ROOM_ABOVE: f32 = 120.;
+/// How long an Esc in the terminal waits for a second, which would leave, before it goes to the shell.
+const ESCAPE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 type Point = gpui::Point<Pixels>;
 
@@ -52,14 +58,84 @@ pub(super) struct TerminalPane {
     pub(super) active: usize,
     /// The number of the shell the story's command last ran in.
     ran_in: Option<usize>,
-    /// The last key was an Esc (the shell got it): another leaves terminal mode.
-    escaped: bool,
+    /// An Esc that hasn't gone to the shell yet: another straight after leaves
+    /// terminal mode, and the shell never sees either (zsh would take the next key
+    /// as Alt and it); anything else, or a moment, and it goes on its way.
+    held_escape: Option<(Vec<u8>, Task<()>)>,
     /// Scrolling that hasn't added up to a line yet.
     scrolled: f32,
     /// Where its cells are on screen, as last drawn: the top left one, and a cell's size.
     pub(super) cells: Option<(Point, Pixels, Pixels)>,
     /// The mouse is selecting.
     selecting: bool,
+    /// A button down that the program in it is being told of (it asked for the
+    /// mouse), and the cell it was last told the mouse is at.
+    reporting: Option<(Button, (usize, usize))>,
+    /// Its text, while the keys are reading it (see [`super::reading`]).
+    pub(super) reading: Option<super::reading::Reading>,
+    /// The link under the mouse while ⌘ is held: underlined, and ⌘-click opens it.
+    pub(super) link: Option<Link>,
+}
+
+/// A link on the screen: on which row, across which columns, and to what.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Link {
+    pub row: usize,
+    pub cols: std::ops::Range<usize>,
+    pub to: LinkTo,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum LinkTo {
+    /// A web address, for the browser.
+    Web(String),
+    /// A file, at a line and column (from zero), for the editor.
+    File(PathBuf, usize, usize),
+}
+
+/// The link at column `col` of a row whose cells are `row` (column, char): a web
+/// address, or a file that's there (`src/main.rs:12:5`, as compilers print them).
+pub(super) fn link_in(row: &[(usize, char)], col: usize, root: &Path) -> Option<(std::ops::Range<usize>, LinkTo)> {
+    let width = row.iter().map(|(col, _)| col + 1).max()?;
+    let mut chars = vec![' '; width];
+    for &(at, c) in row {
+        chars[at] = c;
+    }
+    if chars.get(col).is_none_or(|c| c.is_whitespace()) {
+        return None;
+    }
+    // The word under the mouse: what's between spaces.
+    let start = chars[..col].iter().rposition(|c| c.is_whitespace()).map_or(0, |at| at + 1);
+    let end = chars[col..].iter().position(|c| c.is_whitespace()).map_or(width, |at| col + at);
+    let word: String = chars[start..end].iter().collect();
+    if let Some(from) = ["https://", "http://", "file://"].iter().filter_map(|scheme| word.find(scheme)).min() {
+        let address = trim_address(&word[from..]);
+        let (first, last) = (start + word[..from].chars().count(), start + word[..from].chars().count() + address.chars().count());
+        return (first..last).contains(&col).then(|| (first..last, LinkTo::Web(address.to_string())));
+    }
+    // A path: the chars paths are made of, around the mouse.
+    let first = chars[..=col].iter().rposition(|c| !super::reading::in_path(*c)).map_or(0, |at| at + 1);
+    let last = chars[col..].iter().position(|c| !super::reading::in_path(*c)).map_or(width, |at| col + at);
+    if first > col {
+        return None;
+    }
+    let named: String = chars[first..last].iter().collect();
+    let (path, line, column) = super::reading::located(&named, root, None)?;
+    // What's underlined is the path and its numbers, not the punctuation after.
+    let shown = named.trim_end_matches([':', '.']).chars().count();
+    Some((first..first + shown, LinkTo::File(path, line, column)))
+}
+
+/// A web address as printed in text: punctuation after it isn't part of it, nor is a
+/// closing bracket it doesn't open (`(see https://a.b/c)`).
+fn trim_address(address: &str) -> &str {
+    let mut address = address.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"', '>']);
+    for (open, close) in [('(', ')'), ('[', ']')] {
+        while address.ends_with(close) && address.matches(close).count() > address.matches(open).count() {
+            address = &address[..address.len() - 1];
+        }
+    }
+    address.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"'])
 }
 
 /// A tab of the terminal: a shell, and what listens to it.
@@ -95,7 +171,20 @@ impl gpui::Render for DraggedShell {
 impl Default for TerminalPane {
     fn default() -> Self {
         let height = Resizable::new("terminal-height", Edge::Top, Some(HEIGHT));
-        Self { shown: false, height, shells: vec![], active: 0, ran_in: None, escaped: false, scrolled: 0., cells: None, selecting: false }
+        Self {
+            shown: false,
+            height,
+            shells: vec![],
+            active: 0,
+            ran_in: None,
+            held_escape: None,
+            scrolled: 0.,
+            cells: None,
+            selecting: false,
+            reporting: None,
+            reading: None,
+            link: None,
+        }
     }
 }
 
@@ -108,7 +197,7 @@ impl TerminalPane {
     /// Another shell is in front: what was going on in the last one stops here.
     fn switch_to(&mut self, ix: usize) {
         self.active = ix.min(self.shells.len().saturating_sub(1));
-        self.escaped = false;
+        self.held_escape = None;
         self.selecting = false;
         self.scrolled = 0.;
     }
@@ -131,18 +220,20 @@ impl Editor {
         }
         self.leave_insert();
         self.stop_selecting();
+        self.stop_reading();
         self.terminal.shown = true;
-        self.terminal.escaped = false;
+        self.terminal.held_escape = None;
         self.modal.enter(Mode::Terminal);
         cx.notify();
     }
 
-    /// `cmd-j`: into terminal mode, or from it, hide the terminal.
+    /// `cmd-j`: into terminal mode, or from it (or reading it), hide the terminal.
     pub(super) fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
-        if self.modal.mode != Mode::Terminal {
+        if !self.in_terminal() {
             return self.enter_terminal(cx);
         }
         self.terminal.shown = false;
+        self.stop_reading();
         self.modal.leave(Mode::Terminal);
         cx.notify();
     }
@@ -181,16 +272,20 @@ impl Editor {
         }
         self.terminal.shown = true;
         // A Ctrl-C is for what the story set going, wherever you've been since.
-        if self.story.as_ref().and_then(|state| state.command_to_run()).is_some_and(|run| run.how == RunIn::Interrupt) {
+        let interrupt = self.story.as_ref().and_then(|state| state.command_to_run()).is_some_and(|run| run.how == RunIn::Interrupt);
+        if interrupt {
             self.back_to_the_command();
         }
         if let Some(terminal) = self.terminal.current() {
             terminal.scroll_to_bottom();
+            if !interrupt && terminal.modes().full_screen {
+                self.project.say("a program has the terminal: quit it to see the command");
+            }
         }
     }
 
-    /// Whether the terminal is showing a command for the story to run. If it can't
-    /// (it's hidden, or a full-screen program has it), the code shows it.
+    /// Whether the terminal is showing a command for the story to run. It can't
+    /// while it's hidden, or a full-screen program has it.
     pub(super) fn command_proposed(&self) -> bool {
         self.terminal.shown
             && self.terminal.current().is_some_and(|terminal| !terminal.modes().full_screen)
@@ -233,6 +328,7 @@ impl Editor {
         if let Err(e) = self.start_shell(cx) {
             self.project.say(e);
         }
+        self.read_the_shell_in_front(cx);
         cx.notify();
     }
 
@@ -246,8 +342,10 @@ impl Editor {
         self.terminal.switch_to(if ix < active { active - 1 } else { active });
         if self.terminal.shells.is_empty() {
             self.terminal.shown = false;
+            self.stop_reading();
             self.modal.leave(Mode::Terminal);
         }
+        self.read_the_shell_in_front(cx);
         cx.notify();
     }
 
@@ -256,6 +354,7 @@ impl Editor {
         let count = self.terminal.shells.len();
         if count > 1 {
             self.terminal.switch_to((self.terminal.active + if forward { 1 } else { count - 1 }) % count);
+            self.read_the_shell_in_front(cx);
             cx.notify();
         }
     }
@@ -289,6 +388,7 @@ impl Editor {
         }
         let Some(ix) = self.terminal.shells.iter().position(|shell| shell.number == number) else { return false };
         if !self.terminal.shells[ix].terminal.exited() {
+            self.read_again(number);
             return true;
         }
         self.close_shell(ix, cx);
@@ -310,20 +410,41 @@ impl Editor {
         // In a full-screen program Esc is the program's, however often.
         let modes = terminal.modes();
         let escape = keystroke.key == "escape" && keystroke.modifiers == Modifiers::none() && !modes.full_screen;
-        if escape && self.terminal.escaped {
-            self.terminal.escaped = false;
-            self.modal.leave(Mode::Terminal);
+        if escape {
+            if self.terminal.held_escape.take().is_some() {
+                self.modal.leave(Mode::Terminal);
+                self.start_reading(false, cx);
+                return true;
+            }
+            let Some(bytes) = key_bytes(keystroke, &modes) else { return false };
+            let wait = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(ESCAPE_WAIT).await;
+                this.update(cx, |this, _| this.let_go_of_escape()).ok();
+            });
+            self.terminal.held_escape = Some((bytes, wait));
             return true;
         }
-        if keystroke.key == "tab" && keystroke.modifiers == Modifiers::none() && !modes.full_screen && (self.command_running() || self.command_proposed()) {
-            self.terminal.escaped = false;
-            self.command_done(cx);
+        if keystroke.key == "tab" && keystroke.modifiers == Modifiers::none() && !modes.full_screen && self.command_proposed() {
+            self.terminal.held_escape = None;
+            self.run_from_the_terminal(cx);
             return true;
         }
-        let Some(bytes) = key_bytes(keystroke, modes.app_cursor) else { return false };
-        terminal.input(bytes);
-        self.terminal.escaped = escape;
+        let Some(bytes) = key_bytes(keystroke, &modes) else { return false };
+        self.let_go_of_escape();
+        if let Some(terminal) = self.terminal.current() {
+            terminal.input(bytes);
+        }
         true
+    }
+
+    /// An Esc held back goes to the shell after all.
+    fn let_go_of_escape(&mut self) {
+        if let Some((bytes, wait)) = self.terminal.held_escape.take() {
+            wait.detach();
+            if let Some(terminal) = self.terminal.current() {
+                terminal.input(bytes);
+            }
+        }
     }
 
     /// `cmd-c` in terminal mode: what's selected.
@@ -340,9 +461,68 @@ impl Editor {
         Some(((y / f32::from(lh)) as usize, (x / f32::from(cw)).round() as usize))
     }
 
+    /// The link at a point on the screen, if ⌘ is held: what's underlined.
+    fn link_at(&self, position: Point, command: bool) -> Option<Link> {
+        if !command {
+            return None;
+        }
+        let (row, col) = self.terminal_cell_under(position)?;
+        let screen = self.terminal.current()?.screen();
+        let cells: Vec<(usize, char)> = screen.cells.iter().filter(|cell| cell.line == row).map(|cell| (cell.col, cell.c)).collect();
+        let (cols, to) = link_in(&cells, col, &self.project.root)?;
+        Some(Link { row, cols, to })
+    }
+
+    /// The mouse moved, or ⌘ went down or up: what's underlined follows.
+    pub(super) fn hover_link(&mut self, position: Point, command: bool, cx: &mut Context<Self>) {
+        let link = self.link_at(position, command);
+        if link != self.terminal.link {
+            self.terminal.link = link;
+            cx.notify();
+        }
+    }
+
+    /// The cell under a point (the one it's in, not the nearest boundary).
+    fn terminal_cell_under(&self, position: Point) -> Option<(usize, usize)> {
+        let (origin, cw, lh) = self.terminal.cells?;
+        if position.x < origin.x || position.y < origin.y {
+            return None;
+        }
+        let (x, y) = (f32::from(position.x - origin.x), f32::from(position.y - origin.y));
+        Some(((y / f32::from(lh)) as usize, (x / f32::from(cw)) as usize))
+    }
+
     fn terminal_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        // ⌘-click on a link: the browser, or the file in the editor (before any program has the mouse).
+        if event.button == MouseButton::Left
+            && let Some(link) = self.link_at(event.position, event.modifiers.platform)
+        {
+            self.terminal.link = None;
+            match link.to {
+                LinkTo::Web(address) => cx.open_url(&address),
+                LinkTo::File(path, line, column) => {
+                    let from = self.before_jump();
+                    self.modal.leave(Mode::Terminal);
+                    self.stop_reading();
+                    self.open_at(&path, line, column, cx);
+                    self.note_jump(from);
+                }
+            }
+            return cx.notify();
+        }
         self.enter_terminal(cx);
         let Some((row, col)) = self.terminal_cell(event.position) else { return };
+        // A program that asked for the mouse has it; shift-click still selects, as in
+        // other terminals.
+        if let Some(terminal) = self.terminal.current().filter(|t| t.modes().mouse && !event.modifiers.shift) {
+            let button = button(event.button);
+            terminal.mouse(button, Press::Down, row, col, held(&event.modifiers));
+            self.terminal.reporting = Some((button, (row, col)));
+            return;
+        }
+        if event.button != MouseButton::Left {
+            return;
+        }
         if let Some(terminal) = self.terminal.current() {
             terminal.select_from(row, col, event.click_count == 2, event.click_count >= 3);
             self.terminal.selecting = true;
@@ -350,7 +530,39 @@ impl Editor {
         }
     }
 
+    fn terminal_mouse_up(&mut self, event: &MouseUpEvent) {
+        let Some((button, _)) = self.terminal.reporting.take() else { return };
+        let Some((row, col)) = self.terminal_cell(event.position) else { return };
+        if let Some(terminal) = self.terminal.current().filter(|t| t.modes().mouse) {
+            terminal.mouse(button, Press::Up, row, col, held(&event.modifiers));
+        }
+    }
+
     fn terminal_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        self.hover_link(event.position, event.modifiers.platform, cx);
+        // Moves, to a program that asked to be told them: dragging, or any.
+        if let (Some((row, col)), Some(terminal)) = (self.terminal_cell(event.position), self.terminal.current()) {
+            let modes = terminal.modes();
+            let down = self.terminal.reporting.map(|(button, _)| button);
+            let told = match down {
+                Some(button) if modes.mouse_drag || modes.mouse_motion => Some(button),
+                None if modes.mouse_motion => Some(Button::None),
+                _ => None,
+            };
+            let last = self.terminal.reporting.map(|(_, at)| at);
+            if let Some(button) = told
+                && last != Some((row, col))
+            {
+                terminal.mouse(button, Press::Moved, row, col, held(&event.modifiers));
+                if let Some((_, at)) = self.terminal.reporting.as_mut() {
+                    *at = (row, col);
+                }
+                return;
+            }
+            if down.is_some() {
+                return;
+            }
+        }
         if !self.terminal.selecting {
             return;
         }
@@ -373,8 +585,10 @@ impl Editor {
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r")
         };
-        terminal.input(text.into_bytes());
-        self.terminal.escaped = false;
+        self.let_go_of_escape();
+        if let Some(terminal) = self.terminal.current() {
+            terminal.input(text.into_bytes());
+        }
     }
 
     /// The wheel: back through the scrollback, or (in a full-screen program
@@ -387,9 +601,14 @@ impl Editor {
             return;
         }
         self.terminal.scrolled -= lines as f32;
+        let cell = self.terminal_cell(event.position).unwrap_or((0, 0));
         let Some(terminal) = self.terminal.current() else { return };
         let modes = terminal.modes();
-        if modes.alternate_scroll {
+        // A program that asked for the mouse scrolls itself; one that only has the whole
+        // screen gets arrow keys; otherwise it's the scrollback that moves.
+        if modes.mouse {
+            terminal.wheel(lines, cell.0, cell.1, held(&event.modifiers));
+        } else if modes.alternate_scroll {
             let key = if lines > 0 { 'A' } else { 'B' };
             let arrow = if modes.app_cursor { format!("\x1bO{key}") } else { format!("\x1b[{key}") };
             terminal.input(arrow.repeat(lines.unsigned_abs() as usize).into_bytes());
@@ -399,28 +618,12 @@ impl Editor {
         cx.notify();
     }
 
-    /// What the story's keys do while its command runs here, if it is.
-    pub(super) fn terminal_hint(&self) -> Option<String> {
-        if !self.command_running() {
-            return None;
-        }
-        let full_screen = self.terminal.current().is_some_and(|t| t.modes().full_screen);
-        let keys = match self.modal.mode {
-            Mode::Terminal if full_screen => "quit it, then ⇥",
-            Mode::Terminal => "⇥ when it's done · esc esc to the code",
-            _ => "⇥ when it's done · ⏎ ask",
-        };
-        let story = self.story.as_ref().and_then(|state| state.story.as_ref());
-        Some(format!("{keys}{}", super::story_view::progress(story)))
-    }
-
-    /// The terminal's tabs, once there are two. ✦ marks where a story's command is running.
+    /// The terminal's tabs, once there are two.
     fn render_shell_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.terminal.shells.len() < 2 {
             return None;
         }
         let theme = theme(cx).clone();
-        let running = self.command_running().then_some(self.terminal.ran_in).flatten();
         let tabs = self.terminal.shells.iter().enumerate().map(|(ix, shell)| {
             let number = shell.number;
             div()
@@ -445,7 +648,6 @@ impl Editor {
                     move |style, _, _, _| style.border_l_2().border_color(accent)
                 })
                 .on_drop(cx.listener(move |this, dragged: &DraggedShell, _, cx| this.move_shell(dragged.ix, ix, cx)))
-                .when(running == Some(number), |d| d.child(div().text_color(theme.warning).child("✦")))
                 .child(format!("shell {number}"))
                 .child(
                     div()
@@ -501,7 +703,7 @@ impl Editor {
             return None;
         }
         let theme = theme(cx).clone();
-        let active = self.modal.mode == Mode::Terminal;
+        let active = self.in_terminal();
         Some(
             div()
                 .id("terminal")
@@ -516,25 +718,17 @@ impl Editor {
                 .border_color(if active { theme.success } else { theme.border })
                 .bg(theme.background)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| this.terminal_mouse_down(event, cx)))
+                .on_mouse_down(MouseButton::Right, cx.listener(|this, event: &MouseDownEvent, _, cx| this.terminal_mouse_down(event, cx)))
+                .on_mouse_down(MouseButton::Middle, cx.listener(|this, event: &MouseDownEvent, _, cx| this.terminal_mouse_down(event, cx)))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.terminal_mouse_up(event)))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.terminal_mouse_up(event)))
+                .on_mouse_up(MouseButton::Right, cx.listener(|this, event: &MouseUpEvent, _, _| this.terminal_mouse_up(event)))
+                .on_mouse_up(MouseButton::Middle, cx.listener(|this, event: &MouseUpEvent, _, _| this.terminal_mouse_up(event)))
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.terminal_mouse_move(event, cx)))
+                .when(self.terminal.link.is_some(), |terminal| terminal.cursor_pointer())
                 .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| this.terminal_scroll(event, window, cx)))
                 .children(self.render_shell_tabs(cx))
                 .child(div().flex_1().min_h_0().debug_selector(|| "terminal-screen".into()).child(TerminalView::new(cx.entity(), active)))
-                .children(self.render_attention(super::attention::Panel::Terminal, cx))
-                // Over the screen, so the shell keeps its size as a command starts.
-                .children(self.terminal_hint().map(|hint| {
-                    div()
-                        .absolute()
-                        .top_1()
-                        .right_2()
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .bg(theme.background)
-                        .child(div().text_color(theme.warning).text_xs().child("✦"))
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(hint))
-                }))
                 .child(self.terminal.height.handle("terminal-edge").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -548,10 +742,23 @@ impl Editor {
     }
 }
 
+/// What a key sends to the program in the terminal: as xterm sends it, or by kitty's
+/// keyboard protocol if the program asked for that. `None` for keys that aren't the
+/// terminal's (anything with cmd).
+pub(super) fn key_bytes(keystroke: &Keystroke, modes: &Modes) -> Option<Vec<u8>> {
+    if keystroke.modifiers.platform || keystroke.modifiers.function {
+        return None;
+    }
+    if modes.keyboard != 0 {
+        return kitty_key(keystroke, modes.keyboard);
+    }
+    legacy_key(keystroke, modes.app_cursor)
+}
+
 /// What a key sends to the shell, as xterm sends it; `None` for keys that
 /// aren't the shell's (anything with cmd). Option types what the layout
 /// says it types (`|`, `{` …), except with the keys that move and delete.
-pub(super) fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
+fn legacy_key(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = &keystroke.modifiers;
     if m.platform || m.function {
         return None;
@@ -581,6 +788,12 @@ pub(super) fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u
         "delete" => Some(tilde(3)),
         "pageup" => Some(tilde(5)),
         "pagedown" => Some(tilde(6)),
+        "insert" => Some(tilde(2)),
+        "f1" | "f2" | "f3" | "f4" => {
+            let c = ['P', 'Q', 'R', 'S'][keystroke.key[1..].parse::<usize>().ok()? - 1];
+            Some(if modifier == 1 { format!("\x1bO{c}") } else { format!("\x1b[1;{modifier}{c}") })
+        }
+        f if function_key(f).is_some() => function_key(f).map(tilde),
         _ => None,
     };
     if let Some(named) = named {
@@ -606,23 +819,151 @@ pub(super) fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u
     (!typed.is_empty()).then(|| typed.into_bytes())
 }
 
+/// The number a function key from F5 sends (`CSI 15 ~`).
+fn function_key(name: &str) -> Option<u8> {
+    Some(match name {
+        "f5" => 15,
+        "f6" => 17,
+        "f7" => 18,
+        "f8" => 19,
+        "f9" => 20,
+        "f10" => 21,
+        "f11" => 23,
+        "f12" => 24,
+        _ => return None,
+    })
+}
+
+/// A key by kitty's keyboard protocol, with the program's `flags` (see [`Modes::keyboard`]):
+/// keys told apart from what they used to share (Esc, ctrl-i and Tab), modifiers on any
+/// key, and with flag 8 every key as `CSI code ; modifiers u`. Keys that move keep the
+/// forms they had; only presses are sent.
+fn kitty_key(keystroke: &Keystroke, flags: u8) -> Option<Vec<u8>> {
+    let m = &keystroke.modifiers;
+    let every = flags & 8 != 0;
+    let modifiers = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.control as u8;
+    let with = |n: u8| if n == 1 { String::new() } else { format!(";{n}") };
+    let csi_u = |code: u32, shifted: Option<char>, text: Option<&str>| {
+        let shifted = shifted.filter(|_| flags & 4 != 0).map_or(String::new(), |c| format!(":{}", c as u32));
+        let text = text.filter(|t| flags & 16 != 0 && !t.is_empty()).map(|t| t.chars().map(|c| (c as u32).to_string()).collect::<Vec<_>>().join(":"));
+        match text {
+            Some(text) => format!("\x1b[{code}{shifted};{modifiers};{text}u"),
+            None => format!("\x1b[{code}{shifted}{}u", with(modifiers)),
+        }
+        .into_bytes()
+    };
+    // Keys that move, and the function keys: as they always were, but always as CSI.
+    let at = |c: char| if modifiers == 1 { format!("\x1b[{c}") } else { format!("\x1b[1;{modifiers}{c}") }.into_bytes();
+    let tilde = |n: u8| format!("\x1b[{n}{}~", with(modifiers)).into_bytes();
+    let key = keystroke.key.as_str();
+    match key {
+        "up" => return Some(at('A')),
+        "down" => return Some(at('B')),
+        "right" => return Some(at('C')),
+        "left" => return Some(at('D')),
+        "home" => return Some(at('H')),
+        "end" => return Some(at('F')),
+        "f1" => return Some(at('P')),
+        "f2" => return Some(at('Q')),
+        "f3" => return Some(tilde(13)),
+        "f4" => return Some(at('S')),
+        "insert" => return Some(tilde(2)),
+        "delete" => return Some(tilde(3)),
+        "pageup" => return Some(tilde(5)),
+        "pagedown" => return Some(tilde(6)),
+        f if function_key(f).is_some() => return function_key(f).map(tilde),
+        _ => {}
+    }
+    // Enter, Tab and Backspace stay as they were unless modified (so a shell left in this
+    // mode by a program that crashed still runs `reset`); Esc never does.
+    let legacy = match key {
+        "enter" => Some((13, "\r")),
+        "tab" => Some((9, "\t")),
+        "backspace" => Some((127, "\x7f")),
+        "escape" => Some((27, "\x1b")),
+        _ => None,
+    };
+    if let Some((code, bytes)) = legacy {
+        let plain = modifiers == 1 && code != 27;
+        return Some(if plain && !every { bytes.as_bytes().to_vec() } else { csi_u(code, None, None) });
+    }
+    let base = if key == "space" { ' ' } else { single_char(key)? };
+    let typed = keystroke.key_char.clone().unwrap_or_else(|| if m.shift { base.to_uppercase().collect() } else { base.to_string() });
+    // Option typing what the layout says (`|` on option-7): that's text, as before.
+    if m.alt && !m.control && keystroke.key_char.as_deref().is_some_and(|t| t != key && !t.eq_ignore_ascii_case(key)) && !every {
+        return Some(typed.into_bytes());
+    }
+    // Text, alone or shifted, is text; with ctrl or alt, or every key asked for, it's CSI u.
+    if !every && !m.control && !m.alt {
+        return Some(typed.into_bytes());
+    }
+    let shifted = m.shift.then(|| typed.chars().next()).flatten().filter(|c| *c != base);
+    let text = (!m.control).then_some(typed.as_str());
+    Some(csi_u(base.to_lowercase().next().unwrap_or(base) as u32, shifted, text))
+}
+
+/// The one char a key name is, if it is one.
+fn single_char(key: &str) -> Option<char> {
+    let mut chars = key.chars();
+    chars.next().filter(|_| chars.next().is_none())
+}
+
+/// gpui's button, as a program in the terminal is told it.
+fn button(button: MouseButton) -> Button {
+    match button {
+        MouseButton::Right => Button::Right,
+        MouseButton::Middle => Button::Middle,
+        _ => Button::Left,
+    }
+}
+
+/// The keys held, as a program in the terminal is told them with the mouse.
+fn held(modifiers: &Modifiers) -> Held {
+    Held { shift: modifiers.shift, alt: modifiers.alt, ctrl: modifiers.control }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn keys_reach_the_shell_as_xterm_sends_them() {
-        let k = |s: &str| key_bytes(&Keystroke::parse(s).unwrap(), false);
+        let k = |s: &str| legacy_key(&Keystroke::parse(s).unwrap(), false);
         assert_eq!(k("enter"), Some(b"\r".to_vec()));
         assert_eq!(k("ctrl-c"), Some(vec![3]));
         assert_eq!(k("up"), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_bytes(&Keystroke::parse("up").unwrap(), true), Some(b"\x1bOA".to_vec()), "application cursor keys");
+        assert_eq!(legacy_key(&Keystroke::parse("up").unwrap(), true), Some(b"\x1bOA".to_vec()), "application cursor keys");
         assert_eq!(k("ctrl-left"), Some(b"\x1b[1;5D".to_vec()));
         assert_eq!(k("shift-tab"), Some(b"\x1b[Z".to_vec()));
         assert_eq!(k("alt-backspace"), Some(b"\x1b\x7f".to_vec()));
         assert_eq!(k("shift-a"), Some(b"A".to_vec()));
         assert_eq!(k("cmd-v"), None, "the app's");
         let option_7 = Keystroke { key_char: Some("|".into()), ..Keystroke::parse("alt-7").unwrap() };
-        assert_eq!(key_bytes(&option_7, false), Some(b"|".to_vec()), "option types what the layout says");
+        assert_eq!(legacy_key(&option_7, false), Some(b"|".to_vec()), "option types what the layout says");
+        assert_eq!(k("f1"), Some(b"\x1bOP".to_vec()));
+        assert_eq!(k("f5"), Some(b"\x1b[15~".to_vec()));
+    }
+
+    #[test]
+    fn keys_by_kittys_protocol_when_its_asked_for() {
+        let k = |s: &str, flags: u8| kitty_key(&Keystroke::parse(s).unwrap(), flags).map(|b| String::from_utf8(b).unwrap());
+        // Telling keys apart (flag 1).
+        assert_eq!(k("ctrl-x", 1).as_deref(), Some("\x1b[120;5u"));
+        assert_eq!(k("ctrl-s", 1).as_deref(), Some("\x1b[115;5u"));
+        assert_eq!(k("escape", 1).as_deref(), Some("\x1b[27u"), "Esc isn't the start of a sequence any more");
+        assert_eq!(k("alt-a", 1).as_deref(), Some("\x1b[97;3u"));
+        assert_eq!(k("ctrl-shift-a", 1).as_deref(), Some("\x1b[97;6u"));
+        assert_eq!(k("a", 1).as_deref(), Some("a"), "text is text");
+        assert_eq!(k("shift-a", 1).as_deref(), Some("A"));
+        assert_eq!(k("enter", 1).as_deref(), Some("\r"), "so a shell left like this still runs `reset`");
+        assert_eq!(k("shift-enter", 1).as_deref(), Some("\x1b[13;2u"));
+        assert_eq!(k("shift-tab", 1).as_deref(), Some("\x1b[9;2u"));
+        assert_eq!(k("ctrl-up", 1).as_deref(), Some("\x1b[1;5A"), "keys that move keep their forms");
+        assert_eq!(k("up", 1).as_deref(), Some("\x1b[A"));
+        // Every key (flag 8), shifted keys (4) and text (16).
+        assert_eq!(k("a", 8).as_deref(), Some("\x1b[97u"));
+        assert_eq!(k("enter", 8).as_deref(), Some("\x1b[13u"));
+        assert_eq!(k("shift-a", 8 | 4).as_deref(), Some("\x1b[97:65;2u"));
+        assert_eq!(k("a", 8 | 16).as_deref(), Some("\x1b[97;1;97u"));
     }
 }

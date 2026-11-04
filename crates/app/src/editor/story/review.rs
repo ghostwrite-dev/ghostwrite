@@ -45,9 +45,12 @@ enum Problem {
 }
 
 /// What to show after the story moved on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Show {
     /// Nothing new (still waiting, or already showing it).
     Nothing,
+    /// A step's ready, and the user is looking elsewhere: it waits for Tab.
+    Ready,
     /// Claude has been asked to correct its reply: send the request.
     Revise,
     /// This tab, where the current item is (its selection already set).
@@ -131,6 +134,11 @@ impl StoryState {
         files
     }
 
+    /// Whether item `id` is the one brought into view.
+    pub(in crate::editor) fn showing(&self, id: ItemId) -> bool {
+        self.shown == Some(id)
+    }
+
     /// What the tree should show for item `id`: a new file made by an edit,
     /// or a file removed or renamed.
     pub(in crate::editor) fn proposal(&self, project: &Project, id: ItemId, item: &Item) -> Option<Proposal> {
@@ -201,13 +209,11 @@ impl StoryState {
         self.shown = None;
     }
 
-    /// The command accepting the current item runs, if it's one that hasn't
-    /// run yet: the editor runs it in the terminal before it's [accepted](Self::accept).
+    /// The command accepting the current item runs, if it's one: the editor
+    /// runs it in the terminal before it's [accepted](Self::accept).
     pub(in crate::editor) fn command_to_run(&self) -> Option<ghostwrite_ai::protocol::Run> {
-        let story = self.story.as_ref()?;
-        let id = story.current()?;
-        match story.item(id)? {
-            Item::Run(run) if !story.running(id) => Some(run),
+        match self.story.as_ref()?.current_item()? {
+            Item::Run(run) => Some(run),
             _ => None,
         }
     }
@@ -267,7 +273,11 @@ impl StoryState {
         let tab = located.tab.and_then(|ix| project.tabs.get_mut(ix)).ok_or(missing)?;
         let edit = placement::edit(tab.doc.text(), step, located.near).ok_or("couldn't find where that edit goes; ⏎ to say what you want instead")?;
         tab.doc.buffer.begin(tab.view.selection);
+        let start = edit.bytes.start;
         tab.doc.buffer.edit(edit.bytes, &edit.text);
+        // What it changed lights up for a moment (a removal, the line it was taken from).
+        let lines = tab.doc.buffer.line_of(start)..tab.doc.buffer.line_of(start + edit.text.len().saturating_sub(1)) + 1;
+        tab.view.motion.flash = Some((tab.doc.buffer.lines_range(lines), std::time::Instant::now()));
         let end = tab.doc.buffer.line_end(edit.cursor_line);
         tab.select(Range::point(end), Autoscroll::Fit);
         tab.doc.buffer.commit(tab.view.selection);
@@ -322,6 +332,7 @@ impl StoryState {
             return Show::Nothing;
         }
         let Some(item) = story.item(id) else { return Show::Nothing };
+        let wandered = self.wandered;
         // Never show an item that can't be found or applied: the model writes it again first.
         if story.can_revise() && !self.docs_note {
             match self.problem(project, id, &item) {
@@ -345,6 +356,10 @@ impl StoryState {
                 }
                 None => {}
             }
+        }
+        // Looking elsewhere: it waits, and Tab brings them to it.
+        if wandered {
+            return Show::Ready;
         }
         self.shown = Some(id);
         let proposal = self.proposal(project, id, &item);

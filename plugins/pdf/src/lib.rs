@@ -7,11 +7,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use ghostwrite_plugin_api::{Drawing, Page, Plugin, register};
+use ghostwrite_plugin_api::{Drawing, Page, Plugin, Region, register};
 use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::util::TransformExt;
 use hayro::hayro_syntax::Pdf;
+use hayro::kurbo::Affine;
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{RenderCache, RenderSettings};
+use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit};
+use hayro::{RenderCache, RenderSettings, render_into};
 
 /// The most pixels a page is drawn with: one shaped to be bigger isn't drawn at all.
 const MAX_PIXELS: usize = 64 << 20;
@@ -75,27 +78,46 @@ impl Plugin for Pdfs {
         })
     }
 
-    fn draw_page(key_high: u64, key_low: u64, pixels: u32) -> Option<Drawing> {
+    /// The page on white, moved and scaled so the region is what lands on the pixels.
+    fn draw(key_high: u64, key_low: u64, region: Region) -> Option<Drawing> {
         OPEN.with(|open| {
             let open = open.borrow();
             let read = open.read.iter().find(|read| read.hash == key_high)?;
             let pages = read.pdf.pages();
             let page = pages.get(usize::try_from(key_low).ok()?)?;
-            let (page_width, page_height) = page.render_dimensions();
-            let width = (pixels as usize).max(1);
-            let scale = width as f32 / page_width.max(1.);
-            let height = ((page_height * scale).round() as usize).max(1);
-            if width.saturating_mul(height) > MAX_PIXELS || width > u16::MAX as usize || height > u16::MAX as usize {
+            let (width, height) = (u16::try_from(region.width).ok()?, u16::try_from(region.height).ok()?);
+            if (region.width as usize).saturating_mul(region.height as usize) > MAX_PIXELS || width == 0 || height == 0 || !(region.scale > 0.) {
                 return None;
             }
-            let settings = RenderSettings { x_scale: scale, y_scale: scale, width: Some(width as u16), height: Some(height as u16), bg_color: WHITE };
-            let pixmap = hayro::render(page, &RenderCache::new(), &InterpreterSettings::default(), &settings);
+            let scale = f64::from(region.scale);
+            let transform = Affine::translate((-f64::from(region.x), -f64::from(region.y))) * Affine::scale(scale) * page.initial_transform(true).to_kurbo();
+            let mut ctx = RenderContext::new(width, height);
+            render_into(page, &RenderCache::new(), &InterpreterSettings::default(), &RenderSettings::default(), &mut ctx, transform);
+            ctx.flush();
+            let mut pixmap = Pixmap::new(width, height);
+            let settings = RasterizerSettings { target_init: TargetInit::Clear(WHITE), ..Default::default() };
+            ctx.render_with(&mut pixmap, &mut Resources::default(), settings);
             let mut bgra = pixmap.data_as_u8_slice().to_vec();
             for pixel in bgra.chunks_exact_mut(4) {
                 pixel.swap(0, 2);
             }
-            Some(Drawing { width: width as u32, height: height as u32, bgra })
+            let (page_width, page_height) = page.render_dimensions();
+            off_the_page(&mut bgra, &region, page_width * region.scale, page_height * region.scale);
+            Some(Drawing { width: region.width, height: region.height, bgra })
         })
+    }
+}
+
+/// Clear what of `region` is past the page's right or bottom edge, at `width` by `height` pixels.
+fn off_the_page(bgra: &mut [u8], region: &Region, width: f32, height: f32) {
+    let (right, bottom) = (width.round().max(0.) as usize, height.round().max(0.) as usize);
+    for (row, line) in bgra.chunks_exact_mut(region.width as usize * 4).enumerate() {
+        let y = region.y as usize + row;
+        for (col, pixel) in line.chunks_exact_mut(4).enumerate() {
+            if y >= bottom || region.x as usize + col >= right {
+                pixel.fill(0);
+            }
+        }
     }
 }
 

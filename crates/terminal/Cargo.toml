@@ -7,3 +7,6 @@ publish.workspace = true
 
 [dependencies]
 alacritty_terminal.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

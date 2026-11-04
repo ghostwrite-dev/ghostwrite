@@ -8,14 +8,15 @@
 //! ago go, never one used in the last couple of seconds (it's on screen).
 //! Widths are rounded up, so dragging a pane's edge doesn't draw every page
 //! again for every pixel; while a page is drawn again, its last drawing is
-//! shown, scaled.
+//! shown, scaled. Zoomed in, a page is drawn in tiles, only those on screen,
+//! so it's as sharp as the screen at any zoom.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ghostwrite_page::{Bitmap, Size};
+use ghostwrite_page::{Bitmap, Pages, Region, Size};
 use gpui::{App, Bounds, ContentMask, Corners, Global, PaintQuad, Pixels, Point, RenderImage, Window, fill, point, px, size};
 
 /// Between pages, and around them.
@@ -27,6 +28,11 @@ const BUDGET: usize = 256 << 20;
 const IN_USE: Duration = Duration::from_secs(2);
 /// Widths are drawn at multiples of this many pixels.
 const STEP: usize = 128;
+/// A page drawn wider than this many pixels is drawn in tiles this big, those on
+/// screen, over the whole page drawn this wide (which shows until they're drawn).
+const TILE: usize = 1024;
+/// How far pages zoom, out and in, from as wide as the view.
+pub const ZOOMS: std::ops::RangeInclusive<f32> = 0.1..=4.0;
 
 /// A width to draw at: `pixels`, rounded up.
 fn width(pixels: usize) -> usize {
@@ -104,60 +110,64 @@ impl<K: Hash + Eq + Clone> PageCache<K> {
     }
 }
 
-/// Pages of `K`'s kind drawn, and the last drawing of each page of each
-/// document, to show while it's drawn again.
-struct Drawn<K> {
-    cache: PageCache<K>,
-    latest: HashMap<(usize, usize), K>,
+/// A piece of a page drawn: what's on the page, how wide the page is drawn, and
+/// which tile of it (the whole page, drawn no wider than a tile, is the first).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Piece {
+    key: u128,
+    pixels: usize,
+    tile: (usize, usize),
 }
 
-impl<K> Default for Drawn<K> {
-    fn default() -> Self {
-        Self { cache: PageCache::default(), latest: HashMap::new() }
-    }
+/// Pieces drawn, and the last whole drawing of each page of each document, to
+/// show while it's drawn again.
+#[derive(Default)]
+struct Drawn {
+    cache: PageCache<Piece>,
+    latest: HashMap<(usize, usize), Piece>,
 }
 
-impl<K: 'static> Global for Drawn<K> {}
+impl Global for Drawn {}
 
-/// A page to draw: `key` says what's on it (it's drawn again when that
-/// changes), at `pixels` wide; `of` is the document and page it is, for its
-/// last drawing to show meanwhile.
-pub struct Page<K> {
-    pub key: K,
-    pub of: (usize, usize),
-    pub pixels: usize,
-}
-
-/// The page drawn, if it's ready (or its last drawing, while it's drawn
-/// again). If it isn't, `draw` draws it (as wide as it's given, or a
-/// little wider) in the background, and the windows redraw when it's done.
-pub fn drawn<K>(page: Page<K>, draw: impl FnOnce(usize) -> Option<Bitmap> + Send + 'static, window: &mut Window, cx: &mut App) -> Option<Arc<RenderImage>>
-where
-    K: Hash + Eq + Clone + Send + 'static,
-{
-    let key = (page.key, width(page.pixels));
-    let drawn = cx.default_global::<Drawn<(K, usize)>>();
-    let meanwhile = |drawn: &mut Drawn<(K, usize)>| drawn.latest.get(&page.of).cloned().and_then(|old| drawn.cache.get(&old)).flatten();
-    match drawn.cache.get(&key) {
+/// `region` of page `page` of `pages`, if it's drawn (`piece` says which); if it
+/// isn't, it's drawn in the background, and the windows redraw when it's done.
+/// Meanwhile a whole page (`of` says which page of which document) shows its last
+/// drawing.
+fn piece(
+    pages: &Arc<dyn Pages>,
+    page: usize,
+    piece: Piece,
+    region: Region,
+    of: Option<(usize, usize)>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Arc<RenderImage>> {
+    let drawn = cx.default_global::<Drawn>();
+    let meanwhile = |drawn: &mut Drawn| of.and_then(|of| drawn.latest.get(&of).cloned()).and_then(|old| drawn.cache.get(&old)).flatten();
+    match drawn.cache.get(&piece) {
         Some(Some(image)) => {
-            drawn.latest.insert(page.of, key.clone());
+            if let Some(of) = of {
+                drawn.latest.insert(of, piece);
+            }
             return Some(image);
         }
         Some(None) => return meanwhile(drawn),
         None => {}
     }
     let shown = meanwhile(drawn);
-    let dropped = drawn.cache.drawing(key.clone());
+    let dropped = drawn.cache.drawing(piece.clone());
     dropped.into_iter().for_each(|image| cx.drop_image(image, Some(&mut *window)));
-    let pixels = key.1;
-    let drawing = cx.background_executor().spawn(async move { draw(pixels).and_then(image) });
+    let source = pages.clone();
+    let drawing = cx.background_executor().spawn(async move { source.draw(page, region).and_then(image) });
     cx.spawn(async move |cx| {
         let image = drawing.await;
         cx.update(|cx| {
-            let drawn = cx.default_global::<Drawn<(K, usize)>>();
+            let drawn = cx.default_global::<Drawn>();
             // Unless it was dropped while it was being drawn.
-            if drawn.cache.drawn(&key, image) {
-                drawn.latest.insert(page.of, key);
+            if drawn.cache.drawn(&piece, image) {
+                if let Some(of) = of {
+                    drawn.latest.insert(of, piece);
+                }
                 cx.refresh_windows();
             }
         })
@@ -165,6 +175,12 @@ where
     })
     .detach();
     shown
+}
+
+/// How many tiles of pages zoomed in (not whole pages) are drawn or being drawn.
+#[cfg(test)]
+pub fn tiles(cx: &mut App) -> usize {
+    cx.default_global::<Drawn>().cache.entries.keys().filter(|piece| piece.tile != (0, 0) || piece.pixels > TILE).count()
 }
 
 /// A drawn page as an image to paint: gpui takes BGRA, as pages are drawn, but
@@ -188,11 +204,14 @@ fn straighten(bgra: &mut [u8]) {
 }
 
 /// Where pages of `sizes` are, one under another, as wide as the view (at
-/// most `max_width`, centered), in the view before it's scrolled.
+/// most `max_width`, centered) times their zoom, in the view before it's
+/// scrolled down. Wider than the view, they're scrolled across.
 #[derive(Clone)]
 pub struct Stack {
     pub left: Pixels,
     pub width: Pixels,
+    /// How far they're scrolled across, kept within them.
+    pub scroll_left: Pixels,
     tops: Vec<Pixels>,
     /// Pixels to a point, for each page.
     scales: Vec<f32>,
@@ -202,12 +221,15 @@ pub struct Stack {
 }
 
 impl Stack {
-    pub fn new(sizes: impl IntoIterator<Item = Size>, view_width: Pixels, max_width: Option<Pixels>) -> Self {
+    pub fn new(sizes: impl IntoIterator<Item = Size>, view_width: Pixels, max_width: Option<Pixels>, zoom: f32, scroll_left: Pixels) -> Self {
         let room = view_width - px(GAP * 2.);
         // However narrow the view, wide enough to see; but no wider than it should be.
         let room = room.max(px(100.));
-        let width = max_width.map_or(room, |max| room.min(max)).max(px(1.));
-        let left = ((view_width - width) / 2.).max(px(GAP));
+        let fit = max_width.map_or(room, |max| room.min(max)).max(px(1.));
+        let width = (fit * zoom.clamp(*ZOOMS.start(), *ZOOMS.end())).max(px(1.));
+        let spare = view_width - width - px(GAP * 2.);
+        let scroll_left = if spare < px(0.) { scroll_left.clamp(px(0.), -spare) } else { px(0.) };
+        let left = if spare < px(0.) { px(GAP) - scroll_left } else { px(GAP) + spare / 2. };
         let (mut tops, mut scales, mut heights, mut y) = (vec![], vec![], vec![], px(GAP));
         for page in sizes {
             let scale = f32::from(width) / page.width.max(1.);
@@ -217,7 +239,7 @@ impl Stack {
             heights.push(height);
             y += height + px(GAP);
         }
-        Self { left, width, tops, scales, heights, bottom: y }
+        Self { left, width, scroll_left, tops, scales, heights, bottom: y }
     }
 
     pub fn len(&self) -> usize {
@@ -283,27 +305,62 @@ impl Viewport {
     }
 }
 
-/// The pages on screen, each with its drawing if it's ready, and what's
-/// over them, ready to [`paint`].
+/// A piece of a page drawn, and where it goes on screen.
+type Placed = (Bounds<Pixels>, Arc<RenderImage>);
+
+/// The pages on screen, each with what's drawn of it so far, and what's over
+/// them, ready to [`paint`].
 pub struct Shown {
     pub viewport: Viewport,
-    pages: Vec<(Bounds<Pixels>, Option<Arc<RenderImage>>)>,
+    /// Each page, and its pieces, where they go.
+    pages: Vec<(Bounds<Pixels>, Vec<Placed>)>,
     /// Over the pages: the selection, the cursor.
     quads: Vec<PaintQuad>,
 }
 
 impl Shown {
-    /// The pages of `stack` in `viewport`, each drawn by `drawn` (by its index).
-    pub fn new(stack: &Stack, viewport: Viewport, mut drawn: impl FnMut(usize) -> Option<Arc<RenderImage>>) -> Self {
+    /// The pages of `stack` in `viewport`, drawn by `pages` (document `doc`'s) as
+    /// wide as they're shown, `pixels`: whole, or wider than a tile, the tiles on
+    /// screen over the whole page drawn as wide as one.
+    pub fn new(stack: &Stack, viewport: Viewport, pages: &Arc<dyn Pages>, doc: usize, pixels: usize, window: &mut Window, cx: &mut App) -> Self {
         let bounds = viewport.bounds;
-        let mut pages = vec![];
-        for page in 0..stack.len() {
+        let sizes = pages.sizes();
+        let wide = width(pixels);
+        let mut shown = vec![];
+        for (page, page_size) in sizes.iter().enumerate().take(stack.len()) {
             let on_screen = viewport.place(stack.page(page));
-            if on_screen.bottom() >= bounds.top() && on_screen.top() <= bounds.bottom() {
-                pages.push((on_screen, drawn(page)));
+            if on_screen.bottom() < bounds.top() || on_screen.top() > bounds.bottom() {
+                continue;
             }
+            let key = pages.key(page);
+            let mut pieces = vec![];
+            let whole = wide.min(TILE);
+            let first = Piece { key, pixels: whole, tile: (0, 0) };
+            if let Some(image) = piece(pages, page, first, Region::whole(*page_size, whole), Some((doc, page)), window, cx) {
+                pieces.push((on_screen, image));
+            }
+            if wide > TILE {
+                let all = Region::whole(*page_size, wide);
+                let to_screen = f32::from(on_screen.size.width) / wide as f32;
+                for row in 0..all.height.div_ceil(TILE) {
+                    for col in 0..wide.div_ceil(TILE) {
+                        let (x, y) = (col * TILE, row * TILE);
+                        let region = Region { x, y, width: TILE.min(wide - x), height: TILE.min(all.height - y), ..all };
+                        let at = point(on_screen.left() + px(x as f32 * to_screen), on_screen.top() + px(y as f32 * to_screen));
+                        let tile = Bounds::new(at, size(px(region.width as f32 * to_screen), px(region.height as f32 * to_screen)));
+                        if !tile.intersects(&bounds) {
+                            continue;
+                        }
+                        let which = Piece { key, pixels: wide, tile: (col, row) };
+                        if let Some(image) = piece(pages, page, which, region, None, window, cx) {
+                            pieces.push((tile, image));
+                        }
+                    }
+                }
+            }
+            shown.push((on_screen, pieces));
         }
-        Self { viewport, pages, quads: vec![] }
+        Self { viewport, pages: shown, quads: vec![] }
     }
 
     /// Mark a box (in the view before scrolling) over the pages.
@@ -322,9 +379,9 @@ pub fn cursor_color(select: bool, theme: &crate::theme::Theme, focused: bool) ->
 /// Paint the pages, on white (until they're drawn), and what's over them.
 pub fn paint(shown: &mut Shown, window: &mut Window) {
     window.with_content_mask(Some(ContentMask { bounds: shown.viewport.bounds }), |window| {
-        for (at, image) in &shown.pages {
+        for (at, pieces) in &shown.pages {
             window.paint_quad(fill(*at, gpui::white()));
-            if let Some(image) = image {
+            for (at, image) in pieces {
                 window.paint_image(*at, Corners::default(), image.clone(), 0, false).ok();
             }
         }
@@ -354,8 +411,23 @@ mod stacking {
     #[test]
     fn a_small_page_stays_small_and_a_narrow_view_still_shows_one() {
         let small = [Size { width: 16., height: 16. }];
-        assert_eq!(Stack::new(small, px(800.), Some(px(16.))).width, px(16.), "an icon isn't enlarged");
-        assert_eq!(Stack::new(small, px(800.), None).width, px(776.), "with no limit, it's as wide as the view");
-        assert_eq!(Stack::new(small, px(20.), None).width, px(100.), "and never too narrow to see");
+        let stack = |view, max| Stack::new(small, px(view), max, 1., px(0.));
+        assert_eq!(stack(800., Some(px(16.))).width, px(16.), "an icon isn't enlarged");
+        assert_eq!(stack(800., None).width, px(776.), "with no limit, it's as wide as the view");
+        assert_eq!(stack(20., None).width, px(100.), "and never too narrow to see");
+    }
+
+    #[test]
+    fn zoomed_in_pages_scroll_across_and_zoomed_out_ones_are_centered() {
+        let page = [Size { width: 100., height: 100. }];
+        let stack = |zoom, left| Stack::new(page, px(424.), None, zoom, px(left));
+        let fit = stack(1., 0.);
+        assert_eq!((fit.width, fit.left, fit.scroll_left), (px(400.), px(12.), px(0.)), "as wide as the view");
+        let small = stack(0.5, 50.);
+        assert_eq!((small.width, small.left, small.scroll_left), (px(200.), px(112.), px(0.)), "centered, with nothing to scroll");
+        let big = stack(2., 100.);
+        assert_eq!((big.width, big.left, big.scroll_left), (px(800.), px(-88.), px(100.)), "scrolled across");
+        assert_eq!(stack(2., 10_000.).scroll_left, px(400.), "no further than its right edge");
+        assert_eq!(stack(100., 0.).width, px(1600.), "zoomed only so far");
     }
 }

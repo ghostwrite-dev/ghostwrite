@@ -95,10 +95,11 @@ impl Element for PageView {
             let id = self.doc.map_or_else(|| editor.shown_pages(), |doc| editor.pages_of(doc))?;
             let tab = editor.project.tabs.by_id(id)?;
             let pages = tab.doc.rendered.as_ref()?.pages.clone()?;
-            let stack = Stack::new(pages.sizes(), bounds.size.width, pages.max_width().map(|width| px(width * theme.zoom)));
+            let scroll = &tab.view.pages;
+            let max_width = pages.max_width().map(|width| px(width * theme.zoom));
+            let stack = Stack::new(pages.sizes(), bounds.size.width, max_width, scroll.zoom, scroll.left);
             let buffer = &tab.doc.buffer;
             let (selection, text) = (tab.view.selection, buffer.text());
-            let scroll = &tab.view.pages;
             let cursor = selection.cursor(text);
 
             // Scroll to what was asked for. Only a tab showing its own text follows
@@ -138,7 +139,7 @@ impl Element for PageView {
             // The selection and the cursor.
             let mode = editor.modal.mode;
             let mut marks = vec![];
-            if !matches!(mode, Mode::Tree | Mode::Terminal) {
+            if !matches!(mode, Mode::Tree | Mode::Terminal) && !editor.reading() {
                 if selection.is_wide(text) {
                     marks.extend(pages.covering(selection.bytes()).into_iter().map(|place| (rect(&stack, place), theme.selection)));
                 }
@@ -152,10 +153,7 @@ impl Element for PageView {
 
         // The pages on screen, and their drawings when they're ready.
         let pixels = stack.pixels(window);
-        let mut shown = Shown::new(&stack, Viewport { bounds, scroll_top }, |page| {
-            let source = pages.clone();
-            pages::drawn(pages::Page { key: pages.key(page), of: (id, page), pixels }, move |pixels| source.draw(page, pixels), &mut *window, cx)
-        });
+        let mut shown = Shown::new(&stack, Viewport { bounds, scroll_top }, &pages, id, pixels, window, cx);
         for (r, color) in marks {
             shown.mark(r, color);
         }
@@ -165,7 +163,7 @@ impl Element for PageView {
         self.editor.update(cx, |editor, _| {
             let own = editor.tab().is_some_and(|active| active.doc.id == id);
             if let Some(tab) = editor.project.tabs.by_id_mut(id) {
-                (tab.view.pages.top, tab.view.pages.reveal) = (scroll_top, None);
+                (tab.view.pages.top, tab.view.pages.left, tab.view.pages.reveal) = (scroll_top, stack.scroll_left, None);
                 if own {
                     tab.view.autoscroll = None;
                 }
@@ -195,7 +193,8 @@ impl Element for PageView {
 }
 
 impl PageView {
-    /// A click puts the cursor on the text under it; the wheel scrolls.
+    /// A click puts the cursor on the text under it; the wheel scrolls, and with ⌘
+    /// (or Ctrl) held zooms, around the pointer.
     fn listen(&self, bounds: Bounds<Pixels>, state: &Prepainted, window: &mut Window) {
         let (stack, pages, viewport, line_height) = (state.stack.clone(), state.pages.clone(), state.shown.viewport, state.line_height);
         let (editor, focus, doc) = (self.editor.clone(), self.focus.clone(), self.doc);
@@ -213,6 +212,12 @@ impl PageView {
                 return;
             }
             let delta = event.delta.pixel_delta(line_height);
+            if event.modifiers.platform || event.modifiers.control {
+                let around = event.position - bounds.origin;
+                // Rolled away from you (as it scrolls up), it zooms in.
+                let by = (f32::from(delta.y) / 200.).exp();
+                return editor.update(cx, |editor, cx| editor.zoom_pages_by(doc, by, around, cx));
+            }
             editor.update(cx, |editor, cx| editor.scroll_pages(doc, delta, cx));
         });
     }

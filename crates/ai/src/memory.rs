@@ -40,6 +40,17 @@ pub fn recent(root: &Path, n: usize) -> Vec<Value> {
     entries[entries.len().saturating_sub(n)..].iter().filter_map(|l| serde_json::from_str(l).ok()).collect()
 }
 
+/// Start over (`:clear`): Claude's notes on the project and its log of recent
+/// requests are gone, so the next story is told nothing of the ones before.
+/// How many requests were logged.
+pub fn forget(root: &Path) -> usize {
+    let dir = store::project_dir(root);
+    let logged = store::lines(&format!("{dir}/interactions.jsonl")).len();
+    store::remove(&format!("{dir}/memory.md"));
+    store::remove(&format!("{dir}/interactions.jsonl"));
+    logged
+}
+
 /// The last request to Claude and its replies.
 pub fn save_transcript(text: &str) {
     store::write("last-reply.txt", text);

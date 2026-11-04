@@ -1,6 +1,6 @@
 //! Tree mode: keys drive the file tree.
 
-use super::{Effect, Key, Modal, Mode, Outcome, Pending, TreeCommand};
+use super::{Effect, Key, Modal, Outcome, Pending, TreeCommand};
 
 impl Modal {
     /// A key in tree mode. `:` and the keys under `space` work as in
@@ -46,7 +46,7 @@ impl Modal {
             (None, _) => return Outcome::Handled,
         };
         if command == TreeCommand::Leave {
-            self.mode = Mode::Normal;
+            self.leave_tree();
         }
         Outcome::Tree(command)
     }

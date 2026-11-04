@@ -9,6 +9,7 @@
 //! fill behind and on top of them. Paint just draws the result.
 
 use std::ops::Range as Bytes;
+use std::time::{Duration, Instant};
 
 use ghostwrite_core::syntax::SCOPES;
 use ghostwrite_core::{Mode, Range};
@@ -21,7 +22,7 @@ use gpui::{
 
 use gpui::{InteractiveElement as _, ParentElement as _};
 
-use super::tabs::{Autoscroll, Tab};
+use super::tabs::{Autoscroll, Motion, Tab};
 use super::{DocId, Editor, Measured};
 use crate::theme::{Theme, theme};
 
@@ -107,6 +108,7 @@ struct Snapshot {
     /// The keys are elsewhere (the pages beside it, the tree, the terminal),
     /// and the selection with them.
     elsewhere: bool,
+    motion: Motion,
 }
 
 impl Snapshot {
@@ -122,6 +124,7 @@ impl Snapshot {
             cursor,
             cursor_line: tab.doc.buffer.line_of(cursor),
             elsewhere: false,
+            motion: tab.view.motion.clone(),
         }
     }
 }
@@ -330,7 +333,7 @@ impl Element for CodeView {
             let editor = self.editor.read(cx);
             let mode = if self.other.is_some() { Mode::Normal } else { editor.modal.mode };
             let mut snap = Snapshot::take(self.shown(editor), mode);
-            snap.elsewhere = self.other.is_some() || matches!(editor.modal.mode, Mode::Tree | Mode::Terminal);
+            snap.elsewhere = self.other.is_some() || matches!(editor.modal.mode, Mode::Tree | Mode::Terminal) || editor.reading();
             snap
         };
         let focused = self.focus.is_focused(window) && !snap.elsewhere;
@@ -350,39 +353,73 @@ impl Element for CodeView {
             rows.iter().position(|r| snap.cursor - start < r.end).unwrap_or(rows.len() - 1)
         };
         let geometry = Geometry { line_height: metrics.line_height, rows: offsets, block: self.lay_out_block(sizes, window, cx), cursor_row };
-        let scroll_top = geometry.scroll(&snap, bounds.size.height);
+        let target = geometry.scroll(&snap, bounds.size.height);
+        let animate = crate::config::get().animations;
+        // Drawn on its way there, if the keys moved it far.
+        let (scroll_top, scroll_glide) = glide_scroll(&snap, target, bounds.size.height, metrics.line_height, animate);
         let (lines, gutter, marks) = self.shape_lines(&snap, &metrics, &geometry, &theme, bounds, gutter_bounds, scroll_top, cols, window, cx);
         // Lines wrap, so there's no scrolling sideways.
         let scroll_left = px(0.);
-        let (quads, cursor_bounds, cursor_glyph) = {
+        let flash = snap.motion.flash.clone().filter(|_| animate).and_then(|(range, since)| Some((range, 1. - progress(since, FLASH)?)));
+        let (quads, cursor_bounds, cursor_glyph, cursor_glide) = {
             let text = self.shown(self.editor.read(cx)).doc.text();
-            let mut quads = self.backgrounds(&snap, &lines, text, &theme, text_bounds, scroll_left, metrics.line_height, focused);
-            let (bounds, glyph) = cursor(&snap, &lines, text, &metrics, &theme, text_bounds.left() - scroll_left, focused, &mut quads, window);
-            (quads, bounds, glyph)
+            let mut quads = self.backgrounds(&snap, &lines, text, &theme, text_bounds, scroll_left, metrics.line_height, focused, flash.clone());
+            let mut cursor_quads = vec![];
+            let (cell, mut glyph) = cursor(&snap, &lines, text, &metrics, &theme, text_bounds.left() - scroll_left, focused, &mut cursor_quads, window);
+            // The cursor slides from where it was drawn, in the text (so it scrolls with it).
+            let in_text = |at: Point<Pixels>| point(at.x, at.y - bounds.top() + scroll_top);
+            let glide = cell.map(|cell| glide_cursor(&snap.motion, in_text(cell.origin), animate && snap.mode != Mode::Insert));
+            if let (Some(cell), Some((drawn, Some(_)))) = (cell, glide) {
+                let by = drawn - in_text(cell.origin);
+                cursor_quads.iter_mut().for_each(|quad| quad.bounds.origin += by);
+                // What's under it shows once it's there.
+                glyph = None;
+            }
+            quads.extend(cursor_quads);
+            (quads, cell, glyph, cell.zip(glide).map(|(cell, (_, glide))| (in_text(cell.origin), glide)))
         };
+        if scroll_glide.is_some() || cursor_glide.is_some_and(|(_, glide)| glide.is_some()) || flash.is_some() {
+            window.request_animation_frame();
+        }
 
+        let mut story_at = None;
         if let Some((line, element)) = &mut self.built {
             let line = geometry.line(*line);
             let rows = geometry.rows[line + 1] - geometry.rows[line];
             let y = bounds.top() + geometry.top(line) + metrics.line_height * rows as f32 - scroll_top;
             element.prepaint_at(point(text_bounds.left(), y), window, cx);
+            // The story's step: its last line and what folds out under it.
+            let height = geometry.block.map_or(px(0.), |(_, height)| height);
+            let top = y - metrics.line_height * rows as f32;
+            story_at = Some(Bounds::new(point(text_bounds.left(), top), gpui::size(text_bounds.size.width, metrics.line_height * rows as f32 + height)));
         }
 
         let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height)).floor() as usize;
-        let measured = Measured { rows, cursor: cursor_bounds, top_line: Some(geometry.first_below(scroll_top, snap.line_count)) };
+        let measured = Measured { rows, cursor: cursor_bounds, top_line: Some(geometry.first_below(target, snap.line_count)) };
         let other = self.other;
         self.editor.update(cx, |editor, _| {
             if other.is_none() {
                 editor.measured = measured;
+                if let (Some(rect), Some(mark), Some(doc)) = (story_at, editor.step_mark(), editor.tab().map(|tab| tab.doc.id)) {
+                    editor.seen(super::attention::Seen { mark, rect, scrolled: Some((doc, scroll_top, bounds)) }, window);
+                }
             }
             let tab = match other {
                 Some(doc) => editor.project.tabs.by_id_mut(doc),
                 None => editor.project.tabs.active_mut(),
             };
             if let Some(tab) = tab {
-                tab.view.scroll_top = scroll_top;
+                tab.view.scroll_top = target;
                 tab.view.scroll_left = scroll_left;
                 tab.view.autoscroll = None;
+                let motion = &mut tab.view.motion;
+                (motion.drawn_top, motion.scroll) = (scroll_top, scroll_glide);
+                if let Some((at, glide)) = cursor_glide {
+                    (motion.cursor, motion.cursor_glide) = (Some(at), glide);
+                }
+                if flash.is_none() {
+                    motion.flash = None;
+                }
             }
         });
         Prepainted { hitbox, lines, quads, cursor_glyph, gutter, marks, text_bounds, gutter_bounds, line_height: metrics.line_height, scroll_left }
@@ -527,6 +564,7 @@ impl CodeView {
         scroll_left: Pixels,
         line_height: Pixels,
         focused: bool,
+        flash: Option<(Bytes<usize>, f32)>,
     ) -> Vec<PaintQuad> {
         let origin_x = text_bounds.left() - scroll_left;
         let mut quads = vec![];
@@ -550,6 +588,10 @@ impl CodeView {
             if let Some(color) = deco.background {
                 span(&deco.range, color, &mut quads);
             }
+        }
+        // Just changed, fading.
+        if let Some((range, left)) = flash {
+            span(&(range.start.min(text.len())..range.end.min(text.len())), theme.accent.opacity(0.28 * left), &mut quads);
         }
         let selected = if snap.mode == Mode::Insert { !snap.selection.is_empty() } else { snap.selection.is_wide(text) };
         if selected && !snap.elsewhere {
@@ -672,6 +714,57 @@ fn cursor(
         (shaped, cell.origin)
     });
     (Some(cell), glyph)
+}
+
+/// How long the view glides to where the keys scrolled it, the cursor to where
+/// it went, and changed lines take to fade.
+const SCROLL_GLIDE: Duration = Duration::from_millis(160);
+const CURSOR_GLIDE: Duration = Duration::from_millis(80);
+const FLASH: Duration = Duration::from_millis(900);
+
+/// How far along something started `since` and taking `over` is, if it's still under way.
+fn progress(since: Instant, over: Duration) -> Option<f32> {
+    let done = since.elapsed().as_secs_f32() / over.as_secs_f32();
+    (done < 1.).then_some(done)
+}
+
+/// Quick at first, settling at the end.
+fn ease_out(done: f32) -> f32 {
+    1. - (1. - done).powi(3)
+}
+
+type Glide<T> = Option<(T, T, Instant)>;
+
+/// Where the text is drawn scrolled to on its way to `target`, and the glide
+/// still under way. The keys moving it more than a couple of lines glide it
+/// there from where it's drawn (from a screen away at most: further, the rest
+/// is a jump); the wheel and the trackpad move it straight there.
+fn glide_scroll(snap: &Snapshot, target: Pixels, view_height: Pixels, line_height: Pixels, animate: bool) -> (Pixels, Glide<Pixels>) {
+    let mut glide = snap.motion.scroll.filter(|(_, to, _)| *to == target);
+    if snap.autoscroll.is_some() && target != snap.scroll_top {
+        let from = snap.motion.drawn_top.clamp(target - view_height, target + view_height);
+        glide = (animate && (target - from).abs() > line_height * 2.).then(|| (from, target, Instant::now()));
+    }
+    match glide.and_then(|(from, to, since)| Some((from, to, since, progress(since, SCROLL_GLIDE)?))) {
+        Some((from, to, since, done)) => (from + (to - from) * ease_out(done), Some((from, to, since))),
+        None => (target, None),
+    }
+}
+
+/// Where the cursor is drawn on its way to `to` (in the text), and the glide still under way.
+fn glide_cursor(motion: &Motion, to: Point<Pixels>, animate: bool) -> (Point<Pixels>, Glide<Point<Pixels>>) {
+    let at = |(from, to, since): (Point<Pixels>, Point<Pixels>, Instant)| {
+        progress(since, CURSOR_GLIDE).map(|done| point(from.x + (to.x - from.x) * ease_out(done), from.y + (to.y - from.y) * ease_out(done)))
+    };
+    let mut glide = motion.cursor_glide.filter(|(_, end, _)| *end == to);
+    if let Some(was) = motion.cursor.filter(|was| *was != to) {
+        let from = motion.cursor_glide.and_then(at).unwrap_or(was);
+        glide = animate.then(|| (from, to, Instant::now()));
+    }
+    match glide.and_then(|glide| Some((at(glide)?, glide))) {
+        Some((drawn, glide)) => (drawn, Some(glide)),
+        None => (to, None),
+    }
 }
 
 /// `text` cut into rows of at most `cols` columns, tabs counted from each row's start.
@@ -809,8 +902,8 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Autoscroll, Geometry, Mode, Range, Snapshot, expand_tabs};
-    use gpui::px;
+    use super::{Autoscroll, Geometry, Mode, Motion, Range, Snapshot, expand_tabs, glide_cursor, glide_scroll};
+    use gpui::{Pixels, point, px};
 
     #[test]
     fn wide_characters_wrap_at_two_columns_each() {
@@ -825,6 +918,50 @@ mod tests {
         let (shown, map) = expand_tabs("\tx\ty");
         assert_eq!(shown, "    x   y");
         assert_eq!(map.unwrap(), [0, 4, 5, 8, 9]);
+    }
+
+    fn at(top: Pixels, autoscroll: Option<Autoscroll>, motion: Motion) -> Snapshot {
+        Snapshot {
+            mode: Mode::Normal,
+            line_count: 100,
+            selection: Range::point(0),
+            others: vec![],
+            autoscroll,
+            scroll_top: top,
+            cursor: 0,
+            cursor_line: 0,
+            elsewhere: false,
+            motion,
+        }
+    }
+
+    #[test]
+    fn the_keys_scrolling_far_glide_there_and_the_wheel_doesnt() {
+        let (line, view) = (px(20.), px(200.));
+        // `ctrl-d`: half a screen down, from the top.
+        let (drawn, glide) = glide_scroll(&at(px(0.), Some(Autoscroll::Fit), Motion::default()), px(100.), view, line, true);
+        assert!(glide.is_some() && drawn < px(100.), "on its way: {drawn:?}");
+        // The next frame keeps going to the same place.
+        let motion = Motion { drawn_top: drawn, scroll: glide, ..Motion::default() };
+        assert_eq!(glide_scroll(&at(px(100.), None, motion.clone()), px(100.), view, line, true).1, glide);
+        // The wheel scrolls somewhere else meanwhile: straight there.
+        assert_eq!(glide_scroll(&at(px(140.), None, motion), px(140.), view, line, true), (px(140.), None));
+        // A line or two (`j` at the edge) isn't worth gliding; nor anything with animations off.
+        assert_eq!(glide_scroll(&at(px(0.), Some(Autoscroll::Fit), Motion::default()), px(20.), view, line, true), (px(20.), None));
+        assert_eq!(glide_scroll(&at(px(0.), Some(Autoscroll::Fit), Motion::default()), px(100.), view, line, false), (px(100.), None));
+        // From far away (`ge` in a long file), only the last screen of the way is seen.
+        let (drawn, glide) = glide_scroll(&at(px(0.), Some(Autoscroll::Fit), Motion::default()), px(5000.), view, line, true);
+        assert!(drawn >= px(4800.) && glide.is_some_and(|(from, ..)| from == px(4800.)), "{drawn:?}");
+    }
+
+    #[test]
+    fn the_cursor_slides_from_where_it_was_drawn() {
+        let (was, to) = (point(px(0.), px(0.)), point(px(80.), px(40.)));
+        let (drawn, glide) = glide_cursor(&Motion { cursor: Some(was), ..Motion::default() }, to, true);
+        assert!(glide.is_some() && drawn != to, "on its way");
+        assert_eq!(glide_cursor(&Motion { cursor: Some(to), ..Motion::default() }, to, true), (to, None), "not moving");
+        assert_eq!(glide_cursor(&Motion { cursor: Some(was), ..Motion::default() }, to, false), (to, None), "animations off");
+        assert_eq!(glide_cursor(&Motion::default(), to, true), (to, None), "nowhere to come from");
     }
 
     #[test]
@@ -849,6 +986,7 @@ mod tests {
             cursor: 0,
             cursor_line: 0,
             elsewhere: false,
+            motion: Motion::default(),
         };
         let top = g.scroll(&snap(px(0.)), px(200.));
         assert!(top <= px(1000.) && top + px(200.) >= px(1020.), "row 50 is in view: {top:?}");

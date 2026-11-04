@@ -30,7 +30,9 @@ pub mod models;
 pub mod placement;
 pub mod protocol;
 pub mod story;
+pub mod timing;
 pub mod tools;
+pub mod web;
 
 pub use backend::Backend;
 pub use context::{Interaction, Request, Role, Surroundings};

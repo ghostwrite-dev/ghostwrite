@@ -123,7 +123,7 @@ impl Editor {
             return;
         }
         let Some(tab) = self.tab() else { return };
-        let word = ghostwrite_core::textobject::text_object(&tab.doc.buffer, Range::point(tab.cursor()), 'w', false)
+        let word = ghostwrite_core::textobject::text_object(&tab.doc.buffer, Range::point(tab.cursor()), 'w', false, 1)
             .map(|r| tab.doc.text()[r.bytes()].to_string())
             .unwrap_or_default();
         self.open_prompt(PromptKind::Rename, &word, window, cx);

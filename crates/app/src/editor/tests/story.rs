@@ -133,6 +133,38 @@ fn a_story_can_rename_and_remove_files(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_story_asked_from_an_empty_tab_can_create_a_file(cx: &mut TestAppContext) {
+    let create = "<create>\nposts/new.typ\n</create>\n<say>\nA new post.\n</say>\n<new>\n#set document(title: \"New\")\n\n</new>\n";
+    let mut t = open("", &[create, DONE], cx);
+    t.command("n");
+    t.ask("make a new post");
+    t.keys("tab");
+    assert_eq!(t.file("posts/new.typ"), "#set document(title: \"New\")\n\n", "Tab creates it and writes its first lines");
+    assert_eq!(t.status().as_deref(), Some("applied 1 of 1 steps"), "and the story goes on");
+}
+
+#[gpui::test]
+fn a_story_asked_from_an_empty_tab_can_edit_another_file(cx: &mut TestAppContext) {
+    let mut t = open("", &[&edit("other.txt", "old", "new"), DONE], cx);
+    std::fs::write(t.dir.join("other.txt"), "old\n").unwrap();
+    t.command("n");
+    t.ask("change the other file");
+    assert_eq!(t.active().as_deref(), Some("other.txt"), "it opens where the item is");
+    t.keys("tab");
+    assert_eq!(t.file("other.txt"), "new\n");
+    assert_eq!(t.status().as_deref(), Some("applied 1 of 1 steps"));
+}
+
+#[gpui::test]
+fn a_story_ends_if_the_tab_it_was_asked_from_closes(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&fix(), DONE], cx);
+    t.ask("implement it");
+    t.command("bc");
+    t.keys("tab");
+    assert!(!t.reviewing(), "Tab doesn't sit on an item it can't find");
+}
+
+#[gpui::test]
 fn a_story_can_create_a_file(cx: &mut TestAppContext) {
     let create = "<create>\nsrc/util.rs\n</create>\n<say>\nA home for helpers.\n</say>\n<new>\npub fn one() -> u32 { 1 }\n</new>\n";
     let mut t = open("fn main() {}\n", &[create, &edit("doc.txt", "fn main() {}", "mod util;\nfn main() {}"), DONE], cx);
@@ -503,62 +535,250 @@ fn replacing_with_a_bang_takes_them_all(cx: &mut TestAppContext) {
     assert_eq!(t.text(), "old one\nold two\n", "and they're taken back the same way");
 }
 
-fn lit(t: &mut Setup) -> Option<crate::editor::attention::Panel> {
-    t.read(|e| e.attention.lit.map(|(panel, _)| panel))
+/// Draw, and draw again: what a frame shows of the story is where the next one's light goes.
+fn draw(t: &mut Setup) {
+    for _ in 0..2 {
+        t.cx.update(|window, _| window.refresh());
+        t.cx.run_until_parked();
+    }
+}
+
+/// How many times the light has jumped, and where to, last.
+fn jumped(t: &mut Setup) -> (u64, Option<gpui::Bounds<gpui::Pixels>>) {
+    t.read(|e| (e.attention.jumps, e.attention.jump.map(|jump| jump.to)))
 }
 
 #[gpui::test]
-fn a_panel_lights_up_when_a_story_moves_to_it(cx: &mut TestAppContext) {
-    use crate::editor::attention::Panel;
+fn the_eye_is_led_to_each_step_wherever_it_is(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let run = "<run>\necho hi\n</run>\n<say>\nCheck.\n</say>\n";
     let create = "<create>\nnew.txt\n</create>\n<say>\nA new file.\n</say>\n<new>\nhello\n</new>\n";
     let other = edit("other.txt", "old", "new");
     let mut t = open(ADD, &[&fix(), &other, create, run, DONE], cx);
+    t.cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(900.)));
     std::fs::write(t.dir.join("other.txt"), "old\n").unwrap();
-    t.ask("go on");
-    assert_eq!(lit(&mut t), None, "where you were looking already: nothing");
+    t.keys("space a");
+    draw(&mut t);
+    t.input("go on").keys("enter");
+    draw(&mut t);
+    let (first, _) = jumped(&mut t);
+    assert!(first >= 1, "from the prompt to the first step");
 
-    t.keys("tab");
-    assert_eq!(lit(&mut t), Some(Panel::Code), "another file");
-    let draw = |t: &mut Setup| {
-        t.cx.update(|window, _| window.refresh());
-        t.cx.run_until_parked();
+    let inside = |t: &mut Setup, name: &'static str| {
+        let (_, to) = jumped(t);
+        let to = to.expect("it's on its way");
+        let area = t.cx.debug_bounds(name).unwrap_or_else(|| panic!("{name} isn't drawn"));
+        assert!(area.contains(&to.center()), "to {name}: {to:?} in {area:?}");
     };
-    draw(&mut t);
-    assert!(t.cx.debug_bounds("attention-code").is_some(), "and it's drawn");
-
     t.keys("tab");
-    assert_eq!(lit(&mut t), Some(Panel::Tree), "a new file is proposed in the tree");
     draw(&mut t);
-    assert!(t.cx.debug_bounds("attention-tree").is_some());
+    assert!(jumped(&mut t).0 > first, "to the next step, in another file");
+    inside(&mut t, "code-view");
+
+    let before = jumped(&mut t).0;
+    t.keys("tab");
+    draw(&mut t);
+    assert!(jumped(&mut t).0 > before, "a new file is proposed in the tree");
+    inside(&mut t, "tree-pane");
     assert_eq!(t.read(|e| e.modal.mode), Mode::Ai, "the keys stay with the story");
 
+    let before = jumped(&mut t).0;
     t.keys("tab");
-    t.keys("tab");
-    assert_eq!(lit(&mut t), Some(Panel::Terminal), "the command runs there, and the keys go too");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Terminal);
     draw(&mut t);
-    assert!(t.cx.debug_bounds("attention-terminal").is_some());
+    assert!(jumped(&mut t).0 > before, "the command waits in the terminal");
+    inside(&mut t, "terminal-screen");
 }
 
 #[gpui::test]
-fn it_starts_over_each_time(cx: &mut TestAppContext) {
-    let (first, second) = (edit("a.txt", "old", "new"), edit("b.txt", "old", "new"));
-    let mut t = open(ADD, &[&first, &second, DONE], cx);
-    std::fs::write(t.dir.join("a.txt"), "old\n").unwrap();
-    std::fs::write(t.dir.join("b.txt"), "old\n").unwrap();
-    t.ask("go on");
-    let times = |t: &mut Setup| t.read(|e| e.attention.lit.map(|(_, times)| times));
-    let once = times(&mut t);
-    t.keys("tab");
-    assert!(times(&mut t) > once, "another file again, so a new animation");
-}
-
-#[gpui::test]
-fn the_same_file_doesnt_light_up(cx: &mut TestAppContext) {
+fn thinking_isnt_on_a_line_but_in_the_corner(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), &hints(), DONE], cx);
-    t.ask("implement it").keys("tab");
+    t.cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(900.)));
+    t.ask("implement it");
+    draw(&mut t);
+    assert_eq!(t.read(|e| e.story_mark()), Some(crate::editor::attention::Mark::Item(0)), "a step's up: nothing's thinking");
+    let before = jumped(&mut t).0;
+    // Said something: the model's writing the next step, and nothing's shown of it yet.
+    t.editor.update(t.cx, |e, _| e.story.as_mut().unwrap().story.as_mut().unwrap().follow_up("more".into()));
+    draw(&mut t);
+    let corner = t.cx.debug_bounds("story-thinking").expect("thinking, in the corner");
+    let code = t.cx.debug_bounds("code-view").unwrap();
+    assert!(corner.right() > code.center().x && corner.top() < code.top() + gpui::px(40.), "top right: {corner:?} of {code:?}");
+    assert_eq!(jumped(&mut t).0, before, "it isn't somewhere to look: no light goes there");
+    let editor = t.editor.clone();
+    let block = t.cx.update(|_, cx| {
+        let theme = crate::theme::theme(cx).clone();
+        let e = editor.read(cx);
+        e.story.as_ref().unwrap().overlay(&e.project, e.tab().unwrap(), None, &theme).1.is_some()
+    });
+    assert!(!block, "and not under any line");
+}
+
+#[gpui::test]
+fn the_next_step_in_the_same_file_is_jumped_to_as_well(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&fix(), &hints(), DONE], cx);
+    t.ask("implement it");
+    draw(&mut t);
+    let before = jumped(&mut t).0;
+    t.keys("tab");
+    draw(&mut t);
     assert_eq!(t.current(), Some(1));
-    assert_eq!(lit(&mut t), None, "the eye is already there");
+    assert!(jumped(&mut t).0 > before, "another step, even in the same file");
+}
+
+#[gpui::test]
+fn looking_around_while_it_thinks_isnt_interrupted_and_tab_comes_back(cx: &mut TestAppContext) {
+    use crate::editor::attention::Mark;
+    let other = edit("other.txt", "old", "new");
+    let mut t = open(ADD, &[&fix(), &other, DONE], cx);
+    std::fs::write(t.dir.join("other.txt"), "old\n").unwrap();
+    t.ask("go on");
+    assert_eq!(t.current(), Some(0));
+    // The model's writing the next step, and meanwhile you look around.
+    t.editor.update(t.cx, |e, _| e.story.as_mut().unwrap().story.as_mut().unwrap().follow_up("and the other file".into()));
+    t.keys("k");
+    let looking = (t.active(), t.cursor());
+    // It arrives, in another file.
+    let editor = t.editor.clone();
+    t.cx.update(|_, cx| {
+        editor.update(cx, |e, cx| {
+            let story = e.story.as_mut().unwrap().story.as_mut().unwrap();
+            story.push_text(&other);
+            story.finished_writing();
+            e.settle_story(cx);
+        })
+    });
+    t.cx.run_until_parked();
+    assert_eq!((t.active(), t.cursor()), looking, "you stay where you were");
+    assert!(matches!(t.read(|e| e.story_mark()), Some(Mark::Ready(_))), "it waits, in the corner");
+
+    t.keys("tab");
+    assert_eq!(t.active().as_deref(), Some("other.txt"), "the first Tab takes you to it");
+    assert_eq!(t.file("other.txt"), "old\n", "and accepts nothing");
+    t.keys("tab");
+    assert_eq!(t.file("other.txt"), "new\n", "the next one accepts it");
+}
+
+#[gpui::test]
+fn having_looked_away_from_a_step_tab_comes_back_to_it_first(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&fix(), DONE], cx);
+    t.ask("implement it");
+    let at = t.cursor();
+    t.keys("k");
+    assert_ne!(t.cursor(), at, "free to move");
+    t.keys("tab");
+    assert_eq!(t.text(), ADD, "the first Tab doesn't accept");
+    assert_eq!(t.cursor(), at, "it comes back to the step");
+    t.keys("tab");
+    assert_eq!(t.text(), "def add(a, b):\n    return a + b\n", "the next one does");
+}
+
+#[gpui::test]
+fn files_can_be_opened_while_a_story_is_up(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&fix(), DONE], cx);
+    t.ask("implement it");
+    t.keys("space f");
+    assert!(t.read(|e| e.picker.is_some()), "space f opens the file picker in AI mode too");
+}
+
+#[gpui::test]
+fn the_tree_can_be_used_while_a_story_is_up(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&fix(), DONE], cx);
+    std::fs::write(t.dir.join("notes.txt"), "elsewhere\n").unwrap();
+    t.editor.update(t.cx, |e, _| e.project.tree.refresh());
+    t.ask("implement it");
+    let at = t.cursor();
+    t.keys("space e");
+    assert_eq!(t.read(|e| e.modal.mode), Mode::Tree, "space e goes to the tree");
+    let row = t.read(|e| e.project.tree.rows().iter().position(|r| r.name == "notes.txt")).expect("in the tree");
+    t.editor.update(t.cx, |e, _| e.project.tree.move_to(row));
+    t.keys("enter");
+    assert_eq!(t.active().as_deref(), Some("notes.txt"), "and opens a file from there");
+    assert_eq!(t.read(|e| e.modal.mode), Mode::Ai, "back in the story");
+    t.keys("tab");
+    assert_eq!((t.active().as_deref(), t.cursor()), (Some("doc.txt"), at), "Tab comes back to the step");
+    assert_eq!(t.text(), ADD);
+    t.keys("tab");
+    assert_eq!(t.text(), "def add(a, b):\n    return a + b\n");
+}
+
+#[gpui::test]
+fn esc_out_of_the_tree_goes_back_to_the_story(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&fix(), DONE], cx);
+    t.ask("implement it");
+    t.keys("space e escape");
+    assert_eq!(t.read(|e| e.modal.mode), Mode::Ai);
+    assert!(t.reviewing());
+}
+
+#[gpui::test]
+fn with_nothing_open_space_a_still_asks(cx: &mut TestAppContext) {
+    let create = "<create>\nnotes.md\n</create>\n<say>\nA place for them.\n</say>\n<new>\n# Notes\n</new>\n";
+    let mut t = open("", &[create, DONE], cx);
+    t.command("bc");
+    assert!(t.read(|e| e.tab().is_none()), "nothing's open");
+    t.ask("start a notes file");
+    assert!(t.reviewing(), "it's asked");
+    t.keys("tab");
+    assert_eq!(t.file("notes.md"), "# Notes\n");
+}
+
+#[gpui::test]
+fn waiting_for_the_model_is_timed(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&fix(), &hints(), DONE], cx);
+    t.ask("implement it");
+    assert!(t.read(|e| e.story.as_ref().unwrap().timer.is_none()), "the first step shown ends the wait");
+    t.keys("tab");
+    assert!(t.read(|e| e.story.as_ref().unwrap().timer.is_none()), "and the next one, asked ahead");
+    t.command("timings");
+    let said = t.status().unwrap_or_default();
+    assert!(said.contains("ask (") && said.contains("next step ("), "{said}");
+}
+
+#[gpui::test]
+fn an_accepted_step_lights_up_what_it_changed(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&fix(), DONE], cx);
+    t.ask("implement it").keys("tab");
+    let flash = t.read(|e| e.tab().unwrap().view.motion.flash.clone().map(|(range, _)| range));
+    let text = t.text();
+    assert_eq!(flash.map(|range| text[range].to_string()).as_deref(), Some("    return a + b\n"));
+}
+
+#[gpui::test]
+fn reading_outside_the_project_waits_for_tab_or_enter(cx: &mut TestAppContext) {
+    let mut t = open(ADD, &[&fix(), &hints(), DONE], cx);
+    t.ask("implement it");
+    let ask = |t: &mut Setup| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        t.editor.update(t.cx, |e, _| e.story.as_mut().unwrap().asking_to_read = Some(("/etc/hosts".into(), tx)));
+        rx
+    };
+    let answered = ask(&mut t);
+    t.keys("tab");
+    assert_eq!(answered.try_recv(), Ok(true), "Tab lets it");
+    assert_eq!(t.text(), ADD, "and accepts nothing");
+    let answered = ask(&mut t);
+    t.keys("enter");
+    assert_eq!(answered.try_recv(), Ok(false), "Enter doesn't");
+    assert!(!t.read(|e| e.asking()), "and opens no prompt");
+    let answered = ask(&mut t);
+    t.keys("escape escape");
+    assert!(!t.reviewing());
+    assert_eq!(answered.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected), "ending the story is no answer: no");
+}
+
+#[gpui::test]
+fn clear_starts_over_with_nothing_remembered(cx: &mut TestAppContext) {
+    let done = "<done>\n<memory>\nThe user is learning Python.\n</memory>\n</done>\n";
+    let mut t = open(ADD, &[&note("doc.txt", "def add(a, b):", "It adds."), done, &fix()], cx);
+    t.ask("what is this").keys("tab");
+    assert!(!ghostwrite_ai::memory::notes(&t.dir).is_empty() && !ghostwrite_ai::memory::recent(&t.dir, 5).is_empty());
+    t.ask("and now");
+    t.command("clear");
+    assert!(!t.reviewing(), "the story up ends");
+    assert_eq!(ghostwrite_ai::memory::notes(&t.dir), "", "Claude's notes are gone");
+    assert!(ghostwrite_ai::memory::recent(&t.dir, 5).is_empty(), "and the earlier requests");
+    assert!(t.status().is_some_and(|s| s.starts_with("starting over")), "{:?}", t.status());
+    t.ask("again");
+    let prompt = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap().prompt());
+    assert!(!prompt.contains("what is this") && !prompt.contains("learning Python"), "the next story is told nothing of them");
 }

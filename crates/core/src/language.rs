@@ -40,10 +40,18 @@ pub struct Language {
     pub abbreviations: Option<&'static Abbreviations>,
     /// Quotes that don't close themselves here (a name quoted with `` ` ``, say).
     pub unpaired: &'static [char],
+    /// Pairs that close themselves here besides brackets and quotes (`$`…`$` for maths, say).
+    pub pairs: &'static [(char, char)],
     /// What starts a line comment (`ctrl-c`), if there's such a thing.
     pub comment: Option<&'static str>,
     /// What a line ends with when the next one goes in a level (Python's `:`).
     pub indent_after: &'static [char],
+    /// Its grammar, for selecting by the syntax tree (`alt-o`, `maf`): see
+    /// [`nodes`](crate::nodes). `None` where it's highlighted another way.
+    pub grammar: Option<fn() -> tree_sitter::Language>,
+    /// Its text objects (`maf`, `]f`): a query capturing `function.around`,
+    /// `parameter.inside` and the like, as helix names them.
+    pub textobjects: &'static str,
 }
 
 /// Languages plugins added.
@@ -63,8 +71,11 @@ impl Language {
         pages_at_own_size: false,
         abbreviations: None,
         unpaired: &[],
+        pairs: &[],
         comment: None,
         indent_after: &['{', '[', '('],
+        grammar: None,
+        textobjects: "",
     };
 
     /// The language of `path`, by its name or extension.
@@ -93,6 +104,17 @@ impl Language {
     pub fn id(&self) -> &'static str {
         if self.id.is_empty() { self.name } else { self.id }
     }
+
+    /// The line comment `line` starts with (after its indent), as written
+    /// there: the token, or a doc comment's longer one (`///`, `//!`).
+    pub fn comment_leader<'a>(&self, line: &'a str) -> Option<&'a str> {
+        let token = self.comment?;
+        let rest = line.trim_start_matches([' ', '\t']);
+        let after = rest.strip_prefix(token)?;
+        let last = token.chars().next_back()?;
+        let longer = token.len() > 1 && after.starts_with([last, '!']);
+        Some(&rest[..token.len() + longer as usize])
+    }
 }
 
 impl std::fmt::Debug for Language {
@@ -112,6 +134,8 @@ pub static LANGUAGES: [Language; 15] = [
         // `'a`: a lifetime, or a char that's closed by hand.
         unpaired: &['\''],
         load: || highlights("rust", tree_sitter_rust::LANGUAGE, tree_sitter_rust::HIGHLIGHTS_QUERY),
+        grammar: Some(|| tree_sitter_rust::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/rust.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -121,6 +145,8 @@ pub static LANGUAGES: [Language; 15] = [
         servers: &["basedpyright", "pyright", "pylsp"],
         indent_after: &['{', '[', '(', ':'],
         load: || highlights("python", tree_sitter_python::LANGUAGE, tree_sitter_python::HIGHLIGHTS_QUERY),
+        grammar: Some(|| tree_sitter_python::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/python.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -129,6 +155,8 @@ pub static LANGUAGES: [Language; 15] = [
         extensions: &["js", "mjs", "cjs"],
         servers: TYPESCRIPT_SERVERS,
         load: || highlights("javascript", tree_sitter_javascript::LANGUAGE, tree_sitter_javascript::HIGHLIGHT_QUERY),
+        grammar: Some(|| tree_sitter_javascript::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/javascript.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -141,6 +169,8 @@ pub static LANGUAGES: [Language; 15] = [
             let query = [tree_sitter_javascript::JSX_HIGHLIGHT_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY].join("\n");
             highlights("jsx", tree_sitter_javascript::LANGUAGE, &query)
         },
+        grammar: Some(|| tree_sitter_javascript::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/jsx.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -152,6 +182,8 @@ pub static LANGUAGES: [Language; 15] = [
             let query = [tree_sitter_typescript::HIGHLIGHTS_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY].join("\n");
             highlights("typescript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT, &query)
         },
+        grammar: Some(|| tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        textobjects: include_str!("../queries/textobjects/typescript.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -165,6 +197,8 @@ pub static LANGUAGES: [Language; 15] = [
                 [tree_sitter_typescript::HIGHLIGHTS_QUERY, tree_sitter_javascript::JSX_HIGHLIGHT_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY].join("\n");
             highlights("tsx", tree_sitter_typescript::LANGUAGE_TSX, &query)
         },
+        grammar: Some(|| tree_sitter_typescript::LANGUAGE_TSX.into()),
+        textobjects: include_str!("../queries/textobjects/tsx.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -174,6 +208,8 @@ pub static LANGUAGES: [Language; 15] = [
         extensions: &["sh", "bash", "zsh"],
         file_names: &[".bashrc", ".zshrc", ".profile"],
         load: || highlights("bash", tree_sitter_bash::LANGUAGE, tree_sitter_bash::HIGHLIGHT_QUERY),
+        grammar: Some(|| tree_sitter_bash::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/bash.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -182,6 +218,8 @@ pub static LANGUAGES: [Language; 15] = [
         extensions: &["toml"],
         file_names: &["Cargo.lock"],
         load: || highlights("toml", tree_sitter_toml_ng::LANGUAGE, tree_sitter_toml_ng::HIGHLIGHTS_QUERY),
+        grammar: Some(|| tree_sitter_toml_ng::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/toml.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -195,12 +233,15 @@ pub static LANGUAGES: [Language; 15] = [
             );
             with_injections("markdown", tree_sitter_md::LANGUAGE, tree_sitter_md::HIGHLIGHT_QUERY_BLOCK, &injections)
         },
+        grammar: Some(|| tree_sitter_md::LANGUAGE.into()),
         ..Language::DEFAULT
     },
     Language {
         name: "json",
         extensions: &["json"],
         load: || highlights("json", tree_sitter_json::LANGUAGE, tree_sitter_json::HIGHLIGHTS_QUERY),
+        grammar: Some(|| tree_sitter_json::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/json.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -208,6 +249,8 @@ pub static LANGUAGES: [Language; 15] = [
         comment: Some("#"),
         extensions: &["yaml", "yml"],
         load: || highlights("yaml", tree_sitter_yaml::LANGUAGE, tree_sitter_yaml::HIGHLIGHTS_QUERY),
+        grammar: Some(|| tree_sitter_yaml::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/yaml.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -216,6 +259,8 @@ pub static LANGUAGES: [Language; 15] = [
         extensions: &["go"],
         servers: &["gopls"],
         load: || highlights("go", tree_sitter_go::LANGUAGE, tree_sitter_go::HIGHLIGHTS_QUERY),
+        grammar: Some(|| tree_sitter_go::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/go.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -224,6 +269,8 @@ pub static LANGUAGES: [Language; 15] = [
         extensions: &["c", "h"],
         servers: &["clangd"],
         load: || highlights("c", tree_sitter_c::LANGUAGE, tree_sitter_c::HIGHLIGHT_QUERY),
+        grammar: Some(|| tree_sitter_c::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/c.scm"),
         ..Language::DEFAULT
     },
     Language {
@@ -235,12 +282,16 @@ pub static LANGUAGES: [Language; 15] = [
             let query = [tree_sitter_cpp::HIGHLIGHT_QUERY, tree_sitter_c::HIGHLIGHT_QUERY].join("\n");
             highlights("cpp", tree_sitter_cpp::LANGUAGE, &query)
         },
+        grammar: Some(|| tree_sitter_cpp::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/cpp.scm"),
         ..Language::DEFAULT
     },
     Language {
         name: "css",
         extensions: &["css"],
         load: || highlights("css", tree_sitter_css::LANGUAGE, tree_sitter_css::HIGHLIGHTS_QUERY),
+        grammar: Some(|| tree_sitter_css::LANGUAGE.into()),
+        textobjects: include_str!("../queries/textobjects/css.scm"),
         ..Language::DEFAULT
     },
 ];
@@ -256,5 +307,16 @@ mod tests {
         assert_eq!(id("App.tsx"), Some("typescriptreact"));
         assert_eq!(id("Cargo.lock"), Some("toml"));
         assert_eq!(id("notes.txt"), None);
+    }
+
+    #[test]
+    fn comment_leaders_are_as_written() {
+        let rust = Language::for_path(Path::new("a.rs")).unwrap();
+        assert_eq!(rust.comment_leader("    // x"), Some("//"));
+        assert_eq!(rust.comment_leader("/// docs"), Some("///"));
+        assert_eq!(rust.comment_leader("//! crate"), Some("//!"));
+        assert_eq!(rust.comment_leader("let x; // y"), None);
+        let python = Language::for_path(Path::new("a.py")).unwrap();
+        assert_eq!(python.comment_leader("## x"), Some("#"));
     }
 }

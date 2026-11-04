@@ -61,7 +61,7 @@ fn same_pages(wasm: &Arc<dyn Pages>, native: &Arc<dyn Pages>, text: &str) {
                 assert_eq!(wasm.at(page, x, y), native.at(page, x, y), "a click at {x}, {y} on page {page}");
             }
         }
-        let (mine, theirs) = (wasm.draw(page, 800).expect("it's drawn"), native.draw(page, 800).expect("it's drawn"));
+        let (mine, theirs) = (wasm.draw_at(page, 800).expect("it's drawn"), native.draw_at(page, 800).expect("it's drawn"));
         assert_eq!((mine.width, mine.height), (theirs.width, theirs.height));
         assert!(mine.bgra == theirs.bgra, "page {page} is drawn the same, pixel for pixel");
     }
@@ -124,9 +124,9 @@ fn pages_on_screen_can_still_be_drawn_after_the_next_ones_are_made() {
     let mut wasm = plugin().unwrap().renderer(&root, &path).unwrap();
     let old = wasm.render("#set page(width: 100pt, height: 100pt)\nOld").unwrap();
     wasm.render("#set page(width: 100pt, height: 100pt)\nNew").unwrap();
-    assert!(old.draw(0, 200).is_some(), "it's on screen until the new ones replace it");
+    assert!(old.draw_at(0, 200).is_some(), "it's on screen until the new ones replace it");
     wasm.render("#set page(width: 100pt, height: 100pt)\nNewer").unwrap();
-    assert!(old.draw(0, 200).is_none(), "older than that it's let go, and asking is harmless");
+    assert!(old.draw_at(0, 200).is_none(), "older than that it's let go, and asking is harmless");
 }
 
 #[test]
@@ -225,18 +225,29 @@ fn on_a_real_document() {
         let drawing: Vec<f64> = (0..pages.sizes().len().min(6))
             .map(|page| {
                 let from = Instant::now();
-                pages.draw(page, 1600).expect("drawn");
+                pages.draw_at(page, 1600).expect("drawn");
                 ms(from)
             })
             .collect();
         println!("{name:>7} a page drawn: {:6.1} ms median, {:.1} ms worst", median(drawing.clone()), drawing.iter().copied().fold(0., f64::max));
+        // Zoomed in four times: a tile, as the editor draws one.
+        let size = pages.sizes()[0];
+        let region = ghostwrite_page::Region { x: 1024, y: 1024, width: 1024, height: 1024, ..ghostwrite_page::Region::whole(size, 6400) };
+        let tiles: Vec<f64> = (0..5)
+            .map(|_| {
+                let from = Instant::now();
+                pages.draw(0, region).expect("drawn");
+                ms(from)
+            })
+            .collect();
+        println!("{name:>7} a tile at 4x: {:6.1} ms median", median(tiles));
     }
     let final_text = typed(15);
     let (mine, theirs) = (wasm.render(&final_text).unwrap(), native.render(&final_text).unwrap());
     assert_eq!(mine.sizes(), theirs.sizes(), "the same pages");
     let mut different = vec![];
     for page in 0..mine.sizes().len() {
-        let (a, b) = (mine.draw(page, 1600).expect("drawn"), theirs.draw(page, 1600).expect("drawn"));
+        let (a, b) = (mine.draw_at(page, 1600).expect("drawn"), theirs.draw_at(page, 1600).expect("drawn"));
         assert_eq!((a.width, a.height), (b.width, b.height));
         let deltas: Vec<u8> = a.bgra.iter().zip(&b.bgra).map(|(x, y)| x.abs_diff(*y)).collect();
         let off = deltas.chunks_exact(4).filter(|pixel| pixel.iter().any(|d| *d > 0)).count();
@@ -288,4 +299,16 @@ fn it_downloads_a_package() {
     assert!(folder.join("0.1.0/typst.toml").is_file(), "it's where Typst's own tools look");
     assert!(!std::fs::read_dir(&folder).unwrap().flatten().any(|entry| entry.file_name().to_string_lossy().starts_with('.')), "with nothing left lying about");
     assert!(wasm.render("#import \"@preview/no-such-package-at-all:9.9.9\": x").is_err());
+}
+
+#[test]
+fn a_page_drawn_in_pieces_is_the_page_drawn_whole() {
+    let plugin = needs_the_plugin!();
+    let (root, path) = project();
+    let mut renderer = plugin.renderer(&root, &path).unwrap();
+    let pages =
+        renderer.render("#set page(width: 200pt, height: 120pt, fill: rgb(\"#fffbe6\"))\n= Pieces\nThey meet where they're cut: $sum_(i=1)^n i$.").unwrap();
+    for pixels in [200, 431, 1600] {
+        ghostwrite_page::check_regions(pages.as_ref(), 0, pixels).unwrap();
+    }
 }

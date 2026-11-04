@@ -54,6 +54,13 @@ impl Editor {
             this.prompt_event(*event, text, window, cx);
         });
         field.read(cx).focus(window);
+        // Saying something during a review: the model's started on it while it's typed.
+        if kind == PromptKind::Ask
+            && let (Some(backend), Some(state)) = (&self.backend, &self.story)
+            && let Some(session) = state.conversation_session().filter(|_| !state.story.as_ref().is_some_and(|s| s.is_writing()))
+        {
+            backend.warm(Some(&self.project.root), Some(session));
+        }
         if kind == PromptKind::Command {
             self.history.rewind();
             self.project.status = None;

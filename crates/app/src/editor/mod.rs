@@ -45,6 +45,7 @@ mod plugin_host;
 mod pointer;
 mod project;
 mod prompt;
+mod reading;
 mod recovery;
 mod rendered;
 mod repeat;
@@ -434,6 +435,9 @@ impl Editor {
     // (as one undo step) and dropping what was about the old tab.
 
     fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix != self.project.tabs.active_index() {
+            self.wander();
+        }
         self.split_follows(ix);
         let from = self.before_jump();
         if ix != self.project.tabs.active_index() {
@@ -462,7 +466,7 @@ impl Editor {
         }
     }
 
-    fn new_buffer(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn new_buffer(&mut self, cx: &mut Context<Self>) {
         let ix = self.project.add(None, String::new());
         self.activate(ix, cx);
     }
@@ -641,7 +645,7 @@ impl Editor {
         // A message lasts until the next key (which may say something new),
         // and so do the marked matches, unless it's about searching.
         self.project.status = None;
-        if !matches!(key, ghostwrite_core::Key::Char('n' | 'N' | '*')) {
+        if !matches!(key, ghostwrite_core::Key::Char('n' | 'N' | '*') | ghostwrite_core::Key::Alt('*')) {
             self.find.shown = false;
         }
         let from = self.before_jump();
@@ -667,12 +671,32 @@ impl Editor {
         }
     }
 
-    /// A key for the current mode.
+    /// Which file is in front, and where in it: what moving around changes.
+    fn whereabouts(&self) -> (Option<DocId>, Option<ghostwrite_core::Range>) {
+        (self.tab().map(|tab| tab.doc.id), self.tab().map(|tab| tab.view.selection))
+    }
+
+    /// A key for the current mode. Looking elsewhere with one while a story's up is
+    /// noted: the story waits for you to come back.
     fn mode_key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.cursor_key(key, window, cx) {
+        let before = (self.modal.mode == Mode::Ai).then(|| self.whereabouts());
+        let handled = self.mode_key_here(key, window, cx);
+        let story_moved_them = self.story.as_mut().is_some_and(|state| std::mem::take(&mut state.moved_them));
+        if !story_moved_them && before.is_some_and(|before| before != self.whereabouts()) {
+            self.wander();
+        }
+        handled
+    }
+
+    fn mode_key_here(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let reading = self.reading();
+        if let Some(handled) = self.reading_key(key, window, cx) {
+            return handled;
+        }
+        if !reading && self.cursor_key(key, window, cx) {
             return true;
         }
-        if let Some(command) = self.plugin_key(key) {
+        if let Some(command) = self.plugin_key(key).filter(|_| !reading) {
             self.modal.cancel_pending();
             if let Err(why) = self.run_command(command, window, cx) {
                 self.project.say(why);
@@ -720,12 +744,24 @@ impl Editor {
 
     /// A key for the active document (or, with none open, for the commands that work anyway).
     fn buffer_key(&mut self, key: Key, cx: &mut Context<Self>) -> Outcome {
-        if self.page_key(&key, cx) {
+        let reading = self.reading();
+        if !reading && self.page_key(&key, cx) {
             return Outcome::Handled;
         }
-        let rows = self.measured.rows.max(2);
+        let rows = if reading { self.reading_rows() } else { self.measured.rows.max(2) };
+        let mut edited = false;
         let mut regs = Regs { registers: &mut self.registers, cx };
-        let outcome = match self.project.tabs.active_mut() {
+        let keyed = if reading { self.terminal.reading.as_mut().map(|reading| &mut reading.tab) } else { self.project.tabs.active_mut() };
+        let outcome = match keyed {
+            Some(tab) if reading => {
+                let version = tab.doc.buffer.version();
+                let outcome = cursors::key_at_each(&mut self.modal, key, &mut regs, tab, rows);
+                if self.modal.mode == Mode::Insert {
+                    self.modal.to_normal(&mut tab.target(rows));
+                }
+                edited = tab.doc.buffer.version() != version;
+                outcome
+            }
             Some(tab) => {
                 let before = (tab.doc.buffer.version(), tab.view.selection);
                 let outcome = cursors::key_at_each(&mut self.modal, key, &mut regs, tab, rows);
@@ -756,6 +792,9 @@ impl Editor {
                 outcome
             }
         };
+        if reading {
+            self.read_on(edited);
+        }
         if self.modal.mode != Mode::Insert {
             self.completion = None;
         }
@@ -764,7 +803,25 @@ impl Editor {
 
     /// Carry out what a key asked for beyond the buffer.
     fn effect(&mut self, effect: Effect, window: &mut Window, cx: &mut Context<Self>) {
+        // Reading the terminal: what's about the code goes back to it first.
+        if self.reading() {
+            match effect {
+                Effect::Assist => return self.ask_about_output(window, cx),
+                Effect::View(_) | Effect::ScreenLine(_) | Effect::Repeat => return,
+                Effect::Find { .. }
+                | Effect::FindNext { .. }
+                | Effect::FindSelection { .. }
+                | Effect::CommandLine
+                | Effect::Cheatsheet
+                | Effect::RecordMacro
+                | Effect::PlayMacro
+                | Effect::GotoFile
+                | Effect::Terminal => {}
+                _ => self.stop_reading(),
+            }
+        }
         match effect {
+            Effect::GotoFile => self.goto_file(window, cx),
             Effect::NextBuffer(steps) => self.step_tab(true, steps, cx),
             Effect::PrevBuffer(steps) => self.step_tab(false, steps, cx),
             Effect::MoveBufferNext(places) => self.nudge_tab(true, places, cx),
@@ -785,7 +842,7 @@ impl Editor {
                 self.cheatsheet_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
             }
             Effect::Find { backward } => self.start_find(backward, window, cx),
-            Effect::FindNext { backward } => self.find_next(backward, cx),
+            Effect::FindNext { backward, count } => self.find_next(backward, count, self.modal.mode == Mode::Select, cx),
             Effect::PickFile => self.open_picker(picker::PickerKind::Files, window, cx),
             Effect::References => self.references(cx),
             Effect::Rename => self.start_rename(window, cx),
@@ -798,12 +855,9 @@ impl Editor {
             Effect::View(place) => self.view_cursor(place, cx),
             Effect::ScreenLine(place) => self.screen_line(place, cx),
             Effect::Diagnostic { forward } => self.next_diagnostic(forward, cx),
-            Effect::JumpBack => self.jump(true, cx),
-            Effect::JumpForward => self.jump(false, cx),
-            Effect::FindSelection => {
-                self.find_selection(cx);
-                self.find_next(false, cx);
-            }
+            Effect::JumpBack(count) => self.jump(true, count, cx),
+            Effect::JumpForward(count) => self.jump(false, count, cx),
+            Effect::FindSelection { word_bounds } => self.find_selection(word_bounds, cx),
             Effect::GotoDefinition => self.goto_definition(window, cx),
             Effect::Hover => self.show_hover(window, cx),
             Effect::NextProblem => self.next_problem(cx),

@@ -50,25 +50,23 @@ impl Editor {
         self.place()
     }
 
-    /// `ctrl-o` (`back`) and `ctrl-i`.
-    pub(super) fn jump(&mut self, back: bool, cx: &mut Context<Self>) {
+    /// `ctrl-o` (`back`) and `ctrl-i`, `count` jumps along (if there are that many).
+    pub(super) fn jump(&mut self, back: bool, count: usize, cx: &mut Context<Self>) {
         let here = self.place();
         if back {
-            if self.jumps.at == 0 {
-                return self.project.say("no jumps to go back to");
-            }
+            let Some(to) = self.jumps.at.checked_sub(count) else { return self.project.say("no jumps to go back to") };
             // Leaving the end: remember it, for ctrl-i to come back to.
             if self.jumps.at == self.jumps.places.len()
                 && let Some(here) = here
             {
                 self.jumps.places.push(here);
             }
-            self.jumps.at -= 1;
+            self.jumps.at = to;
         } else {
-            if self.jumps.at + 1 >= self.jumps.places.len() {
+            if self.jumps.at + count >= self.jumps.places.len() {
                 return self.project.say("no jumps ahead");
             }
-            self.jumps.at += 1;
+            self.jumps.at += count;
         }
         let (doc, at) = self.jumps.places[self.jumps.at];
         let Some(ix) = self.project.tabs.index_of_id(doc) else { return self.project.say("that file was closed") };

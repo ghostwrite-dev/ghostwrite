@@ -7,7 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 
-use ghostwrite_plugin_api::{Drawing, Page, Plugin, register};
+use ghostwrite_plugin_api::{Drawing, Page, Plugin, Region, register};
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits, RgbaImage};
 
@@ -31,6 +31,8 @@ struct Open {
 
 thread_local! {
     static OPEN: RefCell<Open> = RefCell::default();
+    /// The image last made smaller, by its file's hash and its width: the regions of one drawing are cut from it.
+    static SHRUNK: RefCell<Option<(u64, u32, RgbaImage)>> = const { RefCell::new(None) };
 }
 
 fn decode(bytes: &[u8]) -> Result<RgbaImage, String> {
@@ -74,31 +76,71 @@ impl Plugin for Images {
         })
     }
 
-    /// Never bigger than it is: what's on screen scales it up, if it has to.
-    fn draw_page(key_high: u64, _key_low: u64, pixels: u32) -> Option<Drawing> {
+    /// Made smaller (the whole image, once, so its regions meet exactly), or larger,
+    /// smoothly, pixel by pixel.
+    fn draw(key_high: u64, _key_low: u64, region: Region) -> Option<Drawing> {
+        if (region.width as usize).saturating_mul(region.height as usize) > MAX_PIXELS || region.width == 0 || region.height == 0 || !(region.scale > 0.) {
+            return None;
+        }
         OPEN.with(|open| {
             let open = open.borrow();
             let image = &open.read.iter().find(|read| read.hash == key_high)?.image;
-            let width = pixels.clamp(1, image.width());
-            let height = ((u64::from(image.height()) * u64::from(width)).div_ceil(u64::from(image.width()))).max(1) as u32;
-            if (width as usize).saturating_mul(height as usize) > MAX_PIXELS {
-                return None;
-            }
-            let resized;
-            let drawn = if width == image.width() {
-                image
+            let mut bgra = vec![0; region.width as usize * region.height as usize * 4];
+            if region.scale < 1. {
+                let width = ((image.width() as f32 * region.scale).round() as u32).max(1);
+                let height = ((image.height() as f32 * region.scale).round() as u32).max(1);
+                SHRUNK.with(|shrunk| {
+                    let mut shrunk = shrunk.borrow_mut();
+                    if shrunk.as_ref().is_none_or(|(hash, made, _)| (*hash, *made) != (key_high, width)) {
+                        *shrunk = Some((key_high, width, image::imageops::resize(image, width, height, FilterType::Triangle)));
+                    }
+                    let (_, _, small) = shrunk.as_ref().expect("just made");
+                    for (row, line) in bgra.chunks_exact_mut(region.width as usize * 4).enumerate() {
+                        let y = region.y + row as u32;
+                        for (col, pixel) in line.chunks_exact_mut(4).enumerate() {
+                            let x = region.x + col as u32;
+                            if x < small.width() && y < small.height() {
+                                pixel.copy_from_slice(&premultiplied(small.get_pixel(x, y).0));
+                            }
+                        }
+                    }
+                });
             } else {
-                resized = image::imageops::resize(image, width, height, FilterType::Triangle);
-                &resized
-            };
-            let mut bgra = Vec::with_capacity(drawn.as_raw().len());
-            for pixel in drawn.pixels() {
-                let [r, g, b, a] = pixel.0;
-                let times = |c: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
-                bgra.extend([times(b), times(g), times(r), a]);
+                enlarged(image, &region, &mut bgra);
             }
-            Some(Drawing { width, height, bgra })
+            Some(Drawing { width: region.width, height: region.height, bgra })
         })
+    }
+}
+
+/// A pixel as it's drawn: blue, green, red, alpha, multiplied by alpha.
+fn premultiplied([r, g, b, a]: [u8; 4]) -> [u8; 4] {
+    let times = |c: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
+    [times(b), times(g), times(r), a]
+}
+
+/// `region` of `image` drawn `region.scale` times its size, at least as big as it
+/// is: each pixel blended from the four nearest it, nothing past its edges.
+fn enlarged(image: &RgbaImage, region: &Region, bgra: &mut [u8]) {
+    let (w, h) = (image.width() as f32, image.height() as f32);
+    let at = |x: i64, y: i64| premultiplied(image.get_pixel(x.clamp(0, w as i64 - 1) as u32, y.clamp(0, h as i64 - 1) as u32).0).map(f32::from);
+    for (row, line) in bgra.chunks_exact_mut(region.width as usize * 4).enumerate() {
+        let y = (region.y as f32 + row as f32 + 0.5) / region.scale;
+        for (col, pixel) in line.chunks_exact_mut(4).enumerate() {
+            let x = (region.x as f32 + col as f32 + 0.5) / region.scale;
+            if x >= w || y >= h {
+                continue;
+            }
+            let (fx, fy) = ((x - 0.5).floor(), (y - 0.5).floor());
+            let (tx, ty) = (x - 0.5 - fx, y - 0.5 - fy);
+            let (x0, y0) = (fx as i64, fy as i64);
+            let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+            for i in 0..4 {
+                let top = a[i] + (b[i] - a[i]) * tx;
+                let bottom = c[i] + (d[i] - c[i]) * tx;
+                pixel[i] = (top + (bottom - top) * ty).round().clamp(0., 255.) as u8;
+            }
+        }
     }
 }
 

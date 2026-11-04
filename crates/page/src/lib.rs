@@ -13,12 +13,36 @@ pub struct Size {
 /// be bigger (a 5 m square, a strip miles long) isn't drawn at all.
 pub const MAX_PIXELS: usize = 64 << 20;
 
-/// A page drawn: `width` × `height` pixels, a row at a time, four bytes
-/// each: blue, green, red and alpha (premultiplied).
+/// A page drawn, or part of one: `width` × `height` pixels, a row at a time,
+/// four bytes each: blue, green, red and alpha (premultiplied).
 pub struct Bitmap {
     pub width: usize,
     pub height: usize,
     pub bgra: Vec<u8>,
+}
+
+/// What of a page to draw: the page drawn `scale` pixels to a point, and of that,
+/// `width` by `height` pixels from `x`, `y` (its top left is 0, 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Region {
+    pub scale: f32,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Region {
+    /// All of a page of `size`, `pixels` wide.
+    pub fn whole(size: Size, pixels: usize) -> Self {
+        let scale = pixels.max(1) as f32 / size.width.max(f32::MIN_POSITIVE);
+        Self { scale, x: 0, y: 0, width: pixels.max(1), height: ((size.height * scale).round() as usize).max(1) }
+    }
+
+    /// Whether it's too big to draw at once.
+    pub fn too_big(&self) -> bool {
+        self.width.saturating_mul(self.height) > MAX_PIXELS || self.width == 0 || self.height == 0 || !self.scale.is_finite() || self.scale <= 0.
+    }
 }
 
 /// A rectangle on a page, in points from its top left.
@@ -39,8 +63,14 @@ pub trait Pages: Send + Sync {
     fn sizes(&self) -> Vec<Size>;
     /// What says a page's drawing can be kept: it's the same if this is.
     fn key(&self, page: usize) -> u128;
-    /// Draw a page about `pixels` wide; `None` if it can't be.
-    fn draw(&self, page: usize, pixels: usize) -> Option<Bitmap>;
+    /// Draw `region` of a page, exactly as big as it, what's past the page's edge
+    /// see-through; `None` if it can't be.
+    fn draw(&self, page: usize, region: Region) -> Option<Bitmap>;
+    /// Draw all of a page, `pixels` wide.
+    fn draw_at(&self, page: usize, pixels: usize) -> Option<Bitmap> {
+        let size = *self.sizes().get(page)?;
+        self.draw(page, Region::whole(size, pixels))
+    }
     /// Where the cursor at `at` shows.
     fn cursor(&self, at: usize) -> Option<Place>;
     /// Where to look to see `at`: where it is, or if nothing on the pages comes
@@ -61,6 +91,54 @@ pub trait Pages: Send + Sync {
     fn text(&self) -> Option<&str> {
         None
     }
+}
+
+/// Whether `pages` draws regions of page `page` as it draws the whole of it,
+/// `pixels` wide, give or take antialiasing: pieces cut at odd places, and one
+/// reaching past the page's edges, which is see-through there. For a plugin's
+/// tests: zoomed in, the editor draws pages in pieces, and they have to meet.
+pub fn check_regions(pages: &dyn Pages, page: usize, pixels: usize) -> Result<(), String> {
+    let size = *pages.sizes().get(page).ok_or("there's no such page")?;
+    let whole = Region::whole(size, pixels);
+    let all = pages.draw(page, whole).ok_or("the whole page isn't drawn")?;
+    if (all.width, all.height, all.bgra.len()) != (whole.width, whole.height, whole.width * whole.height * 4) {
+        return Err(format!("the whole page is {}x{}, not {}x{}", all.width, all.height, whole.width, whole.height));
+    }
+    let (across, down) = (whole.width / 3 + 1, whole.height / 2 + 3);
+    let pieces = [
+        (0, 0, across, down),
+        (across, 0, whole.width - across, down),
+        (0, down, across, whole.height - down),
+        (across, down, whole.width - across, whole.height - down),
+    ];
+    let mut off = 0;
+    for (x, y, width, height) in pieces {
+        let region = Region { x, y, width, height, ..whole };
+        let piece = pages.draw(page, region).ok_or_else(|| format!("{region:?} isn't drawn"))?;
+        if (piece.width, piece.height, piece.bgra.len()) != (width, height, width * height * 4) {
+            return Err(format!("{region:?} is drawn {}x{}", piece.width, piece.height));
+        }
+        for row in 0..height {
+            for col in 0..width {
+                let mine = &piece.bgra[(row * width + col) * 4..][..4];
+                let theirs = &all.bgra[((y + row) * whole.width + x + col) * 4..][..4];
+                if mine.iter().zip(theirs).any(|(a, b)| a.abs_diff(*b) > 8) {
+                    off += 1;
+                }
+            }
+        }
+    }
+    // Antialiasing can differ a little where a piece is cut, not more.
+    if off * 200 > whole.width * whole.height {
+        return Err(format!("{off} of {} pixels differ from the whole page's", whole.width * whole.height));
+    }
+    let past = Region { x: whole.width - 2, y: whole.height - 2, width: 4, height: 4, ..whole };
+    let corner = pages.draw(page, past).ok_or("a region past the edge isn't drawn")?;
+    let alpha = |col: usize, row: usize| corner.bgra.get((row * 4 + col) * 4 + 3).copied();
+    if alpha(3, 3) != Some(0) || alpha(3, 0) != Some(0) || alpha(0, 3) != Some(0) {
+        return Err("past the page's edges isn't see-through".into());
+    }
+    Ok(())
 }
 
 /// What makes [`Pages`] from a file's text, again whenever it changes.
@@ -115,8 +193,8 @@ impl Pages for OnlyPages {
         self.pages.key(page)
     }
 
-    fn draw(&self, page: usize, pixels: usize) -> Option<Bitmap> {
-        self.pages.draw(page, pixels)
+    fn draw(&self, page: usize, region: Region) -> Option<Bitmap> {
+        self.pages.draw(page, region)
     }
 
     fn cursor(&self, at: usize) -> Option<Place> {
@@ -154,7 +232,7 @@ mod tests {
         fn key(&self, page: usize) -> u128 {
             page as u128
         }
-        fn draw(&self, _page: usize, _pixels: usize) -> Option<Bitmap> {
+        fn draw(&self, _page: usize, _region: Region) -> Option<Bitmap> {
             None
         }
         fn cursor(&self, _at: usize) -> Option<Place> {

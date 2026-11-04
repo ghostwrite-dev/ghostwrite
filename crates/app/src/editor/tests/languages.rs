@@ -160,7 +160,7 @@ fn a_pdf_is_its_pages_read_only_and_the_model_leaves_it_be(cx: &mut TestAppConte
     assert_eq!(t.text(), "── page 1 ──\n── page 2 ──", "a line for each page, to move by");
     let pages = t.read(|e| e.tab().unwrap().doc.rendered.as_ref().unwrap().pages.clone().unwrap());
     assert_eq!(pages.sizes().len(), 2);
-    let drawn = pages.draw(0, 400).expect("it's drawn");
+    let drawn = pages.draw_at(0, 400).expect("it's drawn");
     let pixel = |x: usize, y: usize| drawn.bgra[(y * drawn.width + x) * 4..][..4].to_vec();
     assert_eq!((drawn.width, drawn.height), (400, 200));
     assert_eq!(pixel(50, 150), [0, 0, 0, 255], "what's on it, the right way up");
@@ -228,7 +228,7 @@ fn an_image_opens_read_only_at_its_own_size_and_the_model_leaves_it_be(cx: &mut 
     until_it_has_pages(&mut t);
     let pages = t.read(|e| e.tab().unwrap().doc.rendered.as_ref().unwrap().pages.clone().unwrap());
     assert_eq!(pages.max_width(), Some(1.), "a tiny image isn't blown up to the width of the window");
-    let drawn = pages.draw(0, 1).expect("it's drawn");
+    let drawn = pages.draw_at(0, 1).expect("it's drawn");
     assert_eq!(drawn.bgra, [0, 0, 255, 255], "red, as blue, green, red and alpha");
     t.keys("x d");
     assert_eq!(t.status().as_deref(), Some("this is read-only"));
@@ -484,4 +484,74 @@ fn a_typst_files_pages_are_a_tab_and_follow_it(cx: &mut TestAppContext) {
     t.keys("g g space j");
     assert_eq!(t.read(|e| e.tab().unwrap().view.pages.line), Some(0), "space j brings the pages to the cursor");
     assert_eq!(t.status().as_deref(), Some("no problems in this file"), "it has no server here to say");
+}
+
+#[gpui::test]
+fn pages_zoom_and_scroll_across_on_their_own(cx: &mut TestAppContext) {
+    use crate::actions::{ResetZoom, ZoomIn, ZoomOut};
+    cx.executor().allow_parking();
+    let mut t = open("x\n", &["unused"], cx);
+    t.cx.update(|_, cx| {
+        cx.bind_keys([
+            gpui::KeyBinding::new("cmd-=", ZoomIn, None),
+            gpui::KeyBinding::new("cmd--", ZoomOut, None),
+            gpui::KeyBinding::new("cmd-0", ResetZoom, None),
+        ]);
+        cx.on_action(|_: &ZoomIn, cx| crate::theme::zoom(1, cx));
+        cx.on_action(|_: &ZoomOut, cx| crate::theme::zoom(-1, cx));
+        cx.on_action(|_: &ResetZoom, cx| crate::theme::zoom(0, cx));
+    });
+    let pdf = t.dir.join("paper.pdf");
+    std::fs::write(&pdf, two_page_pdf()).unwrap();
+    let editor = t.editor.clone();
+    t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![pdf.clone()], cx)));
+    until_it_has_pages(&mut t);
+    let zooms = |t: &mut Setup| {
+        let pages = t.read(|e| e.tab().map(|tab| (tab.view.pages.zoom, tab.view.pages.left)).unwrap());
+        (pages, t.cx.update(|_, cx| crate::theme::theme(cx).zoom))
+    };
+    let redraw = |t: &mut Setup| {
+        t.cx.update(|window, _| window.refresh());
+        t.cx.run_until_parked();
+    };
+
+    t.keys("cmd-=");
+    assert_eq!(zooms(&mut t), ((1.25, gpui::px(0.)), 1.0), "the pages zoom, the editor doesn't");
+    t.keys("cmd-= cmd--");
+    assert_eq!(zooms(&mut t).0.0, 1.25, "a step each way");
+    t.keys("cmd-0");
+    assert_eq!(zooms(&mut t).0.0, 1.0, "and back to fitting the view");
+
+    // ⌘ and the wheel, over them.
+    redraw(&mut t);
+    let size = t.cx.update(|window, _| window.viewport_size());
+    let middle = gpui::point(size.width / 2., size.height / 2.);
+    let wheel = |t: &mut Setup, x: f32, y: f32, modifiers: gpui::Modifiers| {
+        t.cx.simulate_event(gpui::ScrollWheelEvent {
+            position: middle,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(x), gpui::px(y))),
+            modifiers,
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        redraw(t);
+    };
+    wheel(&mut t, 0., 200., gpui::Modifiers::command());
+    let ((zoom, left), editor_zoom) = zooms(&mut t);
+    assert!(zoom > 2., "⌘-scroll zooms in: {zoom}");
+    assert!(t.cx.update(|_, cx| crate::ui::pages::tiles(cx)) > 0, "zoomed in, it's drawn in tiles");
+    assert!(left > gpui::px(0.), "around the pointer, so across as well");
+    assert_eq!(editor_zoom, 1.0);
+    wheel(&mut t, 150., 0., gpui::Modifiers::none());
+    assert_eq!(zooms(&mut t).0.1, left - gpui::px(150.), "wider than the view, they scroll across");
+    wheel(&mut t, 0., -2000., gpui::Modifiers::command());
+    assert_eq!(zooms(&mut t).0, (0.1, gpui::px(0.)), "out only so far, and narrower than the view there's nothing to scroll across");
+
+    t.keys("cmd-shift-[");
+    t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![t.dir.join("doc.txt")], cx)));
+    t.keys("cmd-=");
+    assert_eq!(zooms_of_editor(&mut t), 1.1, "in the code, it's the editor's zoom");
+}
+
+fn zooms_of_editor(t: &mut Setup) -> f32 {
+    t.cx.update(|_, cx| crate::theme::theme(cx).zoom)
 }

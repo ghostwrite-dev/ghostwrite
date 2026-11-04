@@ -198,15 +198,18 @@ impl Element for TerminalView {
         let screen = self.editor.update(cx, |editor, _| {
             let terminal = editor.terminal.current()?;
             terminal.resize(cols, rows, f32::from(cw) as u16, f32::from(lh) as u16);
-            Some(terminal.screen())
+            Some((terminal.screen(), terminal.typed_from()))
         });
         let mut state = Prepainted { texts: vec![], quads: vec![], cursor: None, cursor_glyph: None, blocks: vec![], line_height: lh };
-        let Some(mut screen) = screen else { return state };
+        let Some((mut screen, typed_from)) = screen else { return state };
 
-        // A command proposed: at the cursor (scrolled away from it, at the bottom).
+        // A command proposed: where the shell's line starts, in place of what's
+        // typed on it (which running it clears), or at the cursor (scrolled away
+        // from it, at the bottom).
         let editor = self.editor.read(cx);
         let proposed = editor.command_proposed().then(|| editor.story.as_ref()?.proposed_command(editor.ask_field(), &theme)).flatten();
-        let prompt = screen.cursor.as_ref().map_or((rows as usize - 1, 0), |cursor| (cursor.line, cursor.col));
+        let cursor_at = screen.cursor.as_ref().map(|cursor| (cursor.line, cursor.col));
+        let prompt = typed_from.or(cursor_at).unwrap_or((rows as usize - 1, 0));
         let sizes = BlockSizes { line_height: lh, char_width: cw, width: bounds.size.width };
         let mut around = None;
         if let Some(proposed) = proposed {
@@ -225,24 +228,55 @@ impl Element for TerminalView {
         let at = |line: usize, col: usize| point(origin.x + cw * col as f32, origin.y + lh * line as f32);
 
         if let Some((typed, note, keys)) = around {
-            // What's on the screen where the command would go isn't shown under it.
+            // What's on the screen where the command would go isn't shown under it,
+            // and neither is what the user typed: the command takes its place.
+            let typed_to = cursor_at.map_or(prompt.0, |(line, _)| line.max(prompt.0));
             screen.cells.retain(|cell| {
-                cell.line < prompt.0 || typed.get(cell.line - prompt.0).is_none_or(|(col, text)| cell.col < *col || text.is_empty() && *col == 0)
+                let typed_over = (cell.line, cell.col) >= prompt && cell.line <= typed_to;
+                let under =
+                    cell.line >= prompt.0 && typed.get(cell.line - prompt.0).is_some_and(|(col, text)| cell.col >= *col && !(text.is_empty() && *col == 0));
+                !typed_over && !under
             });
+            if let Some(cursor) = screen.cursor.as_mut() {
+                (cursor.line, cursor.col, cursor.c) = (prompt.0, prompt.1, ' ');
+            }
             for (ix, (col, text)) in typed.iter().enumerate().filter(|(_, (_, text))| !text.is_empty()) {
                 let run = metrics.run(text.len(), theme.muted_foreground);
                 state.texts.push((at(prompt.0 + ix, *col), window.text_system().shape_line(text.clone().into(), metrics.size, &[run], None)));
             }
             let top = at(prompt.0, 0).y;
+            let mut from = top;
             if let Some((mut note, height)) = note {
                 note.prepaint_at(point(bounds.left(), top - height), window, cx);
                 state.blocks.push(note);
+                from = top - height;
             }
-            let (mut keys, _) = keys;
+            let (mut keys, keys_height) = keys;
             keys.prepaint_at(point(bounds.left(), top + lh * typed.len() as f32), window, cx);
             state.blocks.push(keys);
+            // Where the story's step is: its note, the command and its keys.
+            let to = top + lh * typed.len() as f32 + keys_height;
+            let rect = Bounds::new(point(bounds.left(), from), size(bounds.size.width, to - from));
+            self.editor.update(cx, |editor, _| {
+                if let Some(mark) = editor.step_mark() {
+                    editor.seen(super::attention::Seen { mark, rect, scrolled: None }, window);
+                }
+            });
         }
 
+        // Reading it: the cursor is the reading one, a block, where the editor's keys are.
+        let editor = self.editor.read(cx);
+        if editor.reading() {
+            screen.cursor = editor.reading_cursor().map(|(line, col)| {
+                let c = screen.cells.iter().find(|cell| (cell.line, cell.col) == (line, col)).map_or(' ', |cell| cell.c);
+                ghostwrite_terminal::Cursor { line, col, shape: CursorShape::Block, c }
+            });
+        }
+
+        // A link under the mouse while ⌘ is held: underlined, to be clicked.
+        if let Some(link) = &editor.terminal.link {
+            screen.cells.iter_mut().filter(|cell| cell.line == link.row && link.cols.contains(&cell.col)).for_each(|cell| cell.underline = true);
+        }
         for run in &runs(&screen.cells, &theme) {
             let origin = at(run.line, run.col);
             if let Some(background) = run.background {

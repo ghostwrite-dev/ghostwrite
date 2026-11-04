@@ -26,8 +26,13 @@ impl Editor {
             self.record_text(text);
         }
         let Some(tab) = self.project.tabs.active_mut() else { return };
-        if let Some(range) = replacing {
-            tab.view.selection = Range::new(range.start, range.end).clamp(tab.doc.buffer.len());
+        // What the platform replaces (what's being composed) goes first, as
+        // part of the typing; typing at the cursor leaves the selection be.
+        if let Some(range) = replacing.filter(|range| *range != (tab.view.selection.head..tab.view.selection.head)) {
+            let range = range.start.min(tab.doc.buffer.len())..range.end.min(tab.doc.buffer.len());
+            tab.doc.buffer.begin(tab.view.selection);
+            tab.doc.buffer.edit(range.clone(), "");
+            tab.view.selection = Range::point(range.start);
         }
         if as_is {
             // Being composed, by an input method: at the one cursor it's asking about.
@@ -55,10 +60,12 @@ impl EntityInputHandler for Editor {
         Some(text[range].to_string())
     }
 
+    /// In insert mode, where typing goes: the head (the selection stays, and isn't typed over).
     fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
         let tab = self.tab()?;
         let sel = tab.view.selection;
-        Some(UTF16Selection { range: to_utf16(tab.doc.text(), &sel.bytes()), reversed: sel.head < sel.anchor })
+        let range = if self.modal.mode == Mode::Insert { sel.head..sel.head } else { sel.bytes() };
+        Some(UTF16Selection { range: to_utf16(tab.doc.text(), &range), reversed: sel.head < sel.anchor })
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Bytes<usize>> {
@@ -70,15 +77,16 @@ impl EntityInputHandler for Editor {
     }
 
     fn replace_text_in_range(&mut self, range: Option<Bytes<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
-        // Committing what was being composed.
-        let composed = self.marked.is_some();
+        // Committing what was being composed. One char is as if typed: a
+        // quote from a dead key (US International's `"`) closes itself.
+        let composed = self.marked.is_some() && text.chars().nth(1).is_some();
         let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.text(), &range?)));
         self.insert_text(text, replacing, composed, cx);
     }
 
     fn replace_and_mark_text_in_range(&mut self, range: Option<Bytes<usize>>, text: &str, _: Option<Bytes<usize>>, _: &mut Window, cx: &mut Context<Self>) {
         let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.text(), &range?)));
-        let start = replacing.as_ref().map(|r| r.start).or_else(|| self.tab().map(|t| t.view.selection.from()));
+        let start = replacing.as_ref().map(|r| r.start).or_else(|| self.tab().map(|t| t.view.selection.head));
         self.insert_text(text, replacing, true, cx);
         if self.modal.mode == Mode::Insert {
             self.marked = start.filter(|_| !text.is_empty()).map(|s| s..s + text.len());

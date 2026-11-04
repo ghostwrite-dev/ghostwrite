@@ -2,6 +2,9 @@
 //! shortcuts. Everything else is a key the modal editor reads, or a `:`
 //! command.
 
+use std::path::PathBuf;
+
+use ghostwrite_project::store;
 use gpui::{App, KeyBinding, Menu, MenuItem, actions};
 
 actions!(
@@ -31,8 +34,16 @@ actions!(
         Cut,
         Paste,
         SelectAll,
+        ClearRecent,
     ]
 );
+
+/// File › Open Recent: a project opened before.
+#[derive(Clone, PartialEq, Debug, gpui::Action)]
+#[action(namespace = ghostwrite, no_json)]
+pub struct OpenRecent {
+    pub root: PathBuf,
+}
 
 pub fn install(cx: &mut App) {
     cx.bind_keys([
@@ -67,6 +78,30 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &ZoomIn, cx| crate::theme::zoom(1, cx));
     cx.on_action(|_: &ZoomOut, cx| crate::theme::zoom(-1, cx));
     cx.on_action(|_: &ResetZoom, cx| crate::theme::zoom(0, cx));
+    // With no window to take it (one does, in its own place), a window of its own.
+    cx.on_action(|recent: &OpenRecent, cx| crate::workspace::open_anywhere(vec![recent.root.clone()], cx));
+    cx.on_action(|_: &ClearRecent, cx| {
+        store::recent_projects().iter().for_each(|root| store::forget_project(root));
+        set_menus(cx);
+    });
+    set_menus(cx);
+}
+
+/// A project as the menu shows it: its folder, `~/…` if it's in home.
+fn label(root: &std::path::Path) -> String {
+    match std::env::home_dir().and_then(|home| root.strip_prefix(home).ok().map(std::path::Path::to_path_buf)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => root.display().to_string(),
+    }
+}
+
+/// The menu bar, with the projects opened lately: set again when they change.
+pub fn set_menus(cx: &mut App) {
+    let mut recent: Vec<MenuItem> =
+        store::recent_projects().into_iter().filter(|root| root.is_dir()).map(|root| MenuItem::action(label(&root), OpenRecent { root })).collect();
+    if !recent.is_empty() {
+        recent.extend([MenuItem::separator(), MenuItem::action("Clear Menu", ClearRecent)]);
+    }
     cx.set_menus(vec![
         Menu { name: "Ghostwrite".into(), items: vec![MenuItem::action("Quit Ghostwrite", Quit)] },
         Menu {
@@ -76,6 +111,7 @@ pub fn install(cx: &mut App) {
                 MenuItem::action("New Window", NewWindow),
                 MenuItem::action("Open…", Open),
                 MenuItem::action("Open Folder…", OpenFolder),
+                MenuItem::submenu(Menu { name: "Open Recent".into(), items: recent }),
                 MenuItem::action("Switch Project…", ShowProjects),
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),
@@ -113,4 +149,14 @@ pub fn install(cx: &mut App) {
             ],
         },
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn recent_projects_are_shown_from_home() {
+        let home = std::env::home_dir().unwrap();
+        assert_eq!(super::label(&home.join("Projects/ghostwrite")), "~/Projects/ghostwrite");
+        assert_eq!(super::label(std::path::Path::new("/opt/work")), "/opt/work");
+    }
 }

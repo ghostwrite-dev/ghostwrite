@@ -119,12 +119,17 @@ pub enum Effect {
     Find {
         backward: bool,
     },
-    /// `n`, `N`: the next match of the last search, or the one before.
+    /// `n`, `N`: the `count`th match of the last search after the
+    /// selection, or before it (in select mode, added as another selection).
     FindNext {
         backward: bool,
+        count: usize,
     },
-    /// `*`: search for what's selected.
-    FindSelection,
+    /// `*`, `alt-*`: search for what's selected (`*`: as a whole word where
+    /// it starts or ends one), and go nowhere yet.
+    FindSelection {
+        word_bounds: bool,
+    },
     /// `gr`, `space r`, `space .`, `space s`: the language server's
     /// references, renaming, code actions, and the file's symbols.
     References,
@@ -147,9 +152,10 @@ pub enum Effect {
     /// `Q`: record keys (again: stop); `q`: play them.
     RecordMacro,
     PlayMacro,
-    /// `ctrl-o`, `ctrl-i`: back to where a jump came from, and forward again.
-    JumpBack,
-    JumpForward,
+    /// `ctrl-o`, `ctrl-i`: back to where a jump came from, and forward
+    /// again, so many jumps along (`3ctrl-o`).
+    JumpBack(usize),
+    JumpForward(usize),
     /// `gd`, `space k`, `space d`: the language server's definition, docs, diagnostics.
     GotoDefinition,
     Hover,
@@ -158,6 +164,8 @@ pub enum Effect {
     Search,
     /// `space t`: the terminal, and terminal mode.
     Terminal,
+    /// `gf`: the file named under the cursor (or selected), at the line and column after it.
+    GotoFile,
     /// `space j`: go to the next error in the file (or warning, if it has
     /// no errors), and bring a file's pages there.
     NextProblem,
@@ -243,9 +251,11 @@ impl Target<'_> {
         self.language.and_then(|l| l.abbreviations)
     }
 
-    /// Whether `c` closes itself when typed here.
-    fn pairs(&self, c: char) -> bool {
-        !self.language.is_some_and(|l| l.unpaired.contains(&c))
+    /// The pairs that close themselves here: brackets and quotes but the
+    /// language's unpaired ones, and its own.
+    fn pairs(&self) -> Vec<(char, char)> {
+        let language = self.language.unwrap_or(&Language::DEFAULT);
+        insert::PAIRS.into_iter().filter(|(open, _)| !language.unpaired.contains(open)).chain(language.pairs.iter().copied()).collect()
     }
 }
 
@@ -281,6 +291,8 @@ enum Pending {
     },
     /// `"`, then the register's name.
     Register,
+    /// `ctrl-r` while typing, then the register to type out.
+    InsertRegister,
     /// `z`: where the cursor's line goes on screen.
     View,
     /// `]`, `[`: the next or previous something (`d`: diagnostic).
@@ -297,12 +309,19 @@ pub struct Modal {
     sticky_col: Option<usize>,
     /// The abbreviation being typed (`\alp`), from its backslash to the cursor.
     abbreviating: Option<(usize, usize)>,
+    /// The mode tree mode goes back to: normal, or AI mode while a story's up.
+    tree_from: Mode,
     /// Esc was pressed in a review: another stops it.
     stopping: bool,
     /// The last key would have edited, but a review was up.
     refused: bool,
     /// The register the next yank, delete or paste uses (`"a`).
     register: Option<char>,
+    /// Selections a key made besides the one it was given (`3o` opens three
+    /// lines, each with a cursor): the editor takes them as more cursors.
+    added: Vec<Range>,
+    /// The last motion that can be repeated (`f`, `t`, `mi`, `]p`): `alt-.` does it again.
+    last_motion: Option<normal::Motion>,
 }
 
 impl Default for Modal {
@@ -314,9 +333,12 @@ impl Default for Modal {
             count: None,
             sticky_col: None,
             abbreviating: None,
+            tree_from: Mode::Normal,
             stopping: false,
             refused: false,
             register: None,
+            added: vec![],
+            last_motion: None,
         }
     }
 }
@@ -349,6 +371,7 @@ impl Modal {
             Some(Pending::Object { around: true }) => "ma",
             Some(Pending::Object { around: false }) => "mi",
             Some(Pending::Register) => "\"",
+            Some(Pending::InsertRegister) => "ctrl-r",
             Some(Pending::View) => "z",
             Some(Pending::Next(true)) => "]",
             Some(Pending::Next(false)) => "[",
@@ -361,11 +384,10 @@ impl Modal {
         (self.pending, self.count) = (None, None);
     }
 
-    /// Back to normal mode, closing an insert session as one undo step.
+    /// Back to normal mode, closing an insert session as one undo step. The
+    /// selection stays as it was typed around, as in helix: after `a` it
+    /// takes in what was typed, with the cursor on its last char.
     pub fn to_normal(&mut self, t: &mut Target) {
-        if self.mode == Mode::Insert {
-            *t.selection = Range::point(t.selection.head);
-        }
         self.mode = Mode::Normal;
         self.pending = None;
         self.count = None;
@@ -373,10 +395,11 @@ impl Modal {
     }
 
     /// Typed text in insert mode; `false` (and nothing typed) in other modes.
-    /// A typed opening bracket or quote comes with its closing one (see
-    /// [`insert::paired`]), and typing a closing one that's next steps over
-    /// it. In a language with abbreviations, a backslash starts an
-    /// abbreviation (see [`Modal::abbreviate`]).
+    /// It goes in at the head (the bar cursor); the selection's other end
+    /// stays on its text, as in helix. A typed opening bracket or quote comes
+    /// with its closing one (see [`insert::paired`]), and typing a closing
+    /// one that's next steps over it. In a language with abbreviations, a
+    /// backslash starts an abbreviation (see [`Modal::abbreviate`]).
     pub fn insert(&mut self, text: &str, t: &mut Target) -> bool {
         if self.mode != Mode::Insert {
             return false;
@@ -384,32 +407,29 @@ impl Modal {
         if t.abbreviations().is_some() {
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
-                (Some(c), None) if t.selection.is_empty() && self.abbreviate(c, t) => return true,
+                (Some(c), None) if self.abbreviate(c, t) => return true,
                 (Some(_), None) => {}
                 _ => {
                     self.finish_abbreviation(t);
                 }
             }
         }
-        let range = t.selection.bytes();
+        let at = t.selection.head;
         self.sticky_col = None;
-        let (before, after) = (&t.buffer.text()[..range.start], &t.buffer.text()[range.end..]);
+        let (before, after) = (&t.buffer.text()[..at], &t.buffer.text()[at..]);
         let mut typed = text.chars();
-        if let (Some(c), None, true) = (typed.next(), typed.next(), range.is_empty()) {
-            if insert::closes(c) && after.starts_with(c) {
-                *t.selection = Range::point(range.start + c.len_utf8());
+        if let (Some(c), None) = (typed.next(), typed.next()) {
+            let pairs = t.pairs();
+            if pairs.iter().any(|&(_, close)| close == c) && after.starts_with(c) {
+                insert::move_head(t, at + c.len_utf8());
                 return true;
             }
-            if let Some(close) = insert::paired(c, before, after).filter(|_| t.pairs(c)) {
-                t.buffer.begin(*t.selection);
-                t.buffer.edit(range.clone(), &format!("{c}{close}"));
-                *t.selection = Range::point(range.start + c.len_utf8());
+            if let Some(close) = insert::paired(c, before, after, &pairs) {
+                insert::put(t, at..at, &format!("{c}{close}"), at + c.len_utf8());
                 return true;
             }
         }
-        t.buffer.begin(*t.selection);
-        t.buffer.edit(range.clone(), text);
-        *t.selection = Range::point(range.start + text.len());
+        insert::put(t, at..at, text, at + text.len());
         true
     }
 
@@ -420,11 +440,19 @@ impl Modal {
             return false;
         }
         self.sticky_col = None;
-        let range = t.selection.bytes();
-        t.buffer.begin(*t.selection);
-        t.buffer.edit(range.clone(), text);
-        *t.selection = Range::point(range.start + text.len());
+        let at = t.selection.head;
+        insert::put(t, at..at, text, at + text.len());
         true
+    }
+
+    /// The selections the last key made besides the one it was given (see [`Modal::key`]).
+    pub fn take_added(&mut self) -> Vec<Range> {
+        std::mem::take(&mut self.added)
+    }
+
+    /// The count typed so far, for a key the editor carries out itself (`2C`).
+    pub fn take_count(&mut self) -> Option<usize> {
+        self.count.take()
     }
 
     /// Enter AI or terminal mode over the current one (an insert session should
@@ -451,6 +479,10 @@ impl Modal {
             // What was entered from it goes back to what it was entered from.
             self.entered_from.remove(at);
         }
+        // Over while in the tree: the tree goes back to normal mode.
+        if self.tree_from == mode {
+            self.tree_from = Mode::Normal;
+        }
     }
 
     /// Whether the last key would have edited the text, but a review was up (and say so once).
@@ -464,8 +496,10 @@ impl Modal {
     }
 
     /// A key for the buffer, in normal, select or insert mode (or AI mode,
-    /// which reviews it).
+    /// which reviews it). Selections it makes besides `t`'s are kept for
+    /// [`Modal::take_added`].
     pub fn key(&mut self, key: Key, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
+        self.added.clear();
         if self.mode == Mode::Tree {
             return self.tree_key(key);
         }
@@ -486,7 +520,7 @@ impl Modal {
             return Outcome::Review(review);
         }
         if self.mode == Mode::Insert {
-            return self.insert_key(key, t);
+            return self.insert_key(key, regs, t);
         }
         t.buffer.begin(*t.selection);
         let outcome = self.normal_key(key, regs, t);
@@ -496,11 +530,24 @@ impl Modal {
         outcome
     }
 
-    /// Enter tree mode (from normal mode; any insert session is closed first).
+    /// Enter tree mode (any insert session is closed first). From AI mode, leaving
+    /// it ([`Self::leave_tree`]) goes back there: a story's still up.
     pub fn to_tree(&mut self) {
+        if self.mode != Mode::Tree {
+            self.tree_from = if self.mode == Mode::Ai { Mode::Ai } else { Mode::Normal };
+        }
         self.mode = Mode::Tree;
         self.pending = None;
         self.count = None;
+    }
+
+    /// Out of tree mode, to where it was entered from.
+    pub fn leave_tree(&mut self) {
+        if self.mode == Mode::Tree {
+            self.mode = std::mem::replace(&mut self.tree_from, Mode::Normal);
+            self.pending = None;
+            self.count = None;
+        }
     }
 }
 

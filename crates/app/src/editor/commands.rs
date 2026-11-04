@@ -45,6 +45,10 @@ pub enum Command {
     Update,
     /// `:undo-story`: take back what the last story's accepted steps did.
     UndoStory,
+    /// `:timings`: how long the model has kept you waiting, lately.
+    Timings,
+    /// `:clear`: end the story, and forget what the model kept of the ones before.
+    Clear,
     /// `:replace old new`: go through the project's matches as steps; with `!`, apply them all.
     Replace {
         pattern: String,
@@ -140,6 +144,8 @@ const NAMES: &[&str] = &[
     "api-key",
     "replace",
     "undo-story",
+    "timings",
+    "clear",
     "tutor",
     "plugin",
     "plugins",
@@ -214,6 +220,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
         "tutor" => no_args(Command::Tutor),
         "update" => no_args(Command::Update),
         "undo-story" => no_args(Command::UndoStory),
+        "timings" => no_args(Command::Timings),
+        "clear" => no_args(Command::Clear),
         "replace" | "replace!" => match rest.split_once(char::is_whitespace) {
             Some((pattern, with)) => Ok(Command::Replace { pattern: pattern.to_string(), with: with.trim().to_string(), all: name.ends_with('!') }),
             None => Err("replace what with what? :replace old new".into()),
@@ -428,6 +436,8 @@ impl Editor {
         match parse(line)? {
             Command::ApiKey(key) => self.api_key(key)?,
             Command::UndoStory => self.undo_story(cx)?,
+            Command::Timings => self.project.say(ghostwrite_ai::timing::summary()),
+            Command::Clear => self.clear_context(cx),
             Command::Break => self.toggle_breakpoint(cx)?,
             Command::Debug(line) => self.start_debugging(&line, cx)?,
             Command::DebuggerGo(how) => self.debugger_go(how, cx)?,

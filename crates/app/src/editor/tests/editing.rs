@@ -54,7 +54,7 @@ fn zooming_sizes_everything(cx: &mut TestAppContext) {
     t.cx.update(|_, cx| crate::theme::follow(WindowAppearance::Dark, cx));
     assert_eq!(sizes(&mut t).0, 1.1, "switching to dark keeps the zoom");
     (0..20).for_each(|_| zoom(&mut t, -1));
-    assert_eq!(sizes(&mut t).0, 0.5, "as far out as it goes");
+    assert_eq!(sizes(&mut t).0, 0.33, "as far out as it goes");
     zoom(&mut t, 0);
     assert_eq!((sizes(&mut t).0, code(&mut t)), (1.0, base), "back to 100%");
 }
@@ -67,6 +67,24 @@ fn typing_in_insert_mode(cx: &mut TestAppContext) {
     assert_eq!(t.read(|e| e.modal.mode), Mode::Normal);
     t.keys("u");
     assert_eq!(t.text(), "one\ntwo\n", "the insert is one undo step");
+}
+
+#[gpui::test]
+fn a_quote_from_a_dead_key_closes_itself(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+    let mut t = open("\n", &[], cx);
+    t.keys("i");
+    // US International: `"` is marked, then committed by a space.
+    let editor = t.editor.clone();
+    t.cx.update(|window, cx| {
+        editor.update(cx, |e, cx| {
+            e.replace_and_mark_text_in_range(None, "\"", None, window, cx);
+            e.replace_text_in_range(None, "\"", window, cx);
+        })
+    });
+    t.input("hi");
+    assert_eq!(t.text(), "\"hi\"\n");
+    assert_eq!(t.cursor(), 3, "inside the quotes");
 }
 
 #[gpui::test]
@@ -87,7 +105,9 @@ fn searching_the_file(cx: &mut TestAppContext) {
     t.keys("/").input("TWO").keys("enter");
     assert_eq!(selected(&mut t), (18, "TWO".into()), "a capital: case matters");
     t.keys("g g j e *");
-    assert_eq!(selected(&mut t), (18, "TWO".into()), "* searches for what's selected, from it on");
+    assert_eq!(selected(&mut t), (8, "two".into()), "* makes what's selected the search, and goes nowhere");
+    t.keys("n");
+    assert_eq!(selected(&mut t), (18, "TWO".into()), "n finds it, a whole word");
     t.keys("?").input("one").keys("enter");
     assert_eq!(selected(&mut t).0, 0, "? searches back");
     t.keys("space ?");
@@ -99,10 +119,10 @@ fn ctrl_o_goes_back_where_a_jump_came_from(cx: &mut TestAppContext) {
     let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
     let mut t = open(&text, &[], cx);
     let line = |t: &mut Setup| t.read(|e| e.tab().map(|tab| tab.doc.buffer.line_of(tab.cursor())).unwrap());
-    t.keys("j j G");
+    t.keys("j j g e");
     assert_eq!(line(&mut t), 199);
     t.keys("ctrl-o");
-    assert_eq!(line(&mut t), 2, "back where G came from");
+    assert_eq!(line(&mut t), 2, "back where ge came from");
     t.keys("ctrl-i");
     assert_eq!(line(&mut t), 199, "and forward again");
     t.keys("j k");
@@ -316,4 +336,163 @@ fn a_story_isnt_given_more_than_one_cursor(cx: &mut TestAppContext) {
     t.keys("C");
     t.keys("tab");
     assert_eq!(t.text(), "def add(a, b):\n    return a + b\n", "the step, once");
+}
+
+/// Every selection's text, in order, and the main one's.
+fn selections(t: &mut Setup) -> (Vec<String>, String) {
+    t.read(|e| {
+        let tab = e.tab().unwrap();
+        let text = tab.doc.text();
+        let mut all: Vec<_> = tab.view.others.iter().chain([&tab.view.selection]).copied().collect();
+        all.sort_by_key(|r| r.from());
+        (all.iter().map(|r| text[r.bytes()].to_string()).collect(), text[tab.view.selection.bytes()].to_string())
+    })
+}
+
+#[gpui::test]
+fn n_and_n_go_the_same_way_whichever_way_the_search_did(cx: &mut TestAppContext) {
+    let mut t = open("ab ab ab ab\n", &[], cx);
+    let at = |t: &mut Setup| t.read(|e| e.tab().unwrap().view.selection.from());
+    t.keys("g l ?").input("ab").keys("enter");
+    assert_eq!(at(&mut t), 6, "? finds the one before");
+    t.keys("n");
+    assert_eq!(at(&mut t), 9, "n still goes forward");
+    t.keys("N N");
+    assert_eq!(at(&mut t), 3, "N back");
+    t.keys("2 n");
+    assert_eq!(at(&mut t), 9, "2n: two along");
+    t.keys("g g v l n");
+    assert_eq!(selections(&mut t).0, vec!["ab", "ab"], "in select mode a match is another selection");
+}
+
+#[gpui::test]
+fn star_searches_whole_words_and_ctrl_o_takes_a_count(cx: &mut TestAppContext) {
+    let mut t = open("two twofold two\n", &[], cx);
+    t.keys("e *");
+    assert_eq!(t.cursor(), 3, "* goes nowhere");
+    t.keys("n");
+    assert_eq!(selections(&mut t).1, "two");
+    assert_eq!(t.read(|e| e.tab().unwrap().view.selection.from()), 12, "twofold isn't the word two");
+    t.keys("alt-*");
+    t.keys("g g n");
+    assert_eq!(t.read(|e| e.tab().unwrap().view.selection.from()), 4, "alt-* matches anywhere");
+
+    let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
+    let mut t = open(&text, &[], cx);
+    let line = |t: &mut Setup| t.read(|e| e.tab().map(|tab| tab.doc.buffer.line_of(tab.cursor())).unwrap());
+    t.keys("1 0 0 G 2 0 0 G g e");
+    t.keys("2 ctrl-o");
+    assert_eq!(line(&mut t), 99, "two jumps back");
+    t.keys("2 ctrl-i");
+    assert_eq!(line(&mut t), 299, "and two forward");
+}
+
+#[gpui::test]
+fn c_copies_the_selection_to_the_next_line_it_fits_on(cx: &mut TestAppContext) {
+    let mut t = open("abcd\nx\nabcd\nabcd\n", &[], cx);
+    t.keys("l v l C");
+    assert_eq!(selections(&mut t), (vec!["bc".into(), "bc".into()], "bc".into()), "x is too short; the copy is the main one");
+    assert_eq!(t.read(|e| e.tab().unwrap().view.selection.from()), 8);
+    t.keys("escape , g g 2 C");
+    assert_eq!(cursors(&mut t), 3, "2C: two copies");
+    t.keys(", g e alt-C");
+    assert_eq!(cursors(&mut t), 2, "alt-C: above");
+    t.keys(", g g y l alt-c").input("X").keys("escape P");
+    assert_eq!(t.text(), "aXacd\nx\nabcd\nabcd\n", "alt-c changes without yanking: a was yanked, and still is");
+}
+
+#[gpui::test]
+fn esc_in_select_mode_keeps_the_cursors(cx: &mut TestAppContext) {
+    let mut t = open("aa\nbb\ncc\n", &[], cx);
+    t.keys("C v escape");
+    assert_eq!((cursors(&mut t), t.read(|e| e.modal.mode)), (2, Mode::Normal), "out of select mode, still two");
+    t.keys("escape");
+    assert_eq!(cursors(&mut t), 1, "esc in normal mode is back to one, as before");
+}
+
+#[gpui::test]
+fn the_main_selection_turns_and_selections_merge(cx: &mut TestAppContext) {
+    let mut t = open("a b c\n", &[], cx);
+    t.keys("%").keys("s").input("\\w").keys("enter");
+    assert_eq!(selections(&mut t), (vec!["a".into(), "b".into(), "c".into()], "a".into()));
+    t.keys(")");
+    assert_eq!(selections(&mut t).1, "b", ") makes the next the main one");
+    t.keys("2 (");
+    assert_eq!(selections(&mut t).1, "c", "2( two back, round the start");
+    t.keys("alt-,");
+    assert_eq!(selections(&mut t), (vec!["a".into(), "b".into()], "b".into()), "alt-, drops the main one");
+    t.keys("alt-minus");
+    assert_eq!(selections(&mut t).0, vec!["a b"], "alt-minus merges them all");
+    t.keys("s").input("\\w|\\s").keys("enter alt-_");
+    assert_eq!(selections(&mut t).0, vec!["a b"], "alt-_ merges those that touch");
+}
+
+#[gpui::test]
+fn ampersand_lines_selections_up(cx: &mut TestAppContext) {
+    let mut t = open("a = 1\nlong = 2\n", &[], cx);
+    t.keys("%").keys("s").input("=").keys("enter &");
+    assert_eq!(t.text(), "a    = 1\nlong = 2\n");
+    t.keys("u");
+    assert_eq!(t.text(), "a = 1\nlong = 2\n", "one undo");
+}
+
+#[gpui::test]
+fn counted_o_and_alt_s_make_cursors_to_type_at(cx: &mut TestAppContext) {
+    let mut t = open("x\n", &[], cx);
+    t.keys("3 o").input("y").keys("escape");
+    assert_eq!(t.text(), "x\ny\ny\ny\n", "3o: three lines, typed on at once");
+    t.keys("u");
+    assert_eq!(t.text(), "x\n");
+    let mut t = open("ab\ncd\n", &[], cx);
+    t.keys("% alt-s");
+    assert_eq!(selections(&mut t).0, vec!["ab", "cd"], "alt-s: a selection a line");
+    t.keys(", % alt-J");
+    assert_eq!((t.text(), t.cursor()), ("ab cd\n".into(), 2), "alt-J: joined, the cursor on the space");
+}
+
+#[gpui::test]
+fn insert_mode_keeps_the_selection_and_ctrl_r_types_a_register(cx: &mut TestAppContext) {
+    let mut t = open("one two\n", &[], cx);
+    t.keys("e i").input("X").keys("escape");
+    assert_eq!((t.text(), selections(&mut t).1), ("Xone two\n".into(), "one".into()), "i keeps the word selected");
+    t.keys("y g l a ctrl-r \"").keys("escape");
+    assert_eq!(t.text(), "Xone twoone\n", "ctrl-r and a register: what's in it, and only that");
+}
+
+#[gpui::test]
+fn alt_keys_select_by_the_syntax_tree(cx: &mut TestAppContext) {
+    let mut t = open("", &[], cx);
+    let code = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+    let path = t.dir.join("add.rs");
+    std::fs::write(&path, code).unwrap();
+    let editor = t.editor.clone();
+    t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![path.clone()], cx)));
+    t.cx.run_until_parked();
+    let at = code.find("b: i32").unwrap();
+    t.editor.update(t.cx, |e, _| e.tab_mut().unwrap().view.selection = ghostwrite_core::Range::point(at));
+    t.keys("alt-o");
+    let shown = |t: &mut Setup| t.read(|e| e.tab().map(|tab| tab.doc.text()[tab.view.selection.bytes()].to_string()).unwrap());
+    assert_eq!(shown(&mut t), "b: i32");
+    t.keys("alt-a");
+    let cursors = t.read(|e| e.tab().unwrap().view.others.len() + 1);
+    assert_eq!(cursors, 2, "alt-a: a cursor on each parameter");
+}
+
+#[gpui::test]
+fn the_bracket_matching_the_cursors_is_marked(cx: &mut TestAppContext) {
+    let mut t = open("f(a, [b])\n", &[], cx);
+    let pair = |t: &mut Setup| t.read(|e| e.matching_brackets(e.tab().unwrap()));
+    assert_eq!(pair(&mut t), None, "not on a bracket");
+    t.keys("l");
+    assert_eq!(pair(&mut t), Some([1, 8]), "on one: it and its other half");
+    t.keys("A backspace backspace").input("]");
+    assert_eq!(t.text(), "f(a, [b]\n");
+    assert_eq!(pair(&mut t), Some([7, 5]), "typing: the one just typed");
+}
+
+#[gpui::test]
+fn a_bracket_with_no_other_half_isnt_marked(cx: &mut TestAppContext) {
+    let mut t = open("f(a, [b)\n", &[], cx);
+    t.keys("5 l");
+    assert_eq!(t.read(|e| e.matching_brackets(e.tab().unwrap())), None);
 }

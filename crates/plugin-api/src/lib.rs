@@ -35,7 +35,7 @@ pub mod bindings {
 }
 
 pub use bindings::ghostwrite::plugin::host::fetch;
-pub use bindings::ghostwrite::plugin::types::{Action, Context, Drawing, Edit, Event, Glyph, Page, Span};
+pub use bindings::ghostwrite::plugin::types::{Action, Context, Drawing, Edit, Event, Glyph, Page, Region, Span};
 
 /// What a plugin answers: what to do, or what went wrong, for the status bar.
 pub type Reply = Result<Vec<Action>, String>;
@@ -69,8 +69,9 @@ pub trait Plugin {
         Err("this plugin doesn't make pages".into())
     }
 
-    /// Draw the page with this key about `pixels` wide.
-    fn draw_page(_key_high: u64, _key_low: u64, _pixels: u32) -> Option<Drawing> {
+    /// Draw `region` of the page with this key: exactly as big as it, with what's
+    /// past the page's edge see-through.
+    fn draw(_key_high: u64, _key_low: u64, _region: Region) -> Option<Drawing> {
         None
     }
 }
@@ -102,8 +103,8 @@ macro_rules! register {
                 <$plugin as $crate::Plugin>::make_pages(text)
             }
 
-            fn draw_page(key_high: u64, key_low: u64, pixels: u32) -> Option<$crate::Drawing> {
-                <$plugin as $crate::Plugin>::draw_page(key_high, key_low, pixels)
+            fn draw(key_high: u64, key_low: u64, region: $crate::Region) -> Option<$crate::Drawing> {
+                <$plugin as $crate::Plugin>::draw(key_high, key_low, region)
             }
         }
 

@@ -5,6 +5,7 @@
 pub mod files;
 pub mod fs;
 pub mod git;
+pub mod merge;
 pub mod platform;
 pub mod store;
 pub mod tree;

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use ghostwrite_core::language::Highlighter as OwnHighlighter;
 use ghostwrite_core::syntax::{Highlights, Span, highlights};
-use ghostwrite_page::{Bitmap, Pages, Place, Renderer, Size};
+use ghostwrite_page::{Bitmap, Pages, Place, Region, Renderer, Size};
 use ghostwrite_plugin::manifest::Access;
 use ghostwrite_plugin::{Action, Code, Context, Event, Reply};
 use tree_sitter_highlight::Highlighter;
@@ -372,14 +372,27 @@ impl Pages for MadePages {
         self.pages.get(page).map_or(0, |page| (u128::from(page.key_high) << 64) | u128::from(page.key_low))
     }
 
-    fn draw(&self, page: usize, pixels: usize) -> Option<Bitmap> {
+    fn draw(&self, page: usize, region: Region) -> Option<Bitmap> {
         let page = self.pages.get(page)?;
+        if region.too_big() {
+            return None;
+        }
+        let asked = wit::Region {
+            scale: region.scale,
+            x: u32::try_from(region.x).ok()?,
+            y: u32::try_from(region.y).ok()?,
+            width: u32::try_from(region.width).ok()?,
+            height: u32::try_from(region.height).ok()?,
+        };
         let mut held = self.live.lock().unwrap_or_else(|e| e.into_inner());
         let live = held.as_mut()?;
         live.store.set_epoch_deadline(live.ticks);
-        let drawn = live.plugin.call_draw_page(&mut live.store, page.key_high, page.key_low, u32::try_from(pixels).ok()?);
+        let drawn = live.plugin.call_draw(&mut live.store, page.key_high, page.key_low, asked);
         match drawn {
-            Ok(drawn) => drawn.map(|drawn| Bitmap { width: drawn.width as usize, height: drawn.height as usize, bgra: drawn.bgra }),
+            // A drawing that isn't what was asked for isn't shown.
+            Ok(drawn) => drawn
+                .filter(|drawn| (drawn.width, drawn.height) == (asked.width, asked.height) && drawn.bgra.len() == region.width * region.height * 4)
+                .map(|drawn| Bitmap { width: region.width, height: region.height, bgra: drawn.bgra }),
             Err(_) => {
                 *held = None;
                 None

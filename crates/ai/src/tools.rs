@@ -6,6 +6,10 @@
 //! and its arguments. Whatever a model is likely to write instead (`cat`, `grep
 //! -rn`, a path that's only nearly right) is understood, and what can't be done
 //! comes back as what to do instead: it's all it has to go on.
+//!
+//! Outside the project, a file or folder can be read (by its whole path, or
+//! `~/…`) once the user has let it: [`outside`] says what a command would read
+//! there, for the user to be asked, and what they allowed is passed in.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -47,16 +51,22 @@ pub struct Looked {
 
 /// [`run`], for a model that `sees` images and PDFs or one that doesn't: reading one
 /// shows it, or says it can't be.
-pub fn look(root: &Path, command: &str, room: usize, sees: bool) -> Looked {
+pub fn look(root: &Path, command: &str, room: usize, sees: bool, allowed: &[PathBuf]) -> Looked {
     let words = words(command);
     let reads = words.first().is_some_and(|verb| ["read", "read_file", "cat", "open", "view", "less", "more", "show", "head", "tail"].contains(&verb.as_str()));
+    let downloads = words.first().is_some_and(|verb| ["curl", "wget", "fetch"].contains(&verb.as_str()));
+    if (reads || downloads)
+        && let Some(address) = words[1..].iter().find(|word| crate::web::is_address(word))
+    {
+        return from_the_web(address, sees);
+    }
     let found = reads.then(|| path_arg(&words[1..])).flatten().and_then(|path| {
         // `a.png:12`, as for any file.
         let path = path.rsplit_once(':').filter(|(_, line)| line.parse::<usize>().is_ok()).map_or(path.clone(), |(file, _)| file.to_string());
-        resolve(root, &path).ok()
+        resolve(root, &path, allowed).ok()
     });
-    let Some(found) = found.filter(|found| found.path.is_file()) else { return Looked { text: run(root, command, room), file: None } };
-    let Some(kind) = crate::attach::kind_of(&found.path) else { return Looked { text: run(root, command, room), file: None } };
+    let Some(found) = found.filter(|found| found.path.is_file()) else { return Looked { text: run_allowed(root, command, room, allowed), file: None } };
+    let Some(kind) = crate::attach::kind_of(&found.path) else { return Looked { text: run_allowed(root, command, room, allowed), file: None } };
     if !sees {
         return Looked { text: format!("{}{} is {kind}, and this model can only read text.", found.note, found.rel), file: None };
     }
@@ -66,15 +76,65 @@ pub fn look(root: &Path, command: &str, room: usize, sees: bool) -> Looked {
     }
 }
 
+/// What's at a web address: for a model that can't see, nothing's fetched at all.
+fn from_the_web(address: &str, sees: bool) -> Looked {
+    if !sees {
+        return Looked { text: format!("this model can only read text, so it can't look at {address}."), file: None };
+    }
+    match crate::web::fetch(address) {
+        Ok(file) => Looked { text: format!("{address} is shown to you here."), file: Some(file) },
+        Err(why) => Looked { text: format!("couldn't show {address}: {why}."), file: None },
+    }
+}
+
 /// Run a command, for at most about `room` bytes of output. What goes wrong is
 /// output too: it tells the model what to do instead.
 pub fn run(root: &Path, command: &str, room: usize) -> String {
+    run_allowed(root, command, room, &[])
+}
+
+/// What a command would read outside the project (an existing file or folder,
+/// by its whole path or `~/…`), for the user to be asked first.
+pub fn outside(root: &Path, command: &str) -> Option<PathBuf> {
+    let words = words(command);
+    let verb = words.first()?.as_str();
+    let reads = matches!(verb, "read" | "read_file" | "cat" | "open" | "view" | "less" | "more" | "show" | "head" | "tail" | "wc") || is_list(verb);
+    let given = reads.then(|| path_arg(&words[1..])).flatten()?;
+    let given = given.rsplit_once(':').filter(|(_, line)| line.parse::<usize>().is_ok()).map_or(given.as_str(), |(file, _)| file);
+    outside_path(root, given)
+}
+
+/// `given` as a path outside the project that's there, if it is one.
+fn outside_path(root: &Path, given: &str) -> Option<PathBuf> {
+    let path = match given.strip_prefix("~/") {
+        Some(rest) => std::env::home_dir()?.join(rest),
+        None if given == "~" => std::env::home_dir()?,
+        None => PathBuf::from(given),
+    };
+    if !path.is_absolute() {
+        return None;
+    }
+    let real = ghostwrite_project::platform::real(&path).ok()?;
+    let real_root = ghostwrite_project::platform::real(root).unwrap_or_else(|_| root.to_path_buf());
+    (!real.starts_with(&real_root)).then_some(real)
+}
+
+/// `path` for the model and the user: `~/…` if it's in home.
+pub fn shown(path: &Path) -> String {
+    match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// [`run`], able to read what the user `allowed` outside the project too.
+fn run_allowed(root: &Path, command: &str, room: usize, allowed: &[PathBuf]) -> String {
     let words = words(command);
     let Some(verb) = words.first() else { return USAGE.into() };
     let args = &words[1..];
     match verb.as_str() {
         "git" => git(root, args, room),
-        "wc" => match path_arg(args).map(|p| resolve(root, &p)) {
+        "wc" => match path_arg(args).map(|p| resolve(root, &p, allowed)) {
             Some(Ok(found)) => match std::fs::read_to_string(&found.path) {
                 Ok(text) => format!("{}: {} lines", found.rel, text.lines().count()),
                 Err(e) => format!("couldn't read {}: {e}", found.rel),
@@ -83,10 +143,10 @@ pub fn run(root: &Path, command: &str, room: usize) -> String {
             None => USAGE.into(),
         },
         verb if is_search(verb) => search(root, args, room),
-        verb if is_list(verb) => list(root, path_arg(args).as_deref().unwrap_or("."), room),
-        "read" | "read_file" | "cat" | "open" | "view" | "less" | "more" | "show" => read(root, args, room, Part::Asked),
-        "head" => read(root, args, room, Part::Head),
-        "tail" => read(root, args, room, Part::Tail),
+        verb if is_list(verb) => list(root, path_arg(args).as_deref().unwrap_or("."), room, allowed),
+        "read" | "read_file" | "cat" | "open" | "view" | "less" | "more" | "show" => read(root, args, room, Part::Asked, allowed),
+        "head" => read(root, args, room, Part::Head, allowed),
+        "tail" => read(root, args, room, Part::Tail, allowed),
         other => format!("there's no command `{other}`. {USAGE}"),
     }
 }
@@ -159,8 +219,15 @@ struct Found {
 }
 
 /// The file or folder a model means by `given`. A path that doesn't exist is
-/// looked for by its end, so `util.py` finds `src/util.py`.
-fn resolve(root: &Path, given: &str) -> Result<Found, String> {
+/// looked for by its end, so `util.py` finds `src/util.py`. Outside the
+/// project, only what the user `allowed`.
+fn resolve(root: &Path, given: &str, allowed: &[PathBuf]) -> Result<Found, String> {
+    if let Some(path) = outside_path(root, given) {
+        if !allowed.iter().any(|ok| path.starts_with(ok)) {
+            return Err(format!("{given} is outside the project, and the user didn't let you read it. Go on without it."));
+        }
+        return Ok(Found { rel: shown(&path), path, note: String::new() });
+    }
     let root_text = root.display().to_string();
     let clean = given.strip_prefix(&root_text).unwrap_or(given);
     let clean = clean.trim_start_matches("./").trim_start_matches('/').trim_end_matches('/');
@@ -203,7 +270,7 @@ enum Part {
     Tail,
 }
 
-fn read(root: &Path, args: &[String], room: usize, part: Part) -> String {
+fn read(root: &Path, args: &[String], room: usize, part: Part, allowed: &[PathBuf]) -> String {
     let mut numbers = vec![];
     let mut path = None;
     let mut flags = args.iter().peekable();
@@ -230,12 +297,12 @@ fn read(root: &Path, args: &[String], room: usize, part: Part) -> String {
         given = file.to_string();
         numbers.insert(0, line);
     }
-    let found = match resolve(root, &given) {
+    let found = match resolve(root, &given, allowed) {
         Ok(found) => found,
         Err(why) => return why,
     };
     if found.path.is_dir() {
-        return format!("{} is a folder:\n{}", found.rel, list(root, &found.rel, room));
+        return format!("{} is a folder:\n{}", found.rel, list(root, &found.rel, room, allowed));
     }
     let text = match std::fs::read_to_string(&found.path) {
         Ok(text) => text,
@@ -271,13 +338,26 @@ fn read(root: &Path, args: &[String], room: usize, part: Part) -> String {
     format!("{}{body}{hint}", found.note)
 }
 
-fn list(root: &Path, given: &str, room: usize) -> String {
-    let found = match resolve(root, given) {
+fn list(root: &Path, given: &str, room: usize, allowed: &[PathBuf]) -> String {
+    let found = match resolve(root, given, allowed) {
         Ok(found) => found,
         Err(why) => return why,
     };
     if found.path.is_file() {
         return format!("{}{}", found.note, found.rel);
+    }
+    // Outside the project, what's in the folder itself (all that's under a home folder is too much).
+    if outside_path(root, given).is_some() {
+        let Ok(entries) = std::fs::read_dir(&found.path) else { return format!("couldn't list {}", found.rel) };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok().filter(|n| !n.starts_with('.'))?;
+                Some(if e.path().is_dir() { format!("{}/{name}/", found.rel) } else { format!("{}/{name}", found.rel) })
+            })
+            .collect();
+        names.sort();
+        return if names.is_empty() { "(no files)".into() } else { joined(&names, room, "more") };
     }
     let real_root = ghostwrite_project::platform::real(root).unwrap_or_else(|_| root.to_path_buf());
     let all = files(&real_root, &found.path);
@@ -413,7 +493,26 @@ mod tests {
         assert_eq!(run(&root, "read src/lib.rs", ROOM), "1│pub fn one() {}\n2│pub fn two() {}\n");
         assert_eq!(run(&root, "search fn two", ROOM), "src/lib.rs:2: pub fn two() {}");
         assert!(run(&root, "read ../../etc/passwd", ROOM).contains("there's no"), "nothing outside the project");
-        assert!(run(&root, "read /etc/passwd", ROOM).contains("there's no"));
+        assert!(run(&root, "read /etc/passwd", ROOM).contains("didn't let you read it"), "not without asking");
+    }
+
+    #[test]
+    fn outside_the_project_what_the_user_allowed_can_be_read() {
+        let root = project("tools-inside");
+        let elsewhere = ghostwrite_project::scratch_dir("tools-elsewhere");
+        std::fs::create_dir_all(elsewhere.join("conf")).unwrap();
+        std::fs::write(elsewhere.join("conf/a.toml"), "x = 1\n").unwrap();
+        let file = elsewhere.join("conf/a.toml").display().to_string();
+        let real = ghostwrite_project::platform::real(&elsewhere).unwrap();
+        // What a command would read out there, to ask about.
+        assert_eq!(outside(&root, &format!("read {file}:1")), Some(real.join("conf/a.toml")));
+        assert_eq!(outside(&root, "read src/lib.rs"), None, "inside isn't asked about");
+        assert_eq!(outside(&root, &format!("read {}/src/lib.rs", root.display())), None, "nor the project by its whole path");
+        // Allowed: the folder, and what's under it.
+        let allowed = [real.join("conf")];
+        assert_eq!(run_allowed(&root, &format!("read {file}"), ROOM, &allowed), "1│x = 1\n");
+        assert_eq!(run_allowed(&root, &format!("list {}", elsewhere.join("conf").display()), ROOM, &allowed), format!("{}/a.toml", shown(&real.join("conf"))));
+        assert!(run_allowed(&root, &format!("list {}", elsewhere.display()), ROOM, &allowed).contains("didn't let you"), "not what's around it");
     }
 
     #[test]
@@ -496,6 +595,22 @@ mod tests {
         let start = std::time::Instant::now();
         let grammar = crate::protocol::grammar(&all, true, false);
         println!("{:>7.2} ms  grammar ({} files, {} bytes)", start.elapsed().as_secs_f64() * 1e3, all.len(), grammar.len());
+    }
+
+    #[test]
+    fn web_addresses_are_understood_however_theyre_written() {
+        let root = project("tools-web");
+        for said in [
+            "read http://127.0.0.1:9/a.svg?b=c&d=e",
+            "cat \"http://127.0.0.1:9/a.png\"",
+            "curl -o a.png http://127.0.0.1:9/a.png",
+            "wget http://127.0.0.1:9/a.png",
+        ] {
+            let looked = look(&root, said, ROOM, true, &[]);
+            assert!(looked.file.is_none() && looked.text.contains("isn't on the public web"), "{said}: {}", looked.text);
+        }
+        let looked = look(&root, "read https://example.com/a.png", ROOM, false, &[]);
+        assert!(looked.file.is_none() && looked.text.contains("only read text"), "{}", looked.text);
     }
 
     #[test]

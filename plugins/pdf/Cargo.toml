@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 ghostwrite-plugin-api = { path = "../../crates/plugin-api" }
 wit-bindgen = "0.57"
-hayro = "0.7"
+hayro = "0.9"
 
 [profile.release]
 opt-level = 3

@@ -49,6 +49,7 @@ impl ProjectsPage {
 
     fn forget(&mut self, project: &Path, cx: &mut Context<Self>) {
         store::forget_project(project);
+        crate::actions::set_menus(cx);
         self.projects = store::recent_projects();
         self.selected = self.selected.min(self.projects.len().saturating_sub(1));
         cx.notify();

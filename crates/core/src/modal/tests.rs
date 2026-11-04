@@ -33,27 +33,39 @@ struct Session {
     buffer: Buffer,
     selection: Range,
     regs: Regs,
+    language: Option<&'static crate::Language>,
 }
 
 impl Session {
     fn new(text: &str) -> Self {
-        Self { modal: Modal::default(), buffer: Buffer::new(text), selection: Range::point(0), regs: Regs::default() }
+        Self { modal: Modal::default(), buffer: Buffer::new(text), selection: Range::point(0), regs: Regs::default(), language: None }
     }
 
-    /// Space-separated keys; `esc` and `ret` are named, anything else
-    /// longer than one char is typed text.
+    /// The same, in the language of files named like `path`.
+    fn in_file(text: &str, path: &str) -> Self {
+        Self { language: crate::Language::for_path(std::path::Path::new(path)), ..Self::new(text) }
+    }
+
+    /// Space-separated keys; `esc`, `ret`, `tab`, `bs`, `del` are named, and
+    /// `ctrl-x`, `alt-x`; `'x` is the key x even in insert mode; anything
+    /// else longer than one char is typed text.
     fn keys(&mut self, keys: &str) -> &mut Self {
         let indent = IndentUnit::default();
         for word in keys.split(' ') {
             let key = match word {
                 "esc" => Some(Key::Escape),
                 "ret" => Some(Key::Enter),
+                "tab" => Some(Key::Tab),
+                "bs" => Some(Key::Backspace),
+                "del" => Some(Key::Delete),
                 "space" => Some(Key::Char(' ')),
                 w if w.starts_with("ctrl-") => w.chars().last().map(Key::Ctrl),
+                w if w.starts_with("alt-") => w.chars().last().map(Key::Alt),
+                w if w.starts_with('\'') && w.len() > 1 => w.chars().last().map(Key::Char),
                 w if w.chars().count() == 1 && self.modal.mode != Mode::Insert => Some(Key::Char(w.chars().next().unwrap())),
                 _ => None,
             };
-            let mut t = Target { buffer: &mut self.buffer, selection: &mut self.selection, indent: &indent, page_rows: 20, language: None };
+            let mut t = Target { buffer: &mut self.buffer, selection: &mut self.selection, indent: &indent, page_rows: 20, language: self.language };
             match key {
                 Some(key) => {
                     self.modal.key(key, &mut self.regs, &mut t);
@@ -68,6 +80,23 @@ impl Session {
 
     fn text(&self) -> &str {
         self.buffer.text()
+    }
+
+    /// What's selected.
+    fn selected(&self) -> &str {
+        &self.buffer.text()[self.selection.bytes()]
+    }
+
+    /// What the last key gave back, for a key that's an effect.
+    fn outcome(&mut self, keys: &str) -> Outcome {
+        let (last, first) = keys.rsplit_once(' ').map_or((keys, ""), |(first, last)| (last, first));
+        if !first.is_empty() {
+            self.keys(first);
+        }
+        let indent = IndentUnit::default();
+        let mut t = Target { buffer: &mut self.buffer, selection: &mut self.selection, indent: &indent, page_rows: 20, language: self.language };
+        let key = if let Some(c) = last.strip_prefix("ctrl-") { Key::Ctrl(c.chars().next().unwrap()) } else { Key::Char(last.chars().next().unwrap()) };
+        self.modal.key(key, &mut self.regs, &mut t)
     }
 }
 
@@ -110,7 +139,100 @@ fn a_appends_after_the_selection() {
     let mut s = Session::new("one two\n");
     s.keys("w a");
     assert_eq!(s.modal.mode, Mode::Insert);
-    assert_eq!(s.selection, Range::point("one ".len()), "after the selection: the word and its space");
+    assert_eq!(s.selection, Range::new(0, "one ".len()), "after the selection (the word and its space), which stays");
+}
+
+#[test]
+fn i_and_a_keep_the_selection_as_helix_does() {
+    let mut s = Session::new("one two\n");
+    s.keys("e i X esc");
+    assert_eq!(s.text(), "Xone two\n");
+    assert_eq!((s.selected(), s.selection.head), ("one", 1), "still the word, the cursor at its start");
+    let mut s = Session::new("one two\n");
+    s.keys("e a XY esc");
+    assert_eq!(s.text(), "oneXY two\n");
+    assert_eq!(s.selected(), "oneXY", "after a, what was typed is selected too");
+    assert_eq!(s.selection.cursor(s.text()), 4, "with the cursor on the last char typed");
+    let mut s = Session::new("ab\n");
+    s.keys("i X esc");
+    assert_eq!((s.text(), s.selection), ("Xab\n", Range::point(1)), "a cursor alone stays one");
+    let mut s = Session::new("one two\n");
+    s.keys("e i bs");
+    assert_eq!(s.text(), "one two\n", "Backspace in insert mode takes the char before, never the selection");
+}
+
+#[test]
+fn whole_lines_changed_are_typed_on_a_line_of_their_own() {
+    let mut s = Session::new("{\n    b\n}\n");
+    s.keys("j x c X esc");
+    assert_eq!(s.text(), "{\n    X\n}\n", "in their place, indented, not joined to the next");
+    let mut s = Session::new("ab cd\n");
+    s.keys("e c X esc");
+    assert_eq!(s.text(), "X cd\n", "part of a line: changed where it was");
+}
+
+#[test]
+fn alt_d_and_alt_c_dont_yank() {
+    let mut s = Session::new("one two\n");
+    s.keys("e y");
+    s.selection = Range::new(4, 7);
+    s.keys("alt-d");
+    assert_eq!(s.text(), "one \n");
+    s.selection = Range::new(0, 3);
+    s.keys("alt-c X esc");
+    assert_eq!(s.text(), "X \n");
+    assert_eq!(s.regs.yanked, "one", "what was yanked before is still there");
+}
+
+#[test]
+fn o_opens_lines_as_enter_would() {
+    let mut s = Session::new("x\n");
+    s.keys("3 o");
+    assert_eq!(s.text(), "x\n\n\n\n");
+    assert_eq!((s.selection, s.modal.take_added()), (Range::point(2), vec![Range::point(3), Range::point(4)]), "three lines, each with a cursor");
+    let mut s = Session::in_file("fn f() {\n}\n", "a.rs");
+    s.keys("o");
+    assert_eq!((s.text(), s.selection.head), ("fn f() {\n    \n}\n", 13), "in a level after an open bracket");
+    let mut s = Session::in_file("fn f() {\n}\n", "a.rs");
+    s.keys("j O");
+    assert_eq!(s.text(), "fn f() {\n    \n}\n", "O: as if Enter at the end of the line above");
+    let mut s = Session::in_file("    // a\n", "a.rs");
+    s.keys("o b esc");
+    assert_eq!(s.text(), "    // a\n    // b\n", "a line comment goes on");
+    let mut s = Session::in_file("/// a\n", "a.rs");
+    s.keys("O");
+    assert_eq!(s.text(), "/// \n/// a\n", "as it's written there");
+}
+
+#[test]
+fn enter_goes_on_with_a_line_comment() {
+    let mut s = Session::in_file("", "a.py");
+    s.keys("i #a ret b");
+    assert_eq!(s.text(), "#a\n# b");
+    let mut s = Session::in_file("", "a.py");
+    s.keys("i x#a ret b");
+    assert_eq!(s.text(), "x#a\nb", "only a line that starts with one");
+}
+
+#[test]
+fn insert_keys_as_in_helix() {
+    let typed = |text: &str, keys: &str| {
+        let mut s = Session::new(text);
+        s.keys(keys);
+        (s.text().to_string(), s.selection.head)
+    };
+    assert_eq!(typed("foo.bar baz\n", "g l a ctrl-w"), ("foo.bar \n".into(), 8), "ctrl-w: back to the word's start");
+    assert_eq!(typed("foo.bar\n", "g l a ctrl-w ctrl-w"), ("foo\n".into(), 3), "punctuation is a word of its own");
+    assert_eq!(typed("foo bar\n", "i alt-d"), (" bar\n".into(), 0), "alt-d: on to the word's end");
+    assert_eq!(typed("    foo bar\n", "g l a ctrl-u"), ("    \n".into(), 4), "ctrl-u: back to the first non-blank");
+    assert_eq!(typed("    foo\n", "g s i ctrl-u"), ("foo\n".into(), 0), "and from there, the line's start");
+    assert_eq!(typed("a\nb\n", "j i ctrl-u"), ("ab\n".into(), 1), "at the start, onto the line before");
+    assert_eq!(typed("foo bar\n", "l l i ctrl-k"), ("fo\n".into(), 2), "ctrl-k: on to the line's end");
+    assert_eq!(typed("ab\ncd\n", "g l a ctrl-k"), ("abcd\n".into(), 2), "at the end, its line break");
+    assert_eq!(typed("abc\n", "l i ctrl-h ctrl-d"), ("c\n".into(), 0), "ctrl-h, ctrl-d: a char back, on");
+    assert_eq!(typed("ab\n", "l i ctrl-j"), ("a\nb\n".into(), 2), "ctrl-j: a new line");
+    assert_eq!(typed("ab\n", "l i tab"), ("a   b\n".into(), 4), "tab: to the next indent stop");
+    assert_eq!(typed("ab\n", "y i ctrl-r '\""), ("aab\n".into(), 1), "ctrl-r: a register, typed out");
 }
 
 #[test]
@@ -253,6 +375,28 @@ fn brackets_and_quotes_close_themselves() {
     assert_eq!(s.text(), "fn(){\n    x\n}\n", "Enter between braces opens an indented line");
 }
 
+static MATHS: crate::Language = crate::Language { name: "maths", pairs: &[('$', '$')], unpaired: &['\''], ..crate::Language::DEFAULT };
+
+#[test]
+fn a_language_has_pairs_of_its_own() {
+    let mut s = Session::new("\n");
+    let typed = |s: &mut Session, text: &str| {
+        let indent = IndentUnit::default();
+        let mut t = Target { buffer: &mut s.buffer, selection: &mut s.selection, indent: &indent, page_rows: 20, language: Some(&MATHS) };
+        for c in text.chars() {
+            s.modal.insert(c.encode_utf8(&mut [0; 4]), &mut t);
+        }
+    };
+    s.keys("i");
+    typed(&mut s, "$x");
+    assert_eq!((s.text(), s.selection.head), ("$x$\n", 2), "`$` closes itself");
+    typed(&mut s, "$ '");
+    assert_eq!(s.text(), "$x$ '\n", "its close steps over, and `'` is just one here");
+    let mut plain = Session::new("\n");
+    plain.keys("i $");
+    assert_eq!(plain.text(), "$\n", "elsewhere `$` is just one");
+}
+
 /// A language that types symbols with backslashes, with a real table of them.
 static TABLE: crate::abbreviation::Abbreviations = crate::abbreviation::Abbreviations::new(include_str!("../../../lean/src/abbreviations.tsv"));
 static ABBREVIATING: crate::Language = crate::Language { name: "abbreviating", abbreviations: Some(&TABLE), unpaired: &['`'], ..crate::Language::DEFAULT };
@@ -393,4 +537,194 @@ fn join_increment_comment_and_registers() {
     let mut s = Session::new("ab cd\n");
     s.keys("e \" a y \" a P");
     assert_eq!(s.buffer.text(), "abab cd\n", "a named register");
+}
+
+#[test]
+fn the_tree_goes_back_to_the_mode_it_came_from() {
+    let mut m = Modal::default();
+    m.to_tree();
+    m.leave_tree();
+    assert_eq!(m.mode, Mode::Normal);
+    m.enter(Mode::Ai);
+    m.to_tree();
+    m.leave_tree();
+    assert_eq!(m.mode, Mode::Ai, "a story's still up");
+    m.to_tree();
+    m.leave(Mode::Ai);
+    m.leave_tree();
+    assert_eq!(m.mode, Mode::Normal, "it ended meanwhile");
+}
+
+#[test]
+fn counts_go_where_helix_takes_them() {
+    let mut s = Session::new("1\n2\n3\n");
+    s.keys("j j G");
+    assert_eq!(s.selection, Range::point(4), "G without a count goes nowhere");
+    s.keys("9 g g");
+    assert_eq!(s.selection, Range::point(4), "a count past the end is the last line, not the empty one after it");
+    s.keys("g g x d x d u u");
+    assert_eq!(s.text(), "1\n2\n3\n", "u takes a step at a time");
+    s.keys("2 U");
+    assert_eq!(s.text(), "3\n", "2U: two");
+    let mut s = Session::new("abc\n");
+    assert_eq!(s.outcome("3 n"), Outcome::Effect(Effect::FindNext { backward: false, count: 3 }));
+    assert_eq!(s.outcome("N"), Outcome::Effect(Effect::FindNext { backward: true, count: 1 }));
+    assert_eq!(s.outcome("*"), Outcome::Effect(Effect::FindSelection { word_bounds: true }));
+    assert_eq!(s.outcome("2 ctrl-o"), Outcome::Effect(Effect::JumpBack(2)));
+    assert_eq!(s.outcome("ctrl-w ctrl-v"), Outcome::Effect(Effect::SplitRight), "ctrl-w takes its keys with ctrl too");
+}
+
+#[test]
+fn select_mode_ends_after_r_and_case_changes() {
+    let mut s = Session::new("ab cd\n");
+    s.keys("v l r x");
+    assert_eq!((s.text(), s.modal.mode), ("xx cd\n", Mode::Normal));
+    s.keys("v l ~");
+    assert_eq!((s.text(), s.modal.mode), ("XX cd\n", Mode::Normal));
+    s.keys("` w alt-`");
+    assert_eq!(s.text(), "xx CD\n", "` lower case, alt-` upper");
+    s.keys("v g h R");
+    assert_eq!((s.text(), s.modal.mode), ("xx CD\n", Mode::Select), "R with nothing yanked does nothing");
+    s.keys("y l R");
+    assert_eq!(s.modal.mode, Mode::Normal, "with something, it ends select mode");
+}
+
+#[test]
+fn x_out_to_whole_lines_faces_as_it_did_and_alt_x_shrinks_in() {
+    let mut s = Session::new("ab\ncd\nef\n");
+    s.selection = Range::new(4, 1);
+    s.keys("X");
+    assert_eq!(s.selection, Range::new(6, 0), "still facing back");
+    s.selection = Range::new(1, 7);
+    s.keys("alt-x");
+    assert_eq!(s.selected(), "cd\n", "only the whole line in it");
+}
+
+#[test]
+fn join_takes_off_comment_leaders_and_alt_j_selects_the_spaces() {
+    let mut s = Session::in_file("// a\n   // b\nc\n", "a.rs");
+    s.keys("x x J");
+    assert_eq!(s.text(), "// a b\nc\n");
+    let mut s = Session::new("a  \nb\n\nc\n");
+    s.keys("x x x alt-J");
+    assert_eq!(s.text(), "a   b\nc\n", "the spaces at a line's end stay, as in helix; a blank line adds none");
+    assert_eq!((s.selection, s.modal.take_added()), (Range::point(3), vec![]), "the space put in is selected");
+}
+
+#[test]
+fn indenting_goes_to_the_next_stop_and_leaves_blank_lines() {
+    let mut s = Session::new("  a\n\n b\n");
+    s.keys("% >");
+    assert_eq!(s.text(), "    a\n\n    b\n");
+}
+
+#[test]
+fn insert_at_line_start_and_end_go_by_the_cursor_and_indent_an_empty_line() {
+    let mut s = Session::new("    x {\n\n");
+    s.keys("j A y esc");
+    assert_eq!(s.text(), "    x {\n        y\n", "an empty line indented as Enter after the line above would");
+    let mut s = Session::new("ab cd\n");
+    s.keys("v A");
+    assert_eq!((s.selection, s.modal.mode), (Range::new(0, 5), Mode::Insert), "in select mode the selection stretches there");
+}
+
+#[test]
+fn finds_cross_lines_and_alt_dot_finds_again() {
+    let mut s = Session::new("ab\ncd\tx\nab\n");
+    s.keys("f d");
+    assert_eq!(s.selected(), "ab\ncd");
+    s.keys("f tab");
+    assert_eq!(s.selection.cursor(s.text()), 5, "Tab finds a tab");
+    s.keys("g g f ret");
+    assert_eq!(s.selected(), "ab\n", "Enter: the line's end");
+    s.keys("g g f b alt-.");
+    assert_eq!(s.selection.cursor(s.text()), 9, "alt-. finds the next b");
+}
+
+#[test]
+fn match_mode_counts_and_letters() {
+    let mut s = Session::new("f(a(b)c)\n");
+    s.selection = Range::point(4);
+    s.keys("2 m d (");
+    assert_eq!(s.text(), "fa(b)c\n", "2md( deletes the second pair out");
+    let mut s = Session::new("q(a)q\n");
+    s.selection = Range::point(2);
+    s.keys("m i q");
+    assert_eq!(s.selection, Range::point(2), "mi and a letter: no pair of q's");
+}
+
+#[test]
+fn blank_lines_paragraphs_and_the_last_change() {
+    let mut s = Session::new("a\nb\n");
+    s.keys("2 ] space");
+    assert_eq!((s.text(), s.selection), ("a\n\n\nb\n", Range::point(0)), "blank lines below, the cursor where it was");
+    s.keys("[ space");
+    assert_eq!((s.text(), s.selection), ("\na\n\n\nb\n", Range::point(1)), "and above");
+    s.keys("g g ] p");
+    assert_eq!(s.selected(), "a\n\n\n", "]p: on to the next paragraph");
+    s.keys("g e g .");
+    assert_eq!(s.selection, Range::point(1), "g.: where the last change ended");
+}
+
+#[test]
+fn trimming_splitting_and_shrinking_selections() {
+    let mut s = Session::new("  ab  \ncd\n");
+    s.keys("x _");
+    assert_eq!(s.selected(), "ab", "_ trims the ends");
+    let mut s = Session::new("ab\ncd\nef");
+    s.keys("%");
+    s.keys("alt-s");
+    let added = s.modal.take_added();
+    assert_eq!((s.selected(), added), ("ab", vec![Range::new(3, 5), Range::new(6, 8)]), "alt-s: a selection a line");
+}
+
+#[test]
+fn reviewing_refuses_the_new_edits_too() {
+    let mut s = Session::new("one\ntwo\n");
+    s.modal.enter(Mode::Ai);
+    s.keys("alt-d alt-c alt-J ` alt-` ] space 3 o");
+    assert_eq!(s.text(), "one\ntwo\n", "nothing changes");
+    assert!(s.modal.take_added().is_empty() && s.modal.take_refused());
+}
+
+#[test]
+fn the_syntax_tree_selects_by_its_nodes() {
+    let code = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn two() -> i32 {\n    add(1, 1)\n}\n";
+    let shown = |s: &Session| s.buffer.text()[s.selection.bytes()].to_string();
+    let mut s = Session::in_file(code, "a.rs");
+    s.selection = Range::point(code.find("b: i32").unwrap());
+    s.keys("alt-o");
+    assert_eq!(shown(&s), "b: i32", "alt-o: out to the node around it");
+    s.keys("alt-p");
+    assert_eq!(shown(&s), "a: i32", "alt-p: the one before");
+    s.keys("alt-n");
+    assert_eq!(shown(&s), "b: i32", "alt-n: and after");
+    s.keys("alt-o alt-i");
+    assert_eq!(shown(&s), "a: i32", "alt-i: back in");
+    s.keys("alt-a");
+    assert_eq!((shown(&s), s.modal.take_added().len()), ("a: i32".to_string(), 1), "alt-a: each beside it");
+
+    // Text objects and going to them.
+    s.selection = Range::point(code.find("add(1, 1)").unwrap());
+    s.keys("m a f");
+    assert_eq!(shown(&s), "fn two() -> i32 {\n    add(1, 1)\n}", "maf");
+    s.selection = Range::point(code.find("1, 1").unwrap());
+    s.keys("m i a");
+    assert_eq!(shown(&s), "1", "mia: the argument");
+    s.selection = Range::point(0);
+    s.keys("] f");
+    assert!(shown(&s).starts_with("fn two"), "]f");
+    s.keys("[ f");
+    assert!(shown(&s).starts_with("fn add"), "[f");
+    s.selection = Range::point(0);
+    s.keys("] f alt-.");
+    assert!(shown(&s).starts_with("fn two"), "alt-. goes on from there (there's no third, so it stays)");
+}
+
+#[test]
+fn without_a_grammar_syntax_keys_do_nothing() {
+    let mut s = Session::new("plain text\n");
+    s.selection = Range::point(2);
+    s.keys("alt-o m a f ] f");
+    assert_eq!(s.selection, Range::point(2));
 }

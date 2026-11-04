@@ -43,16 +43,19 @@ pub(super) const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
         &[
             ("h j k l", "left down up right"),
             ("w b e", "next word, back, word end (W B E: WORD)"),
-            ("f t ‹c›  F T", "find / till a char (F T: back)"),
-            ("gg ge  G 10G", "file start, last line; line 10"),
+            ("f t ‹c›  F T", "find / till a char, over lines (⏎: line end; F T: back)"),
+            ("alt-.", "find again (and mi ma ]p [p)"),
+            ("gg ge  10G", "file start, last line; line 10"),
             ("gh gl gs", "line start, end, first non-blank"),
             ("gt gc gb", "top, middle, bottom line on screen"),
             ("zz zt zb", "scroll: this line to the middle, top, bottom"),
-            ("]d [d", "next, previous diagnostic"),
+            ("]d [d  ]p [p", "next, previous diagnostic; paragraph"),
+            ("g.", "where the last change was"),
             ("ctrl-d ctrl-u", "half page down, up"),
             ("gn gp", "next, previous tab (4gn: four along)"),
             ("gN gP", "move the tab along (4gN: four places)"),
             ("gd  gr", "go to definition; through the references"),
+            ("gf", "the file named here (path:line:col)"),
             ("ctrl-o ctrl-i", "back where a jump came from, forward"),
         ],
     ),
@@ -60,29 +63,34 @@ pub(super) const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
         "Select",
         &[
             ("v", "select mode (motions extend)"),
-            ("C  alt-C", "another cursor below, above"),
-            ("s", "a cursor on each match in the selection"),
-            (",  esc", "back to one cursor"),
+            ("C  alt-C", "copy the selection to the line below, above"),
+            ("s  alt-s", "a cursor on each match in the selection; each line"),
+            (",  esc  alt-,", "back to one cursor; drop the main one"),
+            ("( )", "the main cursor: the one before, after"),
+            ("alt-minus  alt-_  &", "merge selections (those touching); line them up"),
             ("click  ⇧click", "move there; select to there (or click after v)"),
             ("drag  2×  3× click", "select; word; line"),
-            ("x X  %", "select line (again: next line), out to whole lines; all"),
-            (";  alt-;", "collapse, flip selection"),
+            ("x X  alt-x  %", "select line (again: next line), out to, in to whole lines; all"),
+            (";  alt-;  _", "collapse, flip, trim selection"),
         ],
     ),
     (
         "Edit",
         &[
             ("i a I A", "insert before, after, line start, end"),
-            ("o O", "open line below, above"),
-            ("d c", "delete, change selection"),
+            ("o O", "open line below, above (3o: three, a cursor each)"),
+            ("d c  alt-d alt-c", "delete, change selection (alt: no yank)"),
             ("y p P  R", "yank, paste after, before; replace with yanked"),
             ("\"‹r›", "use register r for the next y d c p (+: clipboard)"),
-            ("r‹c›  ~", "replace with char, switch case"),
-            ("> <  J", "indent, unindent; join lines"),
+            ("r‹c›  ~ ` alt-`", "replace with char; switch case, lower, upper"),
+            ("> <  J alt-J", "indent, unindent; join lines (alt: select the spaces)"),
+            ("] space  [ space", "blank line below, above"),
             ("ctrl-a ctrl-x  ctrl-c", "number up, down; comment out / in"),
             (".  Q q", "repeat the last change; record, play a macro"),
             ("u U", "undo, redo"),
-            ("ctrl-w  ⌥⌫  ctrl-u", "(typing) delete the word, back to line start"),
+            ("ctrl-w ⌥⌫  alt-d", "(typing) delete the word before, after"),
+            ("ctrl-u  ctrl-k", "(typing) delete to line start, end"),
+            ("ctrl-r ‹r›", "(typing) type out register r"),
         ],
     ),
     (
@@ -93,15 +101,26 @@ pub(super) const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
             ("mr‹a›‹b›", "replace surrounding pair"),
             ("md‹c›", "delete surrounding pair"),
             ("mi‹o›  ma‹o›", "select inside / around: w W p ( [ { < ' \" ` m"),
+            ("mif maf  ]f [f", "a function; next, previous (t type, a argument, c comment, T test, e entry)"),
+            ("alt-o alt-i", "out to the syntax node around, back in"),
+            ("alt-n alt-p  alt-a alt-I", "next, previous node; a cursor on each beside, inside"),
+            ("alt-e alt-b", "to the end, start of the node"),
         ],
     ),
-    ("Search", &[("/  ?", "search the file, forward, back (esc goes back)"), ("n N", "next match, previous"), ("*", "search for the selection")]),
+    (
+        "Search",
+        &[
+            ("/  ?", "search the file, forward, back (esc goes back)"),
+            ("n N", "next match, previous (select mode: add it)"),
+            ("*  alt-*", "search for the selection (as a word; anywhere)"),
+        ],
+    ),
     (
         "Space",
         &[
             ("space a", "ask about the line or selection"),
             ("space e  ⌘B", "file tree"),
-            ("space t  ⌘J", "terminal"),
+            ("space t  ⌘J", "terminal: type in it; esc esc reads it"),
             ("space f  space b", "pick a file, an open file (fuzzy)"),
             ("space /", "search the project"),
             ("space k  space d", "docs here; this file's diagnostics"),
@@ -111,14 +130,26 @@ pub(super) const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
             ("space y  space p", "clipboard yank, paste"),
             ("space ?", "this, every key"),
             ("ctrl-w v", "two panes: this file's pages, or the next tab"),
-            ("ctrl-w w  ctrl-w q", "the other pane; only this one"),
+            ("ctrl-w w  ctrl-w q", "the other pane; only this one (ctrl-w o too)"),
+        ],
+    ),
+    (
+        "Reading the terminal",
+        &[
+            ("esc esc", "from typing in it: read it with these keys"),
+            ("motions  / n y", "move, select, search, yank, as in a file"),
+            ("enter  gf", "open the file a line names, at its line"),
+            ("⌘-click", "open a web address or file the terminal shows"),
+            ("space a", "ask about what's selected"),
+            ("i a o", "type on the shell's line"),
+            ("esc", "back to the code"),
         ],
     ),
     (
         "Reviewing",
         &[
             ("tab", "accept the step · next note or match"),
-            ("tab  tab", "a command: run it in the terminal; it's done"),
+            ("tab", "a command: run it in the terminal, and on"),
             ("enter  space a", "redirect, or ask about it"),
             ("esc esc", "stop, back where you were"),
             ("motions", "look around; no editing"),
@@ -137,6 +168,8 @@ pub(super) const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
             (":model opus-5.5", "ask that model from now on (tab completes)"),
             (":api-key ‹key›", "keep a Claude API key safe on this machine"),
             (":undo-story", "take back all of the last story's steps"),
+            (":timings", "how long the model has kept you waiting, lately"),
+            (":clear", "start over: end the story, and forget Claude's notes and recent requests"),
             (":replace old new", "go through the project's matches as steps (! takes all)"),
             (":tutor  :update", "learn the keys; is there a newer version?"),
             (":vsplit  :only", "a second pane beside this one; only this one"),
@@ -170,7 +203,8 @@ pub(super) const CHEATSHEET: &[(&str, &[(&str, &str)])] = &[
             ("⌘⇧[ ⌘⇧]", "previous, next tab"),
             ("⌘O ⌘⇧O ⌘⇧N", "open file, folder; new window"),
             ("⌘S ⌘⇧S", "save, save as"),
-            ("⌘= ⌘- ⌘0", "zoom in, out, actual size"),
+            ("⌘= ⌘- ⌘0", "zoom in, out, actual size (pages in front: theirs)"),
+            ("⌘ scroll", "zoom the pages under the pointer"),
         ],
     ),
 ];
@@ -580,7 +614,7 @@ impl Editor {
     // behind its back: copying is all they do.
 
     fn undo_redo(&mut self, redo: bool, cx: &mut Context<Self>) {
-        if self.modal.mode == Mode::Terminal || self.modal.mode.reviewing() {
+        if self.in_terminal() || self.modal.mode.reviewing() {
             return;
         }
         self.leave_insert();
@@ -598,8 +632,8 @@ impl Editor {
         if self.modal.mode == Mode::Terminal {
             return self.terminal_copy(cx);
         }
-        let cut = cut && !self.modal.mode.reviewing();
-        let Some(tab) = self.tab_mut() else { return };
+        let cut = cut && !self.modal.mode.reviewing() && !self.reading();
+        let Some(tab) = self.keyed_mut() else { return };
         let range = tab.view.selection.min_width_1(tab.doc.text()).bytes();
         cx.write_to_clipboard(ClipboardItem::new_string(tab.doc.text()[range.clone()].to_string()));
         if cut {
@@ -613,6 +647,9 @@ impl Editor {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
+        if self.reading() {
+            self.enter_terminal(cx);
+        }
         if self.modal.mode == Mode::Terminal {
             return self.terminal_paste(cx);
         }
@@ -654,7 +691,7 @@ impl gpui::Render for Editor {
                     self.render_pages(pages, cx)
                 } else {
                     let (mut decorations, block) = match &self.story {
-                        Some(story) => story.overlay(&self.project, tab, self.ask_field(), self.terminal.shown, self.command_proposed(), &theme),
+                        Some(story) => story.overlay(&self.project, tab, self.ask_field(), &theme),
                         None => (vec![], None),
                     };
                     // While searching, every match on screen.
@@ -666,6 +703,10 @@ impl gpui::Render for Editor {
                     if let Some(line) = tab.doc.path.as_deref().and_then(|path| self.stopped_line(path)) {
                         decorations.push(Decoration::background(tab.doc.buffer.lines_range(line..line + 1), theme.warning.opacity(0.25)));
                     }
+                    // The bracket matching the one at the cursor (or just typed).
+                    if let Some(pair) = self.matching_brackets(tab) {
+                        decorations.extend(pair.map(|at| Decoration::background(at..tab.doc.buffer.next(at), theme.accent.opacity(0.22))));
+                    }
                     // The abbreviation being typed (`\alp`), until it's a symbol.
                     if let Some(range) = self.modal.abbreviation().filter(|r| r.end <= tab.doc.buffer.len()) {
                         decorations.push(Decoration { range, underline: Some(theme.accent), ..Decoration::default() });
@@ -674,15 +715,15 @@ impl gpui::Render for Editor {
                 };
                 let aside = self.render_aside(tab, cx);
                 let view = self.beside(view, cx);
-                let lit = self.render_attention(super::attention::Panel::Code, cx);
-                div().flex_1().min_h_0().flex().child(div().relative().flex_1().min_w_0().child(view).children(lit)).children(aside).into_any_element()
+                let thinking = self.render_thinking(cx);
+                let code = div().relative().flex_1().min_w_0().debug_selector(|| "code-view".to_string()).child(view).children(thinking);
+                div().flex_1().min_h_0().flex().child(code).children(aside).into_any_element()
             }
             None => self.render_empty(cx),
         };
         let tree = self.tree_pane.shown.then(|| {
-            let lit = self.render_attention(super::attention::Panel::Tree, cx);
             let tree = self.render_tree(cx);
-            div().relative().flex_none().flex().child(tree).children(lit).into_any_element()
+            div().relative().flex_none().flex().debug_selector(|| "tree-pane".to_string()).child(tree).into_any_element()
         });
         let tabs = (!self.project.tabs.is_empty()).then(|| self.render_tabs(cx));
         let terminal = self.render_terminal(cx);
@@ -690,6 +731,10 @@ impl gpui::Render for Editor {
         div()
             .key_context("Editor")
             .track_focus(&self.focus)
+            // ⌘ down over a link in the terminal underlines it; up, and it isn't.
+            .on_modifiers_changed(
+                cx.listener(|this, event: &gpui::ModifiersChangedEvent, window, cx| this.hover_link(window.mouse_position(), event.modifiers.platform, cx)),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.focus.is_focused(window) && this.key_down(&event.keystroke, window, cx) {
                     cx.stop_propagation();
@@ -700,23 +745,31 @@ impl gpui::Render for Editor {
             .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_as(window, cx)))
             .on_action(cx.listener(
                 |this, _: &CloseTab, window, cx| {
-                    if this.modal.mode == Mode::Terminal { this.close_shell(this.terminal.active, cx) } else { this.close_tab(window, cx) }
+                    if this.in_terminal() { this.close_shell(this.terminal.active, cx) } else { this.close_tab(window, cx) }
                 },
             ))
-            .on_action(cx.listener(|this, _: &NewTab, _, cx| if this.modal.mode == Mode::Terminal { this.new_shell(cx) } else { this.new_buffer(cx) }))
-            .on_action(cx.listener(
-                |this, _: &MoveTabLeft, _, cx| if this.modal.mode == Mode::Terminal { this.nudge_shell(false, cx) } else { this.nudge_tab(false, 1, cx) },
-            ))
-            .on_action(cx.listener(
-                |this, _: &MoveTabRight, _, cx| if this.modal.mode == Mode::Terminal { this.nudge_shell(true, cx) } else { this.nudge_tab(true, 1, cx) },
-            ))
-            .on_action(
-                cx.listener(|this, _: &NextTab, _, cx| if this.modal.mode == Mode::Terminal { this.cycle_shell(true, cx) } else { this.cycle_tab(true, cx) }),
-            )
-            .on_action(
-                cx.listener(|this, _: &PrevTab, _, cx| if this.modal.mode == Mode::Terminal { this.cycle_shell(false, cx) } else { this.cycle_tab(false, cx) }),
-            )
+            .on_action(cx.listener(|this, _: &NewTab, _, cx| if this.in_terminal() { this.new_shell(cx) } else { this.new_buffer(cx) }))
+            .on_action(cx.listener(|this, _: &MoveTabLeft, _, cx| if this.in_terminal() { this.nudge_shell(false, cx) } else { this.nudge_tab(false, 1, cx) }))
+            .on_action(cx.listener(|this, _: &MoveTabRight, _, cx| if this.in_terminal() { this.nudge_shell(true, cx) } else { this.nudge_tab(true, 1, cx) }))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| if this.in_terminal() { this.cycle_shell(true, cx) } else { this.cycle_tab(true, cx) }))
+            .on_action(cx.listener(|this, _: &PrevTab, _, cx| if this.in_terminal() { this.cycle_shell(false, cx) } else { this.cycle_tab(false, cx) }))
             .on_action(cx.listener(|this, _: &ToggleTree, _, cx| this.toggle_tree(cx)))
+            // Pages in front zoom on their own; anything else, the whole editor.
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                if !this.zoom_pages(1, cx) {
+                    cx.propagate()
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                if !this.zoom_pages(-1, cx) {
+                    cx.propagate()
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ResetZoom, _, cx| {
+                if !this.zoom_pages(0, cx) {
+                    cx.propagate()
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, _, cx| this.toggle_terminal(cx)))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo_redo(false, cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.undo_redo(true, cx)))
@@ -724,9 +777,12 @@ impl gpui::Render for Editor {
             .on_action(cx.listener(|this, _: &Cut, _, cx| this.copy(true, cx)))
             .on_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                let terminal = this.modal.mode == Mode::Terminal;
-                if let Some(tab) = this.tab_mut().filter(|_| !terminal) {
+                let typing = this.modal.mode == Mode::Terminal;
+                if let Some(tab) = this.keyed_mut().filter(|_| !typing) {
                     tab.view.selection = Range::new(0, tab.doc.buffer.len());
+                }
+                if this.reading() {
+                    this.read_on(false);
                 }
                 cx.notify();
             }))
@@ -753,5 +809,29 @@ impl gpui::Render for Editor {
             .children(self.render_picker(cx))
             .children(self.render_completion(&theme))
             .children(self.render_signature(&theme))
+            .child(self.render_jump(cx))
+    }
+}
+
+impl Editor {
+    /// The bracket at the cursor and the one it pairs with, if it's on one: in
+    /// insert mode, the one just typed (or else the one after the cursor).
+    pub(super) fn matching_brackets(&self, tab: &Tab) -> Option<[usize; 2]> {
+        /// Past this a file is searched no further for the other bracket on every frame.
+        const FURTHEST: usize = 1 << 20;
+        let buffer = &tab.doc.buffer;
+        let head = tab.view.selection.head;
+        let bracket = |at: usize| buffer.char_at(at).is_some_and(|c| "()[]{}".contains(c));
+        let at = match self.modal.mode {
+            Mode::Insert if head > 0 && bracket(buffer.prev(head)) => buffer.prev(head),
+            Mode::Insert => head,
+            Mode::Normal | Mode::Select => tab.cursor(),
+            _ => return None,
+        };
+        if self.reading() || buffer.len() > FURTHEST || !bracket(at) {
+            return None;
+        }
+        let other = ghostwrite_core::textobject::matching_bracket(buffer, at)?;
+        Some([at, other])
     }
 }

@@ -106,8 +106,8 @@ mod tests {
                 if name != "tests" {
                     walk(&path, found);
                 }
-            // What models take is about models: `attach.rs` says which formats they read.
-            } else if name.ends_with(".rs") && name != "plugins.rs" && name != "tests.rs" && name != "attach.rs" {
+            // What models take is about models: `attach.rs` and `web.rs` say which formats they read.
+            } else if name.ends_with(".rs") && !["plugins.rs", "tests.rs", "attach.rs", "web.rs"].contains(&name.as_str()) {
                 let text = std::fs::read_to_string(&path).unwrap_or_default();
                 // A file's own tests may use them: those are about the whole app.
                 let tests = ["#[cfg(test)]", "#[cfg(all(test"].iter().filter_map(|mark| text.find(mark)).min();

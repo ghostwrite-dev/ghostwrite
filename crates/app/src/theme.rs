@@ -9,7 +9,7 @@ use serde_json::Value;
 
 const GRUVBOX: &str = include_str!("../../../assets/gruvbox.json");
 /// How far the window zooms in and out, a level at a time, as browsers do.
-const ZOOMS: [f32; 13] = [0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+const ZOOMS: [f32; 15] = [0.33, 0.4, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
 /// A rem at 100%: what [`pt`] sizes are relative to.
 const REM: f32 = 16.;
 

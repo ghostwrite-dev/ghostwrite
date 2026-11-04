@@ -11,6 +11,7 @@ pub mod indent;
 pub mod language;
 pub mod modal;
 pub mod movement;
+pub mod nodes;
 pub mod selection;
 pub mod syntax;
 pub mod textobject;

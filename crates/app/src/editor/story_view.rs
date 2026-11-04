@@ -74,9 +74,6 @@ impl StoryState {
     pub(super) fn proposed_command(&self, ask: Option<Entity<TextField>>, theme: &Theme) -> Option<ProposedCommand> {
         let story = self.story.as_ref()?;
         let Item::Run(run) = story.current_item()? else { return None };
-        if story.running(story.current()?) {
-            return None;
-        }
         let spec = |rows, prompt| BlockSpec { indent: 0, rows, prompt };
         let note = (!run.say.is_empty()).then(|| block(0, spec(vec![Row::Prose(run.say.clone())], None), theme));
         let rows = if ask.is_some() {
@@ -89,18 +86,9 @@ impl StoryState {
     }
 
     /// What the story draws in `tab`: marks on its lines, and the block that
-    /// folds out under them. `ask` is the prompt's field while it's open;
-    /// with `terminal_shown`, a running command's keys are there, not here,
-    /// and with `command_there` so is all of a command not yet run.
-    pub(super) fn overlay(
-        &self,
-        project: &Project,
-        tab: &Tab,
-        ask: Option<Entity<TextField>>,
-        terminal_shown: bool,
-        command_there: bool,
-        theme: &Theme,
-    ) -> (Vec<Decoration>, Option<Block>) {
+    /// folds out under them. `ask` is the prompt's field while it's open. A
+    /// command shows only in the terminal, where it runs.
+    pub(super) fn overlay(&self, project: &Project, tab: &Tab, ask: Option<Entity<TextField>>, theme: &Theme) -> (Vec<Decoration>, Option<Block>) {
         if self.annex(project, ask.is_some()).is_some() {
             return (vec![], None);
         }
@@ -114,16 +102,19 @@ impl StoryState {
         };
         let here = |located: &Located| located.tab.and_then(|ix| project.tabs.get(ix)).is_some_and(|t| t.doc.id == doc.id);
 
-        // Before asking, or waiting for the reply: where the answer is coming.
+        // Asking: the prompt, under what it's about. Waiting for the reply isn't about
+        // any line yet: the model thinks in the corner (`Editor::render_thinking`).
         let current = story.and_then(|s| Some((s.current()?, s.current_item()?)));
         let Some((id, item)) = current else {
+            if ask.is_none() {
+                return (vec![], None);
+            }
             let Some(place) = self.waiting_spot(project) else { return (vec![], None) };
             let located = self.in_tab(project, place);
             if !here(&located) {
                 return (vec![], None);
             }
-            let hint = waiting_hint(story);
-            let rows = if ask.is_some() { vec![] } else { vec![Row::Hint(hint, theme.warning)] };
+            let rows = vec![];
             let hint = if story.is_some() { "⏎ send · esc" } else { "⏎ ask · esc" };
             let spec = BlockSpec { indent: indent_of(located.near.start), rows, prompt: prompt(hint) };
             return (vec![], Some(block(located.near.end.saturating_sub(1), spec, theme)));
@@ -164,27 +155,13 @@ impl StoryState {
                 rows.extend(keys("⇥ next · ⏎ ask"));
                 (vec![marked], Some(block(lines.end - 1, BlockSpec { indent: indent_of(lines.end - 1), rows, prompt: prompt("⏎ send · esc") }, theme)))
             }
-            Item::Run(_) if command_there => (vec![], None),
-            // A command, where the terminal can't show it: why, then what runs,
-            // under where the story was.
-            Item::Run(run) => {
-                let line = located.near.end.saturating_sub(1).min(doc.buffer.last_line());
-                let mut rows: Vec<Row> = (!run.say.is_empty()).then(|| Row::Prose(run.say.clone())).into_iter().collect();
-                rows.push(Row::Code(format!("$ {}", run.typed())));
-                let running = story.is_some_and(|s| s.running(id));
-                rows.extend(match (running, terminal_shown) {
-                    (true, true) => None,
-                    (true, false) => keys("running in the terminal · ⇥ when it's done · ⏎ ask"),
-                    (false, _) => keys(&format!("{} in the terminal · ⏎ redirect", run.tab_does())),
-                });
-                (vec![], Some(block(line, BlockSpec { indent: indent_of(line), rows, prompt: prompt("⏎ send · esc") }, theme)))
-            }
+            Item::Run(_) => (vec![], None),
         }
     }
 }
 
 /// What's happening while there's nothing to review: asking, waiting, failed.
-fn waiting_hint(story: Option<&Story>) -> String {
+pub(super) fn waiting_hint(story: Option<&Story>) -> String {
     match story {
         None => "⏎ ask · esc".to_string(),
         Some(s) => match (&s.error, &s.looking) {

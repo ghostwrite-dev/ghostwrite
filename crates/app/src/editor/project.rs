@@ -292,8 +292,15 @@ impl Project {
                 // Our own write, or someone wrote what's on screen.
                 changed |= tab.doc.dirty;
                 tab.doc.on_disk();
+            } else if tab.doc.dirty
+                && let Some(selection) = tab.doc.merge_from_disk(&text, tab.view.selection)
+            {
+                // Theirs, to other lines than the unsaved changes: in with them.
+                tab.view.selection = selection;
+                changed = true;
             } else if tab.doc.dirty {
-                // Saving would lose theirs: it won't, until told to (:w!).
+                // Theirs and the unsaved changes are to the same lines: saving would
+                // lose theirs; it won't, until told to (:w!).
                 if !std::mem::replace(&mut tab.doc.conflict, true) {
                     kept.push(tab.doc.name());
                 }

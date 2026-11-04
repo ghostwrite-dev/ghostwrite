@@ -10,6 +10,7 @@ cat <<EOF
     <key>CFBundleDisplayName</key><string>Ghostwrite</string>
     <key>CFBundleIdentifier</key><string>app.ghostwrite.Ghostwrite</string>
     <key>CFBundleExecutable</key><string>ghostwrite</string>
+    <key>CFBundleIconFile</key><string>Ghostwrite</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>

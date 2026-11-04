@@ -170,9 +170,8 @@ impl ghostwrite_page::Pages for Document {
         self.pages.get(page).map_or(0, |page| page.hash)
     }
 
-    fn draw(&self, page: usize, pixels: usize) -> Option<Bitmap> {
-        let page = self.pages.get(page)?;
-        page.render(pixels as f32 / page.size.width.max(1.))
+    fn draw(&self, page: usize, region: ghostwrite_page::Region) -> Option<Bitmap> {
+        self.pages.get(page)?.render(region)
     }
 
     fn cursor(&self, at: usize) -> Option<Place> {
@@ -198,6 +197,8 @@ static TYPST: Language = Language {
     comment: Some("//"),
     extensions: &["typ"],
     servers: &["tinymist"],
+    // `$x$`: math.
+    pairs: &[('$', '$')],
     // The crate doesn't export its query; this is its queries/typst/highlights.scm.
     load: || ghostwrite_core::syntax::highlights("typst", codebook_tree_sitter_typst::LANGUAGE, include_str!("../queries/highlights.scm")),
     ..Language::DEFAULT
@@ -282,20 +283,37 @@ impl Page {
         Some(if x > glyph.x + glyph.width / 2. { source.end } else { source.start })
     }
 
-    /// Draw it, `pixel_per_pt` pixels to a point; `None` if that's more than
-    /// [`ghostwrite_page::MAX_PIXELS`].
-    pub fn render(&self, pixel_per_pt: f32) -> Option<Bitmap> {
-        let pixels = |pt: f32| (pt * pixel_per_pt).ceil().max(1.) as usize;
-        if pixels(self.size.width).saturating_mul(pixels(self.size.height)) > ghostwrite_page::MAX_PIXELS {
+    /// Draw `region` of it: a page of the region's size with this one on it, moved
+    /// so the region is what's on it. `None` if it's too big.
+    pub fn render(&self, region: ghostwrite_page::Region) -> Option<Bitmap> {
+        if region.too_big() {
             return None;
         }
-        let options = typst_render::RenderOptions { pixel_per_pt: typst::utils::Scalar::new(pixel_per_pt.into()), ..Default::default() };
-        let pixmap = typst_render::render(&self.page, &options);
-        let mut bgra = pixmap.data().to_vec();
+        let (width, height, scale) = (region.width, region.height, f64::from(region.scale));
+        let mut frame = Frame::hard(typst::layout::Size::new(Abs::pt(width as f64 / scale), Abs::pt(height as f64 / scale)));
+        frame.push_frame(Point::new(Abs::pt(-(region.x as f64) / scale), Abs::pt(-(region.y as f64) / scale)), self.page.frame.clone());
+        let mut part = self.page.clone();
+        part.frame = frame;
+        let options = typst_render::RenderOptions { pixel_per_pt: typst::utils::Scalar::new(scale), ..Default::default() };
+        let pixmap = typst_render::render(&part, &options);
+        let mut bgra = vec![0; width * height * 4];
+        let (drawn_width, drawn) = (pixmap.width() as usize, pixmap.data());
+        for row in 0..height.min(pixmap.height() as usize) {
+            let take = width.min(drawn_width) * 4;
+            bgra[row * width * 4..][..take].copy_from_slice(&drawn[row * drawn_width * 4..][..take]);
+        }
         for pixel in bgra.chunks_exact_mut(4) {
             pixel.swap(0, 2);
         }
-        Some(Bitmap { width: pixmap.width() as usize, height: pixmap.height() as usize, bgra })
+        let (right, bottom) = ((self.size.width * region.scale).round() as usize, (self.size.height * region.scale).round() as usize);
+        for (row, line) in bgra.chunks_exact_mut(width * 4).enumerate() {
+            for (col, pixel) in line.chunks_exact_mut(4).enumerate() {
+                if region.y + row >= bottom || region.x + col >= right {
+                    pixel.fill(0);
+                }
+            }
+        }
+        Some(Bitmap { width, height, bgra })
     }
 }
 
@@ -373,8 +391,8 @@ mod tests {
         assert_eq!(document.glyph_at(hello, false).map(|(_, g)| g.source.clone()), Some(Some(hello..hello + 1)));
         assert_eq!(document.glyph_at(0, true).map(|(_, g)| g.source.clone()), Some(Some(hello..hello + 1)), "from markup, the text after it");
 
-        let drawn = page.render(2.).unwrap();
-        assert!(page.render(1e6).is_none(), "too big to draw");
+        let drawn = page.render(ghostwrite_page::Region::whole(page.size, 400)).unwrap();
+        assert!(page.render(ghostwrite_page::Region::whole(page.size, 1_000_000)).is_none(), "too big to draw");
         assert_eq!((drawn.width, drawn.bgra.len()), (400, 400 * drawn.height * 4));
         std::fs::remove_dir_all(root).ok();
     }

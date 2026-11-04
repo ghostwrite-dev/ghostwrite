@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ghostwrite_core::{Key, Range};
+use ghostwrite_core::{Key, Mode, Range};
 use ghostwrite_page::{OnlyPages, Pages, Renderer};
 use gpui::{AppContext as _, Context, Pixels, Point, px};
 
@@ -74,16 +74,28 @@ fn tab_of_only_pages(tab: &mut super::tabs::Tab, done: Result<Arc<dyn Pages>, St
     cx.notify();
 }
 
-/// Where a document's pages are scrolled to.
-#[derive(Default)]
+/// Where a document's pages are scrolled to, and how far they're zoomed: their own,
+/// whatever the editor's zoom.
 pub struct PagesScroll {
     pub top: Pixels,
+    pub left: Pixels,
+    /// Times as wide as fits the view.
+    pub zoom: f32,
     /// A byte of the text to bring into view next time they're drawn, and
     /// whether to even if it's in view (`space j`).
     pub reveal: Option<(usize, bool)>,
     /// The line they were last brought to.
     pub(super) line: Option<usize>,
 }
+
+impl Default for PagesScroll {
+    fn default() -> Self {
+        Self { top: px(0.), left: px(0.), zoom: 1., reveal: None, line: None }
+    }
+}
+
+/// The steps ⌘= and ⌘- zoom pages through.
+const PAGE_ZOOMS: [f32; 15] = [0.1, 0.15, 0.25, 0.33, 0.5, 0.67, 0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0];
 
 impl Editor {
     /// Keep the pages of the document `id` up to date: make them again when its
@@ -196,13 +208,50 @@ impl Editor {
         doc.view_of.as_ref().map(|(file, _)| *file).or_else(|| doc.pages_are_the_text().then_some(doc.id))
     }
 
-    /// The wheel on pages: those of the tab of `doc`, or of the active tab.
+    /// The wheel on pages: those of the tab of `doc`, or of the active tab. It
+    /// scrolls them down and across.
     pub(super) fn scroll_pages(&mut self, doc: Option<DocId>, delta: Point<Pixels>, cx: &mut Context<Self>) {
         let shown = doc.map_or_else(|| self.shown_pages(), |doc| self.pages_of(doc));
         if let Some(file) = shown.and_then(|id| self.project.tabs.by_id_mut(id)) {
-            file.view.pages.top = (file.view.pages.top - delta.y).max(px(0.));
+            let scroll = &mut file.view.pages;
+            (scroll.top, scroll.left) = ((scroll.top - delta.y).max(px(0.)), (scroll.left - delta.x).max(px(0.)));
             cx.notify();
         }
+    }
+
+    /// Zoom the pages of the tab of `doc` (or of the active tab) `by` times, keeping
+    /// what's at `around` (in the view, from its top left) where it is.
+    pub(super) fn zoom_pages_by(&mut self, doc: Option<DocId>, by: f32, around: Point<Pixels>, cx: &mut Context<Self>) {
+        let shown = doc.map_or_else(|| self.shown_pages(), |doc| self.pages_of(doc));
+        let Some(file) = shown.and_then(|id| self.project.tabs.by_id_mut(id)) else { return };
+        let scroll = &mut file.view.pages;
+        let zoom = (scroll.zoom * by).clamp(*crate::ui::pages::ZOOMS.start(), *crate::ui::pages::ZOOMS.end());
+        let ratio = zoom / scroll.zoom;
+        scroll.zoom = zoom;
+        scroll.top = ((scroll.top + around.y) * ratio - around.y).max(px(0.));
+        scroll.left = ((scroll.left + around.x) * ratio - around.x).max(px(0.));
+        cx.notify();
+    }
+
+    /// ⌘= ⌘- ⌘0 with pages in front: their zoom, a step in or out (`by`), or back to
+    /// fitting the view (0), not the editor's. `false` if there are none.
+    pub(super) fn zoom_pages(&mut self, by: i32, cx: &mut Context<Self>) -> bool {
+        if self.modal.mode == Mode::Tree || self.in_terminal() {
+            return false;
+        }
+        let Some(file) = self.shown_pages().and_then(|id| self.project.tabs.by_id_mut(id)) else { return false };
+        let scroll = &mut file.view.pages;
+        let now = PAGE_ZOOMS.iter().position(|&z| z >= scroll.zoom - 0.001).unwrap_or(PAGE_ZOOMS.len() - 1);
+        let zoom = match by {
+            0 => 1.,
+            // Between steps, in goes to the next one up and out to the one below.
+            _ if by < 0 && PAGE_ZOOMS[now] > scroll.zoom + 0.001 => PAGE_ZOOMS[now.saturating_sub(1)],
+            _ => PAGE_ZOOMS[now.saturating_add_signed(by as isize).min(PAGE_ZOOMS.len() - 1)],
+        };
+        let ratio = zoom / scroll.zoom;
+        (scroll.zoom, scroll.top, scroll.left) = (zoom, scroll.top * ratio, if by == 0 { px(0.) } else { scroll.left * ratio });
+        cx.notify();
+        true
     }
 
     /// A click on pages, on the text at `byte` if it's on any: the cursor goes there,

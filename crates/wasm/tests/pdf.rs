@@ -68,12 +68,12 @@ fn it_draws_a_files_pages_and_again_when_the_file_changes() {
     let mut renderer = plugin.renderer(&root, &path).unwrap();
     let first = renderer.render("").unwrap();
     assert_eq!(first.sizes().iter().map(|size| (size.width, size.height)).collect::<Vec<_>>(), [(200., 100.)]);
-    let drawn = first.draw(0, 400).expect("it's drawn");
+    let drawn = first.draw_at(0, 400).expect("it's drawn");
     assert_eq!((drawn.width, drawn.height), (400, 200), "at the width asked");
     let pixel = |x: usize, y: usize| drawn.bgra[(y * drawn.width + x) * 4..][..4].to_vec();
     assert_eq!(pixel(50, 150), [0, 0, 0, 255], "what's on it, the right way up");
     assert_eq!(pixel(350, 50), [255, 255, 255, 255], "on a white page");
-    assert!(first.draw(1, 400).is_none(), "there's no second page");
+    assert!(first.draw_at(1, 400).is_none(), "there's no second page");
 
     let same = renderer.render("").unwrap();
     assert_eq!(same.key(0), first.key(0), "the same file: no need to draw it again");
@@ -81,7 +81,7 @@ fn it_draws_a_files_pages_and_again_when_the_file_changes() {
     let changed = renderer.render("").unwrap();
     assert_ne!(changed.key(0), first.key(0));
     assert_eq!(changed.sizes()[0].width, 300.);
-    assert!(first.draw(0, 400).is_some(), "what's on screen still draws until it's replaced");
+    assert!(first.draw_at(0, 400).is_some(), "what's on screen still draws until it's replaced");
 
     std::fs::write(&path, "not a pdf").unwrap();
     assert!(renderer.render("").err().unwrap_or_default().contains("as a PDF"));
@@ -122,11 +122,33 @@ fn on_a_real_document() {
     let mut times: Vec<f64> = (0..pages.sizes().len())
         .map(|page| {
             let from = Instant::now();
-            let drawn = pages.draw(page, 1600).expect("drawn");
+            let drawn = pages.draw_at(page, 1600).expect("drawn");
             assert!(drawn.bgra.chunks_exact(4).any(|pixel| pixel[0] < 128), "page {page} has something on it");
             ms(from)
         })
         .collect();
     times.sort_by(f64::total_cmp);
     println!("a page drawn: {:.0} ms median, {:.0} ms worst", times[times.len() / 2], times[times.len() - 1]);
+    let region = ghostwrite_page::Region { x: 1024, y: 1024, width: 1024, height: 1024, ..ghostwrite_page::Region::whole(pages.sizes()[0], 6400) };
+    let mut tiles: Vec<f64> = (0..pages.sizes().len().min(10))
+        .map(|page| {
+            let from = Instant::now();
+            pages.draw(page, region).expect("drawn");
+            ms(from)
+        })
+        .collect();
+    tiles.sort_by(f64::total_cmp);
+    println!("a tile at 4x: {:.0} ms median, {:.0} ms worst", tiles[tiles.len() / 2], tiles[tiles.len() - 1]);
+}
+
+#[test]
+fn a_page_drawn_in_pieces_is_the_page_drawn_whole() {
+    let plugin = needs_the_plugin!();
+    let root = ghostwrite_project::scratch_dir("pdf-pieces").canonicalize().unwrap();
+    let path = root.join("paper.pdf");
+    std::fs::write(&path, pdf(200)).unwrap();
+    let pages = plugin.renderer(&root, &path).unwrap().render("").unwrap();
+    for pixels in [200, 431, 1000] {
+        ghostwrite_page::check_regions(pages.as_ref(), 0, pixels).unwrap();
+    }
 }

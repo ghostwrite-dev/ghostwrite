@@ -8,7 +8,9 @@ use std::path::Path;
 use ghostwrite_core::Range;
 use ghostwrite_core::modal::Target;
 use ghostwrite_lsp::Diagnostic;
-use gpui::{Pixels, px};
+use std::time::Instant;
+
+use gpui::{Pixels, Point, px};
 
 use super::document::{DocId, Document};
 use super::rendered::PagesScroll;
@@ -29,17 +31,45 @@ pub struct View {
     pub selection: Range,
     /// More cursors, besides the main one that's `selection`.
     pub others: Vec<Range>,
+    /// Where it's scrolled to. What's drawn may still be on its way there: see [`Motion`].
     pub scroll_top: Pixels,
     pub scroll_left: Pixels,
     pub autoscroll: Option<Autoscroll>,
     /// Where its pages are scrolled to.
     pub pages: PagesScroll,
+    /// What's moving on screen.
+    pub motion: Motion,
 }
 
 impl Default for View {
     fn default() -> Self {
-        Self { selection: Range::point(0), others: vec![], scroll_top: px(0.), scroll_left: px(0.), autoscroll: None, pages: PagesScroll::default() }
+        Self {
+            selection: Range::point(0),
+            others: vec![],
+            scroll_top: px(0.),
+            scroll_left: px(0.),
+            autoscroll: None,
+            pages: PagesScroll::default(),
+            motion: Motion::default(),
+        }
     }
+}
+
+/// What glides rather than jumps, so the eye can follow: the view scrolled by
+/// the keys, the cursor, and the lines a story's step just changed, lit up for a
+/// moment. `"animations": false` in the config stills them.
+#[derive(Debug, Clone, Default)]
+pub struct Motion {
+    /// Where the text is drawn scrolled to.
+    pub drawn_top: Pixels,
+    /// Scrolling from a place to another, since when.
+    pub scroll: Option<(Pixels, Pixels, Instant)>,
+    /// Where the cursor was drawn, in the text (scrolling doesn't move it).
+    pub cursor: Option<Point<Pixels>>,
+    /// The cursor on its way from a place to another, since when.
+    pub cursor_glide: Option<(Point<Pixels>, Point<Pixels>, Instant)>,
+    /// Text just changed, lit up and fading, since when.
+    pub flash: Option<(std::ops::Range<usize>, Instant)>,
 }
 
 pub struct Tab {
@@ -96,6 +126,8 @@ pub struct Tabs {
     tabs: Vec<Tab>,
     active: usize,
     next_id: DocId,
+    /// A tab that isn't taken over, even while it's untouched.
+    held: Option<DocId>,
 }
 
 impl Tabs {
@@ -158,11 +190,16 @@ impl Tabs {
         self.tabs.iter().find(|t| t.doc.path.as_deref() == Some(path)).map(|t| t.doc.text())
     }
 
-    /// Add a tab for a new document (taking over an untouched untitled one), and return its index.
+    /// Keep `doc` from being taken over, even while it's untouched; `None`, no longer.
+    pub fn hold(&mut self, doc: Option<DocId>) {
+        self.held = doc;
+    }
+
+    /// Add a tab for a new document (taking over an untouched untitled one, unless it's held), and return its index.
     pub fn add(&mut self, make: impl FnOnce(DocId) -> Document) -> usize {
         let doc = make(self.next_id);
         self.next_id += 1;
-        if self.active().is_some_and(|t| t.doc.is_pristine()) {
+        if self.active().is_some_and(|t| t.doc.is_pristine() && Some(t.doc.id) != self.held) {
             self.tabs.remove(self.active);
         }
         self.tabs.push(Tab { doc, view: View::default() });

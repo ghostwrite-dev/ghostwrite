@@ -26,7 +26,7 @@ fn clicked(buffer: &ghostwrite_core::Buffer, selection: Range, mode: Mode, at: u
         return (Range::new(lines.start, lines.end), mode);
     }
     if clicks == 2 {
-        let word = ghostwrite_core::textobject::text_object(buffer, Range::point(at), 'w', false).unwrap_or(Range::point(at));
+        let word = ghostwrite_core::textobject::text_object(buffer, Range::point(at), 'w', false, 1).unwrap_or(Range::point(at));
         return (word, mode);
     }
     if extend || mode == Mode::Select { (to(selection.anchor), mode) } else { (Range::point(at), mode) }
@@ -38,15 +38,15 @@ impl Editor {
         if self.resizing() {
             return;
         }
-        if self.modal.mode == Mode::Tree {
-            self.modal.mode = Mode::Normal;
-        }
+        self.modal.leave_tree();
         self.modal.leave(Mode::Terminal);
+        self.stop_reading();
         let mode = self.modal.mode;
         let Some(tab) = self.tab_mut() else { return };
         let (selection, mode) = clicked(&tab.doc.buffer, tab.view.selection, mode, at, extend, clicks);
         tab.select(selection, Autoscroll::Fit);
         self.modal.mode = mode;
+        self.wander();
         self.completion = None;
         self.pointer.selecting = clicks == 1;
         cx.notify();
@@ -71,6 +71,9 @@ impl Editor {
         };
         let Some(tab) = tab else { return };
         tab.view.scroll_top = (tab.view.scroll_top - delta.y).max(px(0.));
+        if other.is_none() && delta.y != px(0.) {
+            self.wander();
+        }
         cx.notify();
     }
 }

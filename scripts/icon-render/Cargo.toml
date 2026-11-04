@@ -1,0 +1,11 @@
+[package]
+name = "icon-render"
+description = "Renders assets/icon/ghostwrite.svg to the PNGs, .icns iconset and .ico the installers use: scripts/make-icon.sh."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+resvg = "0.47"
+
+[workspace]

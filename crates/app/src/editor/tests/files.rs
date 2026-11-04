@@ -89,6 +89,23 @@ fn changes_from_other_programs_show_up(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn another_programs_changes_come_in_with_unsaved_ones(cx: &mut TestAppContext) {
+    let mut t = open("one\ntwo\nthree\nfour\nfive\n", &[], cx);
+    let path = t.dir.join("doc.txt");
+    // Unsaved: on the second line, the cursor after what was typed.
+    t.keys("j i").input("my ").keys("escape");
+    std::fs::write(&path, "zero\none\ntwo\nthree\nfour\nFIVE\n").unwrap();
+    changed_elsewhere(&mut t, &["doc.txt"]);
+    assert_eq!(t.text(), "zero\none\nmy two\nthree\nfour\nFIVE\n", "theirs in, with mine");
+    assert_eq!(t.read(|e| e.tab().unwrap().doc.buffer.line_of(e.tab().unwrap().cursor())), 2, "the cursor stays on its line");
+    assert!(t.read(|e| e.tab().unwrap().doc.dirty), "mine still unsaved");
+    t.command("w");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "zero\none\nmy two\nthree\nfour\nFIVE\n", "and saving keeps both");
+    t.keys("u");
+    assert_eq!(t.text(), "one\nmy two\nthree\nfour\nfive\n", "theirs came in as one undo step");
+}
+
+#[gpui::test]
 fn command_line_opens_writes_and_closes(cx: &mut TestAppContext) {
     let mut t = open("one\ntwo\nthree\n", &[], cx);
     std::fs::write(t.dir.join("other.txt"), "other\n").unwrap();

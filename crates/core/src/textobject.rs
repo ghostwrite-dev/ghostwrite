@@ -2,6 +2,7 @@
 //! text objects.
 
 use crate::buffer::Buffer;
+use crate::movement;
 use crate::selection::Range;
 
 const BRACKETS: [(char, char); 4] = [('(', ')'), ('[', ']'), ('{', '}'), ('<', '>')];
@@ -78,8 +79,22 @@ pub fn nearest_pair(b: &Buffer, from: usize, to: usize) -> Option<(usize, usize)
     BRACKETS.into_iter().filter_map(|pair| surrounding(b, from, to, pair)).max_by_key(|(left, _)| *left)
 }
 
-/// `mi`/`ma`: a word, WORD, paragraph, or pair, inside or around.
-pub fn text_object(b: &Buffer, r: Range, object: char, around: bool) -> Option<Range> {
+/// The pair `which` names around `from..to` (`m`: the nearest of any
+/// bracket), `count` pairs out: for `md`, `mr`, `mi`, `ma`.
+pub fn pair_around(b: &Buffer, from: usize, to: usize, which: char, count: usize) -> Option<(usize, usize)> {
+    let find = |from: usize, to: usize| if which == 'm' { nearest_pair(b, from, to) } else { surrounding(b, from, to, pair_of(which)) };
+    let mut found = find(from, to)?;
+    for _ in 1..count {
+        found = find(found.0, b.next(found.1))?;
+    }
+    Some(found)
+}
+
+/// `mi`/`ma`: a word, WORD, paragraph (`count` of them), or pair (`count`
+/// out), inside or around. As in helix, any other letter or digit names
+/// an object of a syntax tree or a diff, which there aren't here, and
+/// anything else is a pair of itself.
+pub fn text_object(b: &Buffer, r: Range, object: char, around: bool, count: usize) -> Option<Range> {
     let text = b.text();
     let cursor = r.cursor(text);
     match object {
@@ -101,28 +116,63 @@ pub fn text_object(b: &Buffer, r: Range, object: char, around: bool) -> Option<R
             }
             Some(Range::new(start, end))
         }
-        'p' => {
-            let blank = |line: usize| b.line(line).trim().is_empty();
-            let mut first = b.line_of(cursor);
-            while first > 0 && !blank(first - 1) {
-                first -= 1;
-            }
-            let mut last = b.line_of(cursor);
-            while last < b.last_line() && !blank(last + 1) {
-                last += 1;
-            }
-            if around {
-                while last < b.last_line() && blank(last + 1) {
-                    last += 1;
-                }
-            }
-            Some(Range::new(b.line_start(first), b.lines_range(last..last + 1).end))
-        }
+        'p' => Some(paragraph(b, r, around, count)),
+        c if c.is_ascii_alphanumeric() && c != 'm' => None,
         c => {
-            let (left, right) = if c == 'm' { nearest_pair(b, r.from(), r.to())? } else { surrounding(b, r.from(), r.to(), pair_of(c))? };
+            let (left, right) = pair_around(b, r.from(), r.to(), c, count)?;
             Some(if around { Range::new(left, b.next(right)) } else { Range::new(b.next(left), right) })
         }
     }
+}
+
+/// `mip`, `map`: the paragraph (and `count - 1` after it), and around it
+/// the blank lines after; as helix's `textobject_paragraph`.
+fn paragraph(b: &Buffer, r: Range, around: bool, count: usize) -> Range {
+    let (empty, lines) = (|line: usize| movement::empty_line(b, line), b.line_count());
+    let r = r.min_width_1(b.text());
+    let cursor = r.cursor(b.text());
+    let mut line = b.line_of(cursor);
+    let curr_line_empty = empty(line);
+    let last_char = b.prev(movement::start_of(b, line + 1)) == cursor;
+    let prev_empty_to_line = empty(line.saturating_sub(1)) && !curr_line_empty;
+    let curr_empty_to_line = curr_line_empty && !(line + 1 >= lines || empty(line + 1));
+    // Back over blank lines, then the paragraph before them.
+    let back = |mut line: usize| {
+        while line > 0 && empty(line - 1) {
+            line -= 1;
+        }
+        while line > 0 && !empty(line - 1) {
+            line -= 1;
+        }
+        line
+    };
+    let mut first = line + (prev_empty_to_line || curr_empty_to_line) as usize;
+    if !(curr_empty_to_line && last_char) {
+        first = back(first);
+    } else {
+        line += 1;
+    }
+    let mut paragraphs = 0;
+    for _ in 0..count {
+        let start = line;
+        while line < lines && !empty(line) {
+            line += 1;
+        }
+        paragraphs += (line > start) as usize;
+        while line < lines && empty(line) {
+            line += 1;
+        }
+    }
+    // At the end with fewer paragraphs than asked for: the one before too.
+    if paragraphs != count && line >= lines {
+        first = back(first);
+    }
+    if !around {
+        while line > 0 && empty(line - 1) {
+            line -= 1;
+        }
+    }
+    Range::new(movement::start_of(b, first), movement::start_of(b, line))
 }
 
 #[cfg(test)]
@@ -139,17 +189,29 @@ mod tests {
         assert_eq!(nearest_pair(&b, 6, 7), Some((5, 10)));
         assert_eq!(surrounding(&b, 6, 7, pair_of('(')), Some((1, 16)));
         assert_eq!(surrounding(&b, 14, 15, pair_of('"')), Some((13, 15)));
-        assert_eq!(text_object(&b, Range::point(6), '[', false), Some(Range::new(6, 10)));
-        assert_eq!(text_object(&b, Range::point(6), ']', true), Some(Range::new(5, 11)));
-        assert_eq!(text_object(&b, Range::point(6), 'm', false), Some(Range::new(6, 10)));
+        assert_eq!(text_object(&b, Range::point(6), '[', false, 1), Some(Range::new(6, 10)));
+        assert_eq!(text_object(&b, Range::point(6), ']', true, 1), Some(Range::new(5, 11)));
+        assert_eq!(text_object(&b, Range::point(6), 'm', false, 1), Some(Range::new(6, 10)));
     }
 
     #[test]
     fn word_and_paragraph_objects() {
         let b = Buffer::new("one two_x  three\n\nnext para\n");
-        assert_eq!(text_object(&b, Range::point(5), 'w', false), Some(Range::new(4, 9)));
-        assert_eq!(text_object(&b, Range::point(5), 'w', true), Some(Range::new(4, 11)));
-        assert_eq!(text_object(&b, Range::point(2), 'p', false), Some(Range::new(0, 17)));
-        assert_eq!(text_object(&b, Range::point(2), 'p', true), Some(Range::new(0, 18)));
+        assert_eq!(text_object(&b, Range::point(5), 'w', false, 1), Some(Range::new(4, 9)));
+        assert_eq!(text_object(&b, Range::point(5), 'w', true, 1), Some(Range::new(4, 11)));
+        assert_eq!(text_object(&b, Range::point(2), 'p', false, 1), Some(Range::new(0, 17)));
+        assert_eq!(text_object(&b, Range::point(2), 'p', true, 1), Some(Range::new(0, 18)));
+        assert_eq!(text_object(&b, Range::point(2), 'p', false, 2), Some(Range::new(0, 28)), "two paragraphs");
+    }
+
+    #[test]
+    fn letters_arent_pairs_and_counts_go_out() {
+        let b = Buffer::new("f(a, [b, x], q)");
+        assert_eq!(text_object(&b, Range::point(6), 'x', false, 1), None, "a letter names a syntax tree's object");
+        assert_eq!(text_object(&b, Range::point(6), '(', false, 1), Some(Range::new(2, 14)));
+        assert_eq!(text_object(&b, Range::point(6), 'm', true, 2), Some(Range::new(1, 15)), "the second pair out");
+        assert_eq!(text_object(&b, Range::point(6), '[', false, 2), None, "there's no second");
+        let b = Buffer::new("say |a| and |b|");
+        assert_eq!(text_object(&b, Range::point(5), '|', false, 1), Some(Range::new(5, 6)), "punctuation pairs with itself");
     }
 }

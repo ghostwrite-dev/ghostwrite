@@ -16,12 +16,16 @@ mkdir -p "$BIN" "$APPS" "$SHARE"
 install -m 755 target/release/ghostwrite "$BIN/ghostwrite"
 rm -rf "$SHARE/plugins"
 cp -R target/bundled-plugins "$SHARE/plugins"
+ICONS="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps"
+mkdir -p "$ICONS"
+install -m 644 assets/icon/ghostwrite.png "$ICONS/ghostwrite.png"
 cat > "$APPS/ghostwrite.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Ghostwrite
 Comment=A modal editor where a model's changes come as small steps you accept
 Exec=$BIN/ghostwrite %F
+Icon=ghostwrite
 Terminal=false
 Categories=Development;TextEditor;
 MimeType=text/plain;application/pdf;

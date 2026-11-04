@@ -8,6 +8,8 @@
 //!   "name": "zig",
 //!   "extensions": ["zig", "zon"],
 //!   "comment": "//",
+//!   "pairs": ["||"],
+//!   "unpaired": ["'"],
 //!   "server": ["zls"],
 //!   "keys": [{ "keys": "space z", "command": "term", "what": "the terminal" }],
 //!   "rules": "- Keep functions small."
@@ -30,6 +32,9 @@
 //!   "grammar": { "name": "words", "wasm": "words-grammar.wasm", "query": "highlights.scm" }
 //! }
 //! ```
+//!
+//! `pairs` close themselves as they're typed, as brackets and quotes do, and
+//! `unpaired` are quotes that don't.
 //!
 //! Code reaches nothing by itself. What it needs it asks for under `"access"`, and
 //! it's shown when it's installed:
@@ -306,6 +311,16 @@ impl Manifest {
         if only_pages && (!pages || (extensions.is_empty() && file_names.is_empty())) {
             return Err("only its pages show, but it doesn't say it makes them, or of which files".into());
         }
+        // `"pairs": ["$$"]`: an opening and closing char each; `"unpaired": ["'"]`.
+        let mut pairs = vec![];
+        for pair in strings(&json["pairs"]) {
+            let mut chars = pair.chars();
+            let (Some(open), Some(close), None) = (chars.next(), chars.next(), chars.next()) else {
+                return Err(format!("the pair `{pair}` isn't two chars, opening and closing"));
+            };
+            pairs.push((open, close));
+        }
+        let unpaired: Vec<char> = strings(&json["unpaired"]).iter().flat_map(|quote| quote.chars()).collect();
         let language: Option<&'static Language> = (!extensions.is_empty() || !file_names.is_empty()).then(|| {
             let servers: &'static [&'static str] = Box::leak(server.iter().map(|spec| spec.name).collect::<Vec<_>>().into_boxed_slice());
             &*Box::leak(Box::new(Language {
@@ -318,6 +333,8 @@ impl Manifest {
                 only_pages,
                 pages_at_own_size: json["pages_at_own_size"].as_bool().unwrap_or(false),
                 comment: json["comment"].as_str().map(forever),
+                pairs: Box::leak(pairs.into_boxed_slice()),
+                unpaired: Box::leak(unpaired.into_boxed_slice()),
                 ..Language::DEFAULT
             }))
         });
@@ -491,7 +508,7 @@ impl Plugin for Manifest {
 mod tests {
     use super::*;
 
-    const ZIG: &str = r#"{ "name": "zig-test", "extensions": ["zigtest"], "comment": "//", "server": ["zls", "--stdio"],
+    const ZIG: &str = r#"{ "name": "zig-test", "extensions": ["zigtest"], "comment": "//", "pairs": ["||"], "unpaired": ["'"], "server": ["zls", "--stdio"],
         "keys": [{ "keys": "space z", "command": ":term", "what": "the terminal" }], "rules": "- Keep it small." }"#;
 
     #[test]
@@ -499,6 +516,7 @@ mod tests {
         let zig = Manifest::parse(ZIG).unwrap();
         let language = zig.languages()[0];
         assert_eq!((language.name, language.extensions, language.comment), ("zig-test", &["zigtest"][..], Some("//")));
+        assert_eq!((language.pairs, language.unpaired), (&[('|', '|')][..], &['\''][..]));
         let server = zig.servers()[0];
         assert_eq!(server.command, ["zls", "--stdio"]);
         assert_eq!(language.servers, [server.name], "and the language knows its server");

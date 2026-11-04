@@ -2734,6 +2734,7 @@ dependencies = [
  "keyring",
  "libc",
  "regex",
+ "resvg 0.47.0",
  "serde_json",
  "ureq 3.5.0",
 ]
@@ -2844,6 +2845,7 @@ name = "ghostwrite-terminal"
 version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
+ "libc",
 ]
 
 [[package]]

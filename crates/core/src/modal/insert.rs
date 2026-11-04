@@ -2,26 +2,32 @@
 //! named keys around it, and the completion menu's keys. Brackets and quotes
 //! close themselves, as in helix: typed, the pair goes in with the cursor
 //! between; typing the closing one steps over it; Backspace between an empty
-//! pair takes both; Enter between brackets opens an indented line.
+//! pair takes both; Enter between brackets opens an indented line, and in a
+//! line comment goes on with the comment.
+//!
+//! As in helix, the selection stays while typing (after `a` it's the text
+//! appended to): everything happens at its head, the bar cursor, and its
+//! other end stays on its text.
 //!
 //! In a language with abbreviations, a backslash starts one that
 //! becomes a symbol as it's typed (`\to` → `→`, see [`crate::abbreviation`]).
 
-use super::{Key, MenuKey, Modal, Outcome, Target};
+use super::{Key, MenuKey, Modal, Outcome, Pending, Registers, Target};
 use crate::abbreviation;
 use crate::language::Language;
-use crate::movement;
+use crate::movement::{self, Word};
 use crate::selection::Range;
 
-/// The brackets and quotes that close themselves.
-const PAIRS: [(char, char); 6] = [('(', ')'), ('[', ']'), ('{', '}'), ('"', '"'), ('\'', '\''), ('`', '`')];
+/// The brackets and quotes that close themselves (a language can leave some
+/// out and add its own: see [`Target::pairs`](super::Target)).
+pub(super) const PAIRS: [(char, char); 6] = [('(', ')'), ('[', ']'), ('{', '}'), ('"', '"'), ('\'', '\''), ('`', '`')];
 
 /// The closing char that typing `open` between `before` and `after` puts
-/// in with it, if any: only before the end of a line, a space or a closing
-/// bracket (not in the middle of a word); and a quote not after a word
-/// char, where it's an apostrophe or a closing quote.
-pub(super) fn paired(open: char, before: &str, after: &str) -> Option<char> {
-    let &(_, close) = PAIRS.iter().find(|(o, _)| *o == open)?;
+/// in with it, if any of `pairs`: only before the end of a line, a space or
+/// a closing bracket (not in the middle of a word); and a quote not after a
+/// word char, where it's an apostrophe or a closing quote.
+pub(super) fn paired(open: char, before: &str, after: &str, pairs: &[(char, char)]) -> Option<char> {
+    let &(_, close) = pairs.iter().find(|(o, _)| *o == open)?;
     let next = after.chars().next();
     if !next.is_none_or(|n| n.is_whitespace() || matches!(n, ')' | ']' | '}' | ',' | ';')) {
         return None;
@@ -33,15 +39,33 @@ pub(super) fn paired(open: char, before: &str, after: &str) -> Option<char> {
     Some(close)
 }
 
-/// Whether `c` closes a pair.
-pub(super) fn closes(c: char) -> bool {
-    PAIRS.iter().any(|(_, close)| *close == c)
+/// Replace `range` (at the head) with `text`, the head going to `head`. The
+/// selection's other end stays on its text, as helix maps it: before the
+/// change, where it is; after, moved along; in what was replaced, at its start.
+pub(super) fn put(t: &mut Target, range: std::ops::Range<usize>, text: &str, head: usize) {
+    let (sel, removed) = (*t.selection, range.end - range.start);
+    let anchor = match sel.anchor {
+        _ if sel.is_empty() => head,
+        a if a < range.start || (a == range.start && a < sel.head) => a,
+        a if a >= range.end => a + text.len() - removed,
+        _ => range.start,
+    };
+    t.buffer.begin(sel);
+    t.buffer.edit(range, text);
+    *t.selection = Range::new(anchor, head);
+}
+
+/// The head to `at` without an edit; a cursor alone stays one.
+pub(super) fn move_head(t: &mut Target, at: usize) {
+    let sel = *t.selection;
+    *t.selection = if sel.is_empty() { Range::point(at) } else { Range::new(sel.anchor, at) };
 }
 
 /// The pair the cursor at `at` is in the middle of, empty: `(|)`.
-fn between_pair(text: &str, at: usize) -> Option<(char, char)> {
+fn between_pair(t: &Target, at: usize) -> Option<(char, char)> {
+    let text = t.buffer.text();
     let (prev, next) = (text[..at].chars().next_back()?, text[at..].chars().next()?);
-    PAIRS.iter().copied().find(|&(o, c)| o == prev && c == next)
+    t.pairs().into_iter().find(|&(o, c)| o == prev && c == next)
 }
 
 impl Modal {
@@ -55,7 +79,7 @@ impl Modal {
     fn abbreviation_start(&self, t: &Target) -> Option<usize> {
         let (start, end) = self.abbreviating?;
         let typed = t.buffer.text().get(start..end)?;
-        (t.selection.is_empty() && t.selection.head == end && typed.starts_with('\\') && !typed[1..].contains(char::is_whitespace)).then_some(start)
+        (t.selection.head == end && typed.starts_with('\\') && !typed[1..].contains(char::is_whitespace)).then_some(start)
     }
 
     /// `c` typed with abbreviations on: `true` if it went into one. It goes
@@ -68,9 +92,7 @@ impl Modal {
             let at = t.selection.head;
             let typed = format!("{}{c}", &t.buffer.text()[start + 1..at]);
             if table.extends(&typed) {
-                t.buffer.begin(*t.selection);
-                t.buffer.edit(at..at, c.encode_utf8(&mut [0; 4]));
-                *t.selection = Range::point(at + c.len_utf8());
+                put(t, at..at, c.encode_utf8(&mut [0; 4]), at + c.len_utf8());
                 self.abbreviating = Some((start, at + c.len_utf8()));
                 if let Some(symbol) = table.eager(&typed) {
                     self.replace_abbreviation(symbol, t);
@@ -83,9 +105,7 @@ impl Modal {
             return false;
         }
         let at = t.selection.head;
-        t.buffer.begin(*t.selection);
-        t.buffer.edit(at..at, "\\");
-        *t.selection = Range::point(at + 1);
+        put(t, at..at, "\\", at + 1);
         self.abbreviating = Some((at, at + 1));
         true
     }
@@ -105,9 +125,7 @@ impl Modal {
     fn replace_abbreviation(&mut self, symbol: &str, t: &mut Target) {
         let Some((start, end)) = self.abbreviating.take() else { return };
         let (text, cursor) = abbreviation::place(symbol);
-        t.buffer.begin(*t.selection);
-        t.buffer.edit(start..end, &text);
-        *t.selection = Range::point(start + cursor);
+        put(t, start..end, &text, start + cursor);
     }
 
     /// The completion menu's keys: ↑↓ or ctrl-p/n choose, Enter or Tab take it.
@@ -121,7 +139,23 @@ impl Modal {
         })
     }
 
-    pub(super) fn insert_key(&mut self, key: Key, t: &mut Target) -> Outcome {
+    pub(super) fn insert_key(&mut self, key: Key, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
+        if self.pending.take() == Some(Pending::InsertRegister) {
+            // `ctrl-r` and a register: what's in it, typed out (`"` is the default one).
+            if let Key::Char(name) = key {
+                let text = regs.yanked((name != '"').then_some(name));
+                let at = t.selection.head;
+                put(t, at..at, &text, at + text.len());
+            }
+            return Outcome::Handled;
+        }
+        // Helix's other names for keys.
+        let key = match key {
+            Key::Ctrl('h') => Key::Backspace,
+            Key::Ctrl('d') => Key::Delete,
+            Key::Ctrl('j') => Key::Enter,
+            key => key,
+        };
         // A named key but Backspace finishes an abbreviation; Tab only that.
         // (Chars arrive as text, through `insert`.)
         if t.abbreviations().is_some() && !matches!(key, Key::Backspace | Key::Char(_)) && self.finish_abbreviation(t) && key == Key::Tab {
@@ -131,36 +165,15 @@ impl Modal {
         let at = t.selection.head;
         match key {
             Key::Escape => self.to_normal(t),
-            Key::Enter => {
-                let indent = t.buffer.indent_at(at).to_string();
-                match between_pair(text, at).filter(|(o, _)| matches!(o, '(' | '[' | '{')).filter(|_| t.selection.is_empty()) {
-                    // `{|}`: the cursor on a line of its own, indented, and the bracket under.
-                    Some(_) => {
-                        let inner = format!("\n{indent}{}", t.indent.as_str());
-                        t.buffer.begin(*t.selection);
-                        t.buffer.edit(at..at, &format!("{inner}\n{indent}"));
-                        *t.selection = Range::point(at + inner.len());
-                    }
-                    None if t.selection.is_empty() => {
-                        // The line left keeps no spaces at its end; after an
-                        // opening bracket (or Python's `:`) the new one goes in a level.
-                        let start = t.buffer.line_start_at(at);
-                        let kept = text[start..at].trim_end_matches([' ', '\t']).len() + start;
-                        let opens = text[start..kept].ends_with(t.language.map_or(Language::DEFAULT.indent_after, |l| l.indent_after));
-                        let deeper = if opens { t.indent.as_str() } else { String::new() };
-                        t.buffer.begin(*t.selection);
-                        t.buffer.edit(kept..at, &format!("\n{indent}{deeper}"));
-                        *t.selection = Range::point(kept + 1 + indent.len() + deeper.len());
-                    }
-                    None => {
-                        self.insert(&format!("\n{indent}"), t);
-                    }
-                }
+            Key::Enter => newline(t),
+            // To the next indent stop (helix's smart Tab needs a syntax tree to do more).
+            Key::Tab | Key::BackTab => {
+                let unit = t.indent.as_str();
+                let column = text[t.buffer.line_start_at(at)..at].chars().count();
+                let tab = if t.indent.hard_tabs { unit.as_str() } else { &unit[column % t.indent.width.max(1)..] };
+                put(t, at..at, tab, at + tab.len());
             }
-            Key::Tab => {
-                self.insert(&t.indent.as_str(), t);
-            }
-            Key::Backspace if t.selection.is_empty() => {
+            Key::Backspace => {
                 let start = t.buffer.line_start_at(at);
                 let before = &text[start..at];
                 // In leading spaces: back to the previous indent stop.
@@ -171,42 +184,44 @@ impl Modal {
                     t.buffer.prev(at)
                 };
                 // An empty pair goes with its opening half.
-                let to = if between_pair(text, at).is_some() { t.buffer.next(at) } else { at };
-                t.buffer.edit(from..to, "");
-                *t.selection = Range::point(from);
+                let to = if between_pair(t, at).is_some() { t.buffer.next(at) } else { at };
+                put(t, from..to, "", from);
                 // Backspacing an abbreviation shortens it, until its backslash goes.
                 self.abbreviating = self.abbreviating.filter(|&(start, end)| end == at && from > start).map(|(start, _)| (start, from));
             }
-            // The word before the cursor (and the spaces after it), or back to the line's start.
-            Key::Ctrl(c @ ('w' | 'u')) if t.selection.is_empty() => {
-                let start = t.buffer.line_start_at(at);
-                let before = &text[start..at];
-                let from = if c == 'u' {
-                    start + before.len() - before.trim_start().len()
-                } else {
-                    let trimmed = before.trim_end();
-                    let word = |ch: char| ch.is_alphanumeric() || ch == '_';
-                    let last = trimmed.chars().next_back();
-                    let kept = match last {
-                        Some(ch) if word(ch) => trimmed.trim_end_matches(word),
-                        Some(ch) => &trimmed[..trimmed.len() - ch.len_utf8()],
-                        None => trimmed,
-                    };
-                    start + kept.len()
-                };
-                let from = if from == at { t.buffer.prev(at) } else { from };
-                t.buffer.edit(from..at, "");
-                *t.selection = Range::point(from);
-            }
-            Key::Delete if t.selection.is_empty() => {
+            Key::Delete => {
                 let to = t.buffer.next(at);
-                t.buffer.edit(at..to, "");
+                put(t, at..to, "", at);
             }
-            Key::Backspace | Key::Delete => {
-                let range = t.selection.bytes();
-                t.buffer.edit(range.clone(), "");
-                *t.selection = Range::point(range.start);
+            // `ctrl-w`, `alt-backspace`: back to where the word before starts (a run of punctuation is one).
+            Key::Ctrl('w') => {
+                let from = movement::word_move(t.buffer, Range::point(at), 1, Word::PrevStart).from().min(at);
+                put(t, from..at, "", from);
             }
+            // `alt-d`: on to where this word ends.
+            Key::Alt('d') => {
+                let to = movement::word_move(t.buffer, Range::point(at), 1, Word::NextEnd).to().max(at);
+                put(t, at..to, "", at);
+            }
+            // `ctrl-u`: back to the first non-blank (or the line's start if
+            // already there); at the start, the line joins the one before.
+            Key::Ctrl('u') => {
+                let line = t.buffer.line_of(at);
+                let (start, first) = (t.buffer.line_start(line), t.buffer.first_non_blank_at(at));
+                let from = match () {
+                    _ if at == start && line > 0 => t.buffer.line_end(line - 1),
+                    _ if first < at => first,
+                    _ => start,
+                };
+                put(t, from..at, "", from);
+            }
+            // `ctrl-k`: on to the line's end; at the end, its line break.
+            Key::Ctrl('k') => {
+                let end = t.buffer.line_end_at(at);
+                let to = if at == end { t.buffer.next(at) } else { end };
+                put(t, at..to, "", at);
+            }
+            Key::Ctrl('r') => self.pending = Some(Pending::InsertRegister),
             Key::Left => *t.selection = Range::point(t.buffer.prev(at)),
             Key::Right => *t.selection = Range::point(t.buffer.next(at)),
             Key::Home => *t.selection = Range::point(t.buffer.line_start_at(at)),
@@ -219,9 +234,37 @@ impl Modal {
             }
             _ => return Outcome::Ignored,
         }
-        if !matches!(key, Key::Up | Key::Down) {
-            self.sticky_col = None;
-        }
+        self.sticky_col = None;
         Outcome::Handled
     }
+}
+
+/// Enter: a new line, as helix opens one. Spaces before the cursor go; the
+/// new line has this one's indent (a level more after an opening bracket, or
+/// Python's `:`), and goes on with a line comment this one starts with.
+/// Between brackets the cursor gets a line of its own. With only indent
+/// before the cursor, the line moves down as it is.
+fn newline(t: &mut Target) {
+    let text = t.buffer.text();
+    let at = t.selection.head;
+    let line = t.buffer.line_of(at);
+    let start = t.buffer.line_start(line);
+    if text[start..at].trim().is_empty() {
+        return put(t, start..start, "\n", at + 1);
+    }
+    let kept = start + text[start..at].trim_end_matches([' ', '\t']).len();
+    let indent = t.buffer.indent_at(at);
+    let language = t.language.unwrap_or(&Language::DEFAULT);
+    let new = if let Some(leader) = language.comment_leader(t.buffer.line(line)) {
+        format!("\n{indent}{leader} ")
+    } else if between_pair(t, at).is_some_and(|(open, _)| matches!(open, '(' | '[' | '{')) {
+        // `{|}`: the cursor on a line of its own, indented, and the bracket under.
+        let inner = format!("\n{indent}{}", t.indent.as_str());
+        let new = format!("{inner}\n{indent}");
+        return put(t, kept..at, &new, kept + inner.len());
+    } else {
+        let deeper = if text[start..kept].ends_with(language.indent_after) { t.indent.as_str() } else { String::new() };
+        format!("\n{indent}{deeper}")
+    };
+    put(t, kept..at, &new, kept + new.len());
 }

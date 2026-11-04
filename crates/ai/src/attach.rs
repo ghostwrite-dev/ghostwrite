@@ -15,6 +15,8 @@ const MAX_IMAGE: usize = 5 * 1024 * 1024 / 4 * 3;
 /// shrunk: more than the sharpest a model sees it.
 const MAX_SIDE: u32 = 8000;
 const SHRUNK_SIDE: u32 = 2576;
+/// The long side of an SVG, drawn.
+const DRAWN_SIDE: u32 = 1568;
 /// A PDF: what fits in a request of 32 MB, once it's in base64.
 const MAX_PDF: usize = 32 * 1024 * 1024 / 4 * 3 - 1024 * 1024;
 /// The most of a file that's looked at, and the most memory reading an image can take.
@@ -43,7 +45,10 @@ pub fn kind_of(path: &Path) -> Option<&'static str> {
     use std::io::Read as _;
     let mut start = [0; 64];
     let read = std::fs::File::open(path).ok()?.read(&mut start).ok()?;
-    let start = &start[..read];
+    kind_in(&start[..read])
+}
+
+fn kind_in(start: &[u8]) -> Option<&'static str> {
     if start.starts_with(b"%PDF-") {
         return Some("a PDF");
     }
@@ -58,7 +63,46 @@ pub fn attach(path: &Path) -> Result<Attachment, String> {
     if size > MAX_FILE {
         return Err(format!("it's too big to show, at {} MB", size >> 20));
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    shown(std::fs::read(path).map_err(|e| e.to_string())?)
+}
+
+/// What came from the web to show a model: an image or a PDF, or an SVG, drawn.
+pub fn from_web(bytes: Vec<u8>) -> Result<Attachment, String> {
+    if is_svg(&bytes) {
+        return drawn(&bytes);
+    }
+    if kind_in(&bytes[..bytes.len().min(64)]).is_none() {
+        return Err("it isn't an image or a PDF, and nothing else is read from the web".into());
+    }
+    shown(bytes)
+}
+
+/// Whether these bytes are an SVG: a page can have one in it, and isn't one.
+fn is_svg(bytes: &[u8]) -> bool {
+    let start = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_lowercase();
+    start.contains("<svg") && !start.contains("<html")
+}
+
+/// An SVG as a picture, big enough to make out and on white, since a drawing's lines
+/// are mostly dark and what's see-through can come out black. It can name other
+/// files, and they're left out: it came from somewhere else.
+fn drawn(svg: &[u8]) -> Result<Attachment, String> {
+    use resvg::{tiny_skia, usvg};
+    let mut options = usvg::Options::default();
+    options.image_href_resolver.resolve_string = Box::new(|_, _| None);
+    options.fontdb_mut().load_system_fonts();
+    let tree = usvg::Tree::from_data(svg, &options).map_err(|e| format!("it can't be drawn: {e}"))?;
+    let size = tree.size();
+    let scale = DRAWN_SIDE as f32 / size.width().max(size.height());
+    let side = |length: f32| ((length * scale).round() as u32).max(1);
+    let mut picture = tiny_skia::Pixmap::new(side(size.width()), side(size.height())).ok_or("it can't be drawn")?;
+    picture.fill(tiny_skia::Color::WHITE);
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut picture.as_mut());
+    image_of(picture.encode_png().map_err(|e| e.to_string())?)
+}
+
+/// What a file or a download is, as a model is shown it.
+fn shown(bytes: Vec<u8>) -> Result<Attachment, String> {
     if bytes.starts_with(b"%PDF-") {
         if bytes.len() > MAX_PDF {
             return Err(format!("it's too big to show, at {} MB: the most is {} MB", bytes.len() >> 20, MAX_PDF >> 20));

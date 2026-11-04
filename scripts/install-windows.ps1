@@ -14,6 +14,7 @@ foreach ($plugin in "typst", "pdf", "image") {
 $dir = Join-Path $env:LOCALAPPDATA "Programs\Ghostwrite"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Copy-Item "target\release\ghostwrite.exe" $dir -Force
+Copy-Item "assets\icon\ghostwrite.ico" $dir -Force
 foreach ($plugin in "typst", "pdf", "image") {
     $to = Join-Path $dir "plugins\$plugin"
     New-Item -ItemType Directory -Force -Path $to | Out-Null
@@ -24,5 +25,6 @@ foreach ($plugin in "typst", "pdf", "image") {
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Programs")) "Ghostwrite.lnk"))
 $link.TargetPath = Join-Path $dir "ghostwrite.exe"
+$link.IconLocation = Join-Path $dir "ghostwrite.ico"
 $link.Save()
 Write-Host "Installed $dir\ghostwrite.exe"

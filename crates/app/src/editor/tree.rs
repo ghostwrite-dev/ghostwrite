@@ -73,13 +73,10 @@ pub(super) struct Annex {
 impl Editor {
     pub(super) fn enter_tree(&mut self, cx: &mut Context<Self>) {
         self.leave_insert();
-        // From the terminal: back to what it was over first, and a review
-        // stays a review (the tree only shows), its keys still its own.
+        // From the terminal: back to what it was over first. A review is still up
+        // in the tree, and leaving the tree goes back to it.
         self.modal.leave(Mode::Terminal);
-        if self.modal.mode.reviewing() {
-            self.tree_pane.shown = true;
-            return cx.notify();
-        }
+        self.stop_reading();
         self.stop_selecting();
         self.modal.to_tree();
         self.tree_pane.shown = true;
@@ -98,8 +95,8 @@ impl Editor {
             return self.enter_tree(cx);
         }
         self.tree_pane.shown = !self.tree_pane.shown;
-        if !self.tree_pane.shown && self.modal.mode == Mode::Tree {
-            self.modal.mode = Mode::Normal;
+        if !self.tree_pane.shown {
+            self.modal.leave_tree();
         }
         cx.notify();
     }
@@ -120,7 +117,7 @@ impl Editor {
             TreeCommand::Open => match self.project.tree.selected().cloned() {
                 Some(row) if row.is_dir => self.project.tree.toggle(self.project.tree.cursor()),
                 Some(row) => {
-                    self.modal.mode = Mode::Normal;
+                    self.modal.leave_tree();
                     self.open_paths(vec![row.path], cx);
                 }
                 None => {}
@@ -152,7 +149,7 @@ impl Editor {
             Ok(path) => {
                 self.project.tree.reveal(&path);
                 if path.is_file() {
-                    self.modal.mode = Mode::Normal;
+                    self.modal.leave_tree();
                     self.open_paths(vec![path], cx);
                 }
             }
@@ -236,9 +233,7 @@ impl Editor {
             self.project.tree.toggle(ix);
         } else {
             self.project.tree.move_to(ix);
-            if self.modal.mode == Mode::Tree {
-                self.modal.mode = Mode::Normal;
-            }
+            self.modal.leave_tree();
             self.stop_selecting();
             self.open_paths(vec![row.path], cx);
         }
@@ -291,6 +286,12 @@ impl Editor {
             }
         }
         let expanded: Vec<bool> = rows.iter().map(|(p, ..)| self.project.tree.is_expanded(p)).collect();
+        // Where the story's step is, for the eye to be led there.
+        let (editor, story_mark) = (cx.entity(), self.step_mark());
+        let marked = move |row: gpui::Stateful<gpui::Div>| match story_mark {
+            Some(mark) => row.relative().child(super::attention::marker(editor.clone(), mark)),
+            None => row,
+        };
         let list = uniform_list(
             "tree",
             lines.len(),
@@ -301,9 +302,9 @@ impl Editor {
                         let pad = |depth: usize| pt(8. + INDENT * depth as f32 + 16.);
                         let base = div().id(i).h(pt(ROW_HEIGHT)).w_full().flex().items_center().whitespace_nowrap().overflow_hidden();
                         Some(match line {
-                            Line::Keys { depth, text } => base.pl(pad(depth)).text_xs().text_color(theme.muted_foreground).child(text),
+                            Line::Keys { depth, text } => marked(base.pl(pad(depth)).text_xs().text_color(theme.muted_foreground).child(text)),
                             Line::Note { depth, text } => base.pl(pad(depth)).text_sm().child(text),
-                            Line::Ask { depth } => base
+                            Line::Ask { depth } => marked(base)
                                 .pl(pad(depth))
                                 .pr_2()
                                 .gap_1()

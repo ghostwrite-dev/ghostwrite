@@ -9,7 +9,7 @@ use gpui::{
     prelude::*, px, size,
 };
 
-use crate::actions::{OpenFolder, ShowProjects};
+use crate::actions::{OpenFolder, OpenRecent, ShowProjects};
 use crate::editor::{Editor, EditorEvent, Options};
 use crate::projects_page::{ProjectsEvent, ProjectsPage};
 
@@ -200,6 +200,7 @@ impl Workspace {
             return;
         }
         store::touch_project(&root);
+        crate::actions::set_menus(cx);
         // Bring back the files open last time, then any asked for now.
         let session = store::load_session(&root);
         let editor = cx.new(|cx| {
@@ -276,6 +277,21 @@ impl Workspace {
         );
     }
 
+    /// File › Open Recent: that project here, instead of this one (or, open in
+    /// another window, that window).
+    fn open_recent(&mut self, recent: &OpenRecent, window: &mut Window, cx: &mut Context<Self>) {
+        let root = recent.root.clone();
+        if self.root(cx).as_deref() == Some(root.as_path()) {
+            return;
+        }
+        if !root.is_dir() {
+            store::forget_project(&root);
+            crate::actions::set_menus(cx);
+            return;
+        }
+        self.leave_project(move |this, window, cx| this.open_project(root, vec![], window, cx), window, cx);
+    }
+
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open Project".into()) });
         cx.spawn_in(window, async move |this, cx| {
@@ -295,6 +311,33 @@ impl Render for Workspace {
             Screen::Projects(page) => page.clone().into_any_element(),
             Screen::Project(editor) => editor.clone().into_any_element(),
         };
-        div().key_context("Workspace").on_action(cx.listener(Self::show_projects)).on_action(cx.listener(Self::open_folder)).size_full().child(content)
+        div()
+            .key_context("Workspace")
+            .on_action(cx.listener(Self::show_projects))
+            .on_action(cx.listener(Self::open_folder))
+            .on_action(cx.listener(Self::open_recent))
+            .size_full()
+            .child(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{TestAppContext, WindowAppearance};
+
+    use super::*;
+
+    #[gpui::test]
+    fn open_recent_opens_that_project_here(cx: &mut TestAppContext) {
+        store::redirect_for_tests();
+        let (first, second) = (ghostwrite_project::scratch_dir("recent-a"), ghostwrite_project::scratch_dir("recent-b"));
+        cx.update(|cx| crate::theme::install(WindowAppearance::Light, cx));
+        let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(vec![first.clone()], window, cx));
+        cx.run_until_parked();
+        assert_eq!(workspace.read_with(cx, |w, cx| w.root(cx)), Some(first.clone()));
+        cx.dispatch_action(OpenRecent { root: second.clone() });
+        cx.run_until_parked();
+        assert_eq!(workspace.read_with(cx, |w, cx| w.root(cx)), Some(second.clone()));
+        assert_eq!(store::recent_projects().first(), Some(&second), "and it's the most recent now");
     }
 }
