@@ -52,6 +52,11 @@ Each asks first, listing what the plugin adds and can reach; Enter installs it.
 - `space a` asks about the line or selection. Tab accepts a step, Enter redirects, and
   Esc Esc stops, keeping what you accepted.
 
+## Is it vibe coded?
+
+Hell yeah. But it's reviewed with the editor itself, and Ghostwrite is now worked on in
+Ghostwrite, a step at a time.
+
 ## Documentation
 
 The docs are at [ghostwrite-dev.github.io/ghostwrite](https://ghostwrite-dev.github.io/ghostwrite/):
