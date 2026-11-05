@@ -6,7 +6,7 @@ use super::{Autoscroll, DocId, Editor};
 use ghostwrite_core::Range;
 use gpui::Context;
 
-pub(super) use ghostwrite_view::jumps::Jumps;
+pub(super) use ghostwrite_state::jumps::Jumps;
 
 impl Editor {
     /// Where the cursor is: its file, and where in it.

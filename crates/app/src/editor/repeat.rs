@@ -7,8 +7,8 @@ use ghostwrite_core::{Command, Key, Mode};
 use gpui::{Context, Window};
 
 use super::{DocId, Editor};
-use ghostwrite_view::repeat::Recorded;
-pub(super) use ghostwrite_view::repeat::Recorder;
+use ghostwrite_state::repeat::Recorded;
+pub(super) use ghostwrite_state::repeat::Recorder;
 
 impl Editor {
     /// The file and version the cursor's in.

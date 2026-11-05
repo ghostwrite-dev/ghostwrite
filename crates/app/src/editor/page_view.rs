@@ -139,7 +139,7 @@ impl Element for PageView {
             // The selection and the cursor.
             let mode = editor.modal.mode;
             let mut marks = vec![];
-            if !matches!(mode, Mode::Tree | Mode::Terminal) && !editor.reading() {
+            if editor.in_code() {
                 if selection.is_wide(text) {
                     marks.extend(pages.covering(selection.bytes()).into_iter().map(|place| (rect(&stack, place), theme.selection)));
                 }

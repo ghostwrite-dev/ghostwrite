@@ -294,16 +294,16 @@ fn ai_mode_reviews_and_goes_back_to_where_you_were(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn ai_mode_from_the_tree_goes_back_to_the_tree(cx: &mut TestAppContext) {
+fn a_story_asked_from_files_goes_back_to_files(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), &hints(), DONE], cx);
     t.keys("space e");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tree);
+    assert_eq!(t.at(), (ViewKind::Files, Mode::Normal));
     t.keys("space a");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Ai);
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Ai), "asked in the code");
     t.input("implement it").keys("enter").keys("tab");
     assert_eq!(t.text(), "def add(a, b):\n    return a + b\n");
     t.keys("tab");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tree);
+    assert_eq!(t.at(), (ViewKind::Files, Mode::Normal));
 }
 
 #[gpui::test]
@@ -346,7 +346,7 @@ fn the_tree_marks_where_the_story_is_waiting(cx: &mut TestAppContext) {
     std::fs::write(t.dir.join("src/lib.rs"), "pub fn run() {}\n").unwrap();
     let waiting = |t: &mut Setup| {
         let dir = t.dir.clone();
-        let mut files: Vec<(String, ghostwrite_view::story::Waiting)> = t
+        let mut files: Vec<(String, ghostwrite_state::story::Waiting)> = t
             .read(|e| e.story.as_ref().map(|s| s.files(&e.project)).unwrap_or_default())
             .into_iter()
             .map(|(p, w)| (p.strip_prefix(&dir).unwrap().display().to_string(), w))
@@ -355,11 +355,11 @@ fn the_tree_marks_where_the_story_is_waiting(cx: &mut TestAppContext) {
         files
     };
     t.keys("space a");
-    assert_eq!(waiting(&mut t), [("doc.txt".into(), ghostwrite_view::story::Waiting::Here)], "asking about this file");
+    assert_eq!(waiting(&mut t), [("doc.txt".into(), ghostwrite_state::story::Waiting::Here)], "asking about this file");
     t.input("add a verbose flag").keys("enter");
-    assert_eq!(waiting(&mut t), [("src/lib.rs".into(), ghostwrite_view::story::Waiting::Here)]);
+    assert_eq!(waiting(&mut t), [("src/lib.rs".into(), ghostwrite_state::story::Waiting::Here)]);
     t.keys("tab");
-    assert_eq!(waiting(&mut t), [("doc.txt".into(), ghostwrite_view::story::Waiting::Here)], "on to the next item");
+    assert_eq!(waiting(&mut t), [("doc.txt".into(), ghostwrite_state::story::Waiting::Here)], "on to the next item");
 }
 
 #[gpui::test]
@@ -688,12 +688,12 @@ fn the_tree_can_be_used_while_a_story_is_up(cx: &mut TestAppContext) {
     t.ask("implement it");
     let at = t.cursor();
     t.keys("space e");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tree, "space e goes to the tree");
+    assert_eq!(t.at(), (ViewKind::Files, Mode::Ai), "space e goes to Files, the story still up");
     let row = t.read(|e| e.project.tree.rows().iter().position(|r| r.name == "notes.txt")).expect("in the tree");
     t.editor.update(t.cx, |e, _| e.project.tree.move_to(row));
     t.keys("enter");
     assert_eq!(t.active().as_deref(), Some("notes.txt"), "and opens a file from there");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Ai, "back in the story");
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Ai), "back in the story");
     t.keys("tab");
     assert_eq!((t.active().as_deref(), t.cursor()), (Some("doc.txt"), at), "Tab comes back to the step");
     assert_eq!(t.text(), ADD);
@@ -702,11 +702,11 @@ fn the_tree_can_be_used_while_a_story_is_up(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn esc_out_of_the_tree_goes_back_to_the_story(cx: &mut TestAppContext) {
+fn esc_out_of_files_goes_back_to_the_story(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), DONE], cx);
     t.ask("implement it");
     t.keys("space e escape");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Ai);
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Ai));
     assert!(t.reviewing());
 }
 

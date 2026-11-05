@@ -1,4 +1,4 @@
-//! The open documents, each in a tab with its [`View`]: the selection and
+//! The open documents, each in a tab with its [`Viewport`]: the selection and
 //! where it's scrolled to. Like helix, the document is the file and the view
 //! is how it's being looked at; the tab list knows nothing about policy
 //! (when files are written, what's focused), which is the editor's.
@@ -25,7 +25,7 @@ pub enum Autoscroll {
     Bottom,
 }
 
-pub struct View {
+pub struct Viewport {
     pub selection: Range,
     /// More cursors, besides the main one that's `selection`.
     pub others: Vec<Range>,
@@ -39,7 +39,7 @@ pub struct View {
     pub motion: Motion,
 }
 
-impl Default for View {
+impl Default for Viewport {
     fn default() -> Self {
         Self {
             selection: Range::point(0),
@@ -79,7 +79,7 @@ pub struct Motion {
 
 pub struct Tab {
     pub doc: Document,
-    pub view: View,
+    pub view: Viewport,
 }
 
 impl Tab {
@@ -207,7 +207,7 @@ impl Tabs {
         if self.active().is_some_and(|t| t.doc.is_pristine() && Some(t.doc.id) != self.held) {
             self.tabs.remove(self.active);
         }
-        self.tabs.push(Tab { doc, view: View::default() });
+        self.tabs.push(Tab { doc, view: Viewport::default() });
         self.tabs.len() - 1
     }
 

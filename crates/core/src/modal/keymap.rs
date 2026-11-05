@@ -3,12 +3,15 @@
 //! `space`, `z`, `m`, `]`, `[` and `ctrl-w` lead on to more keys.
 //!
 //! [`DEFAULT`] is the keymap as data, in the cheatsheet's sections and
-//! lines, so [`Keymap::cheatsheet`] comes from what's bound. Your own keys
-//! (the config's `"keys"`) go over it: a command by name, a `:` command, or
-//! `no_op` to unbind a key.
+//! lines, so [`Keymap::cheatsheet`] comes from what's bound. Each view that
+//! isn't the code has a layer of its own over it, as Zed's key contexts are:
+//! [`VIEWS`]. A key is looked up in the layer of the view with the keys first,
+//! then in the code's. Your own keys (the config's `"keys"`, for the code and
+//! every view, or `"files"`, `"terminal"` and the like for one) go over them:
+//! a command by name, a `:` command, or `no_op` to unbind a key.
 
-use super::Key;
 use super::command::Command::{self, *};
+use super::{Key, ViewKind};
 
 /// One line of the cheatsheet: its keys and the commands they run, and what they do.
 type Line = (&'static [(&'static str, Command)], &'static str);
@@ -132,8 +135,8 @@ pub const DEFAULT: &[(&str, &[Line])] = &[
         "Space",
         &[
             (&[("space a", Ask)], "ask about the line or selection"),
-            (&[("space e", FileExplorer)], "file tree (⌘B too)"),
-            (&[("space t", Terminal)], "terminal: type in it; esc esc reads it (⌘J too)"),
+            (&[("space e", FileExplorer)], "Files, the file tree (⌘B too); again: back to the code"),
+            (&[("space t", Terminal)], "the terminal, typing in it (⌘J too); again: back to the code"),
             (&[("space f", FilePicker), ("space b", BufferPicker)], "pick a file, an open file (fuzzy)"),
             (&[("space /", GlobalSearch)], "search the project"),
             (&[("space k", Hover), ("space d", FileDiagnostics)], "docs here; this file's diagnostics"),
@@ -142,13 +145,73 @@ pub const DEFAULT: &[(&str, &[Line])] = &[
             (&[("space j", GotoNextProblem)], "next error (or warning); a file's pages follow"),
             (&[("space y", YankToClipboard), ("space p", PasteClipboardAfter), ("space P", PasteClipboardBefore)], "clipboard yank, paste after, before"),
             (&[("space ?", Cheatsheet)], "this, every key"),
+        ],
+    ),
+    (
+        "Views  ctrl-w",
+        &[
+            (
+                &[("ctrl-w h", JumpViewLeft), ("ctrl-w j", JumpViewDown), ("ctrl-w k", JumpViewUp), ("ctrl-w l", JumpViewRight)],
+                "the view left, below, above, right (Files, panes, terminal, beside)",
+            ),
             (&[("ctrl-w v", Vsplit)], "two panes: this file's pages, or the next tab"),
-            (&[("ctrl-w w", RotateView), ("ctrl-w h", RotateView), ("ctrl-w l", RotateView)], "the other pane"),
+            (&[("ctrl-w w", RotateView)], "the other pane"),
             (&[("ctrl-w q", Wonly), ("ctrl-w o", Wonly)], "only this one"),
         ],
     ),
     ("Command line  :", &[(&[(":", CommandMode)], "the command line")]),
 ];
+
+/// The keys of each view that isn't the code, over the code's, by the cheatsheet's
+/// sections and lines. Elsewhere the code's keys work as ever: on the terminal and
+/// on pages they move through the text, and in a view with no text only those that
+/// work anywhere do (see [`Command::anywhere`]).
+pub const VIEWS: &[(ViewKind, &str, &[Line])] = &[
+    (
+        ViewKind::Files,
+        "Files  space e",
+        &[
+            (&[("j", FilesDown), ("down", FilesDown), ("k", FilesUp), ("up", FilesUp)], "down, up a row (3j: three)"),
+            (&[("g g", FilesFirst), ("home", FilesFirst), ("g e", FilesLast), ("G", FilesLast), ("end", FilesLast)], "first, last row"),
+            (&[("l", ExpandFolder), ("right", ExpandFolder), ("h", CollapseFolder), ("left", CollapseFolder)], "open a folder, preview a file; close, up"),
+            (&[("enter", OpenFile)], "open the file, in the code (a folder: open, close)"),
+            (&[("a", AddFile), ("r", RenameFile), ("d", DeleteFile)], "add (name/: a folder), rename, trash"),
+            (&[("esc", FocusCode)], "back to the code (space e too)"),
+        ],
+    ),
+    (
+        ViewKind::Terminal,
+        "Terminal  space t",
+        &[
+            (&[("enter", GotoFile)], "open the file a line names, at its line (gf too)"),
+            (&[("esc", FocusCode)], "back to the code (from select mode, normal mode)"),
+        ],
+    ),
+    (
+        ViewKind::Pages,
+        "Pages  :preview",
+        &[
+            (&[("j", ScrollDown), ("down", ScrollDown), ("k", ScrollUp), ("up", ScrollUp)], "scroll down, up"),
+            (&[("ctrl-d", ScrollPageDown), ("ctrl-u", ScrollPageUp)], "a screen down, up"),
+            (&[("+", ZoomIn), ("-", ZoomOut), ("=", ZoomReset)], "zoom in, out; fit the view (⌘= ⌘- ⌘0)"),
+        ],
+    ),
+    (
+        ViewKind::Aside,
+        "Beside the file",
+        &[
+            (&[("j", ScrollDown), ("down", ScrollDown), ("k", ScrollUp), ("up", ScrollUp)], "scroll down, up"),
+            (&[("ctrl-d", ScrollPageDown), ("ctrl-u", ScrollPageUp)], "a screen down, up"),
+            (&[("esc", FocusCode)], "back to the code"),
+        ],
+    ),
+];
+
+/// Every section of the cheatsheet the keymap has, and the view its keys are for:
+/// [`DEFAULT`]'s, then [`VIEWS`]'.
+fn sections() -> impl Iterator<Item = (ViewKind, &'static str, &'static [Line])> {
+    DEFAULT.iter().map(|(title, lines)| (ViewKind::Code, *title, *lines)).chain(VIEWS.iter().copied())
+}
 
 /// The cheatsheet's section for keys of yours it has no line for.
 pub const YOURS: &str = "Your keys";
@@ -161,7 +224,7 @@ pub enum Bound {
     Typed(String),
 }
 
-/// Where a binding shows in the cheatsheet: on a line of [`DEFAULT`] (its
+/// Where a binding shows in the cheatsheet: on a line of [`sections`] (its
 /// section and line), or with the rest of yours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Shown {
@@ -184,10 +247,13 @@ enum Node {
     Keys(Vec<(Key, Node)>),
 }
 
-/// The keys of normal and select mode.
+type Trie = Vec<(Key, Node)>;
+
+/// The keys of normal and select mode: the code's, and each view's layer over them.
 #[derive(Debug, Clone)]
 pub struct Keymap {
-    root: Vec<(Key, Node)>,
+    /// By [`ViewKind`], in its order.
+    layers: Vec<Trie>,
     /// How many bindings have been made, for their order.
     made: usize,
 }
@@ -207,9 +273,10 @@ pub struct Section {
     pub lines: Vec<CheatLine>,
 }
 
-/// A line of the cheatsheet: keys, what they wait for, and what they do.
+/// A line of the cheatsheet: the view its keys are for, the keys, what they wait for, and what they do.
 #[derive(Debug, Clone)]
 pub struct CheatLine {
+    pub view: ViewKind,
     pub keys: Vec<Vec<Key>>,
     pub arg: Option<&'static str>,
     pub what: String,
@@ -229,14 +296,14 @@ impl CheatLine {
 }
 
 impl Default for Keymap {
-    /// [`DEFAULT`].
+    /// [`DEFAULT`], and [`VIEWS`] over it.
     fn default() -> Self {
-        let mut keymap = Keymap { root: vec![], made: 0 };
-        for (s, (_, lines)) in DEFAULT.iter().enumerate() {
+        let mut keymap = Keymap { layers: ViewKind::ALL.iter().map(|_| vec![]).collect(), made: 0 };
+        for (s, (view, _, lines)) in sections().enumerate() {
             for (l, (bindings, _)) in lines.iter().enumerate() {
                 for (keys, command) in bindings.iter() {
                     let keys = parse_keys(keys).unwrap_or_else(|| panic!("the default keymap's {keys:?}"));
-                    keymap.bind(&keys, Bound::Command(*command), Shown::At(s, l));
+                    keymap.bind(view, &keys, Bound::Command(*command), Shown::At(s, l));
                 }
             }
         }
@@ -253,34 +320,50 @@ impl Keymap {
 
     /// This keymap with your keys over it (the config's `"keys"`), and
     /// what's wrong with those that couldn't be bound.
-    pub fn with_yours(mut self, yours: &[(String, String)]) -> (Keymap, Vec<String>) {
-        let wrong = yours.iter().filter_map(|(keys, to)| self.bind_yours(keys, to).err()).collect();
+    pub fn with_yours(self, yours: &[(String, String)]) -> (Keymap, Vec<String>) {
+        self.with_yours_in(ViewKind::Code, yours)
+    }
+
+    /// The same, for `view`: the code's (which are every view's, under its own),
+    /// or a view's own layer (the config's `"keys": { "files": { … } }`).
+    pub fn with_yours_in(mut self, view: ViewKind, yours: &[(String, String)]) -> (Keymap, Vec<String>) {
+        let wrong = yours.iter().filter_map(|(keys, to)| self.bind_yours_in(view, keys, to).err()).collect();
         (self, wrong)
     }
 
-    /// `keys` (`"space w"`) bound to `to`: a `:` command (`":wa"`), a
+    /// `keys` (`"space w"`) bound to `to` in the code: a `:` command (`":wa"`), a
     /// command's name (`"extend_line_below"`), or `no_op`, which unbinds them.
     pub fn bind_yours(&mut self, keys: &str, to: &str) -> Result<(), String> {
+        self.bind_yours_in(ViewKind::Code, keys, to)
+    }
+
+    /// The same, in `view`'s layer: there `no_op` hides the code's binding too.
+    pub fn bind_yours_in(&mut self, view: ViewKind, keys: &str, to: &str) -> Result<(), String> {
         let Some(sequence) = parse_keys(keys) else { return Err(format!("\"{keys}\" isn't keys (as in \"space w\", \"ctrl-s\")")) };
         if let Some(line) = to.strip_prefix(':') {
-            self.bind(&sequence, Bound::Typed(line.trim().to_string()), Shown::Yours);
+            self.bind(view, &sequence, Bound::Typed(line.trim().to_string()), Shown::Yours);
             return Ok(());
         }
         match Command::named(to.trim()) {
-            Some(NoOp) => self.unbind(&sequence),
+            Some(NoOp) if view == ViewKind::Code => self.unbind(&sequence),
+            Some(NoOp) => self.bind(view, &sequence, Bound::Command(NoOp), Shown::Yours),
             // Where the command is in the cheatsheet already, it shows there.
-            Some(command) => self.bind(&sequence, Bound::Command(command), shown_at(command)),
+            Some(command) => self.bind(view, &sequence, Bound::Command(command), shown_at(view, command)),
             None => return Err(format!("\"{keys}\": no command \"{to}\" (a : command starts with :)")),
         }
         Ok(())
     }
 
-    /// `keys` bound, over whatever was: a binding on the way to them gives way.
-    fn bind(&mut self, keys: &[Key], bound: Bound, shown: Shown) {
+    fn layer(&self, view: ViewKind) -> &Trie {
+        &self.layers[view as usize]
+    }
+
+    /// `keys` bound in `view`'s layer, over whatever was: a binding on the way to them gives way.
+    fn bind(&mut self, view: ViewKind, keys: &[Key], bound: Bound, shown: Shown) {
         let Some((last, before)) = keys.split_last() else { return };
         let binding = Binding { bound, shown, order: self.made };
         self.made += 1;
-        let mut nodes = &mut self.root;
+        let mut nodes = &mut self.layers[view as usize];
         for key in before {
             let at = match nodes.iter().position(|(k, _)| k == key) {
                 Some(at) => at,
@@ -317,39 +400,33 @@ impl Keymap {
                 }
             }
         }
-        from(&mut self.root, keys);
+        from(&mut self.layers[ViewKind::Code as usize], keys);
     }
 
-    /// What `keys` come to. After a ctrl key (`ctrl-w`), the next keys can be
-    /// had with ctrl held too: `ctrl-w ctrl-v` is `ctrl-w v`, as in helix.
+    /// What `keys` come to in the code.
+    #[cfg(test)]
     pub(super) fn find(&self, keys: &[Key]) -> Found<'_> {
-        let held = matches!(keys.first(), Some(Key::Ctrl(_)));
-        let mut nodes = &self.root;
-        for (i, &key) in keys.iter().enumerate() {
-            let get = |key: Key| nodes.iter().find(|(k, _)| *k == key).map(|(_, node)| node);
-            let node = match (get(key), key) {
-                (Some(node), _) => node,
-                (None, Key::Ctrl(c)) if held && i > 0 => match get(Key::Char(c)) {
-                    Some(node) => node,
-                    None => return Found::Nothing,
-                },
-                _ => return Found::Nothing,
-            };
-            match node {
-                Node::Bound(binding) if i + 1 == keys.len() => return Found::Bound(&binding.bound),
-                Node::Bound(_) => return Found::Nothing,
-                Node::Keys(next) => nodes = next,
+        self.find_in(ViewKind::Code, keys)
+    }
+
+    /// What `keys` come to in `view`: in its layer, or if they're nothing there, in the code's.
+    pub(super) fn find_in(&self, view: ViewKind, keys: &[Key]) -> Found<'_> {
+        if view != ViewKind::Code {
+            match find(self.layer(view), keys) {
+                Found::Nothing => {}
+                found => return found,
             }
         }
-        if keys.is_empty() { Found::Nothing } else { Found::Keys }
+        find(self.layer(ViewKind::Code), keys)
     }
 
-    /// Every binding: its keys and what they're bound to.
-    pub fn bindings(&self) -> Vec<(Vec<Key>, &Bound)> {
-        self.all().into_iter().map(|(keys, binding)| (keys, &binding.bound)).collect()
+    /// Every binding (but those that hide one of the code's): the view it's in, its
+    /// keys, and what they're bound to.
+    pub fn bindings(&self) -> Vec<(ViewKind, Vec<Key>, &Bound)> {
+        self.all().into_iter().map(|(view, keys, binding)| (view, keys, &binding.bound)).collect()
     }
 
-    fn all(&self) -> Vec<(Vec<Key>, &Binding)> {
+    fn all(&self) -> Vec<(ViewKind, Vec<Key>, &Binding)> {
         fn walk<'a>(nodes: &'a [(Key, Node)], keys: &mut Vec<Key>, all: &mut Vec<(Vec<Key>, &'a Binding)>) {
             for (key, node) in nodes {
                 keys.push(*key);
@@ -361,27 +438,34 @@ impl Keymap {
             }
         }
         let mut all = vec![];
-        walk(&self.root, &mut vec![], &mut all);
+        for view in ViewKind::ALL {
+            let mut theirs = vec![];
+            walk(self.layer(view), &mut vec![], &mut theirs);
+            all.extend(theirs.into_iter().filter(|(_, binding)| binding.bound != Bound::Command(NoOp)).map(|(keys, binding)| (view, keys, binding)));
+        }
         all
     }
 
-    /// The `space ?` cheatsheet: every binding, on the lines [`DEFAULT`]
-    /// puts it on (keys of yours that have none at the end, under [`YOURS`]).
+    /// The `space ?` cheatsheet: every binding, on the lines [`DEFAULT`] and
+    /// [`VIEWS`] put it on (keys of yours that have none at the end, under [`YOURS`]).
     pub fn cheatsheet(&self) -> Vec<Section> {
         let mut all = self.all();
-        all.sort_by_key(|(_, binding)| (binding.shown, binding.order));
+        all.sort_by_key(|(view, _, binding)| (binding.shown, *view, binding.order));
+        let sections_of: Vec<_> = sections().collect();
         let mut sections: Vec<Section> = vec![];
         let mut last = None;
-        for (keys, binding) in all {
+        for (view, keys, binding) in all {
             let arg = match &binding.bound {
                 Bound::Command(command) => command.arg(),
                 Bound::Typed(_) => None,
             };
             let (title, what) = match (binding.shown, &binding.bound) {
-                (Shown::At(s, l), _) => (DEFAULT[s].0, DEFAULT[s].1[l].1.to_string()),
+                (Shown::At(s, l), _) => (sections_of[s].1, sections_of[s].2[l].1.to_string()),
                 (Shown::Yours, Bound::Typed(line)) => (YOURS, format!(":{line}")),
                 (Shown::Yours, Bound::Command(command)) => (YOURS, command.doc().to_string()),
             };
+            // Yours in a view of its own say which.
+            let what = if binding.shown == Shown::Yours && view != ViewKind::Code { format!("{}: {what}", view.name()) } else { what };
             if sections.last().is_none_or(|section| section.title != title) {
                 sections.push(Section { title, lines: vec![] });
             }
@@ -391,7 +475,7 @@ impl Keymap {
                     line.keys.push(keys);
                     line.arg = line.arg.or(arg);
                 }
-                _ => lines.push(CheatLine { keys: vec![keys], arg, what }),
+                _ => lines.push(CheatLine { view, keys: vec![keys], arg, what }),
             }
             last = Some(binding.shown);
         }
@@ -399,9 +483,33 @@ impl Keymap {
     }
 }
 
-/// The line of [`DEFAULT`] `command` is first on, if it's on one.
-fn shown_at(command: Command) -> Shown {
-    for (s, (_, lines)) in DEFAULT.iter().enumerate() {
+/// What `keys` come to in one layer. After a ctrl key (`ctrl-w`), the next keys can be
+/// had with ctrl held too: `ctrl-w ctrl-v` is `ctrl-w v`, as in helix.
+fn find<'a>(layer: &'a Trie, keys: &[Key]) -> Found<'a> {
+    let held = matches!(keys.first(), Some(Key::Ctrl(_)));
+    let mut nodes = layer;
+    for (i, &key) in keys.iter().enumerate() {
+        let get = |key: Key| nodes.iter().find(|(k, _)| *k == key).map(|(_, node)| node);
+        let node = match (get(key), key) {
+            (Some(node), _) => node,
+            (None, Key::Ctrl(c)) if held && i > 0 => match get(Key::Char(c)) {
+                Some(node) => node,
+                None => return Found::Nothing,
+            },
+            _ => return Found::Nothing,
+        };
+        match node {
+            Node::Bound(binding) if i + 1 == keys.len() => return Found::Bound(&binding.bound),
+            Node::Bound(_) => return Found::Nothing,
+            Node::Keys(next) => nodes = next,
+        }
+    }
+    if keys.is_empty() { Found::Nothing } else { Found::Keys }
+}
+
+/// The line of `view`'s sections `command` is first on, if it's on one.
+fn shown_at(view: ViewKind, command: Command) -> Shown {
+    for (s, (_, lines)) in sections().enumerate().filter(|(_, (of, ..))| *of == view).map(|(s, (_, _, lines))| (s, ((), lines))) {
         for (l, (bindings, _)) in lines.iter().enumerate() {
             if bindings.iter().any(|(_, c)| *c == command) {
                 return Shown::At(s, l);
@@ -517,12 +625,12 @@ mod tests {
     }
 
     #[test]
-    fn the_default_keymap_binds_each_key_once() {
+    fn the_default_keymap_binds_each_key_once_in_each_view() {
         let mut seen = std::collections::HashSet::new();
-        for (_, lines) in DEFAULT {
+        for (view, _, lines) in sections() {
             for (bindings, _) in lines.iter() {
                 for (keys, _) in bindings.iter() {
-                    assert!(seen.insert(self::keys(keys)), "{keys} twice");
+                    assert!(seen.insert((view, self::keys(keys))), "{keys} twice in {view:?}");
                 }
             }
         }

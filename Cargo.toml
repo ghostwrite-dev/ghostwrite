@@ -13,12 +13,12 @@
 #   lsp      language-server client (the servers are plugins')
 #   model    a local model: llama.cpp, in a process of its own
 #   ai       the model: prompts, reply parsing, backends, the review story
-#   view     the editor's state: documents, tabs, the project, search, registers, jumps
+#   state    the editor's state: documents, tabs, the project, search, registers, jumps
 #   app      the gpui application (binary `ghostwrite`)
 [workspace]
 exclude = ["examples", "crates/wasm/tests/fixture"]
 resolver = "3"
-members = ["crates/core", "crates/project", "crates/terminal", "crates/page", "crates/lsp", "crates/dap", "crates/plugin", "crates/plugin-api", "crates/wasm", "crates/model", "crates/ai", "crates/view", "crates/app"]
+members = ["crates/core", "crates/project", "crates/terminal", "crates/page", "crates/lsp", "crates/dap", "crates/plugin", "crates/plugin-api", "crates/wasm", "crates/model", "crates/ai", "crates/state", "crates/app"]
 default-members = ["crates/app"]
 
 [workspace.package]
@@ -43,7 +43,7 @@ ghostwrite-wasm = { path = "crates/wasm" }
 ghostwrite-plugin = { path = "crates/plugin" }
 ghostwrite-model = { path = "crates/model", default-features = false }
 ghostwrite-ai = { path = "crates/ai" }
-ghostwrite-view = { path = "crates/view" }
+ghostwrite-state = { path = "crates/state" }
 
 alacritty_terminal = { version = "0.26", default-features = false }
 futures = "0.3"

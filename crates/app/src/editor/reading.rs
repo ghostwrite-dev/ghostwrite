@@ -1,12 +1,13 @@
-//! Reading the terminal: in normal, select or AI mode with the terminal in
-//! front, its scrollback and screen are a text the editor's own keys go
+//! The terminal's text: in normal, select or AI mode with the keys on the
+//! terminal, its scrollback and screen are a text the editor's own keys go
 //! through, as they would a file that can't be edited. Motions, selecting,
 //! `y`, `/` and `n` work as in a file, and the selection shows on the
 //! terminal; what's printed meanwhile comes in under it, and the selection
-//! stays on its chars. `i`, `a` (and the other keys that would type) go to
-//! the shell's line, Esc Esc there comes back here, and Esc from here goes
-//! back to the code. `gf` or Enter opens the file a line names
-//! (`src/main.rs:12:5`), and `space a` asks about what's selected.
+//! stays on its chars. `i`, `a` (and the other keys that would type) go into
+//! insert mode, which types in the shell: Esc Esc there (or `ctrl-\ ctrl-n`)
+//! comes back here, and Esc from here goes back to the code. `gf` or Enter
+//! opens the file a line names (`src/main.rs:12:5`), and `space a` asks about
+//! what's selected.
 //!
 //! A story's command waiting in the terminal is reviewed here in AI mode:
 //! look through what's on it, and Tab runs it as ever.
@@ -19,12 +20,12 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::UnboundedSender;
 
-use ghostwrite_core::{Buffer, Key, Mode, Range};
+use ghostwrite_core::{Buffer, Mode, Range, ViewKind};
 use ghostwrite_terminal::{Transcript, located, path_at};
 use gpui::{Context, Window};
 
 use super::document::{DocId, Document};
-use super::tabs::{Tab, View};
+use super::tabs::{Tab, Viewport};
 use super::{Autoscroll, Editor};
 
 /// The id the terminal's text goes by: no document has it.
@@ -80,14 +81,14 @@ fn output(text: String) -> Document {
 }
 
 impl Editor {
-    /// Whether the keys are reading the terminal.
+    /// Whether the keys are on the terminal's text: on the terminal, out of insert mode.
     pub(super) fn reading(&self) -> bool {
-        self.terminal.reading.is_some() && matches!(self.modal.mode, Mode::Normal | Mode::Select | Mode::Ai)
+        self.modal.view == ViewKind::Terminal && self.terminal.reading.is_some() && self.modal.mode != Mode::Insert
     }
 
     /// Whether the terminal has the keys: typing in it, or reading it.
     pub(super) fn in_terminal(&self) -> bool {
-        self.modal.mode == Mode::Terminal || self.reading()
+        self.modal.view == ViewKind::Terminal
     }
 
     /// The text the keys are on: the terminal's, while reading it, or the file in front.
@@ -113,17 +114,26 @@ impl Editor {
         self.project.tabs.by_id_mut(id)
     }
 
-    /// Read the terminal in front, from the shell's cursor. `for_story`: the
-    /// story's bringing the keys here, and will take them back.
+    /// The keys on the terminal in front, out of insert mode, on its text from the
+    /// shell's cursor. `for_story`: the story's bringing the keys here, and will take them back.
     pub(super) fn start_reading(&mut self, for_story: bool, cx: &mut Context<Self>) {
         let for_story = for_story && self.terminal.reading.as_ref().is_none_or(|reading| reading.for_story);
+        if self.terminal.shells.is_empty() {
+            return self.focus_on(ViewKind::Code, cx);
+        }
+        self.terminal.shown = true;
+        self.focus_on(ViewKind::Terminal, cx);
+        if self.modal.mode == Mode::Insert {
+            self.let_go_of_held_keys();
+            self.modal.leave(Mode::Insert);
+        }
         self.stop_reading();
         let Some(shell) = self.terminal.shells.get(self.terminal.active) else { return };
         let transcript = shell.terminal.transcript();
         self.find.forget();
         let doc = output(transcript.text.clone());
         let at = at_the_shells_cursor(&doc.buffer, &transcript, &shell.terminal);
-        let view = View { selection: Range::point(at), ..View::default() };
+        let view = Viewport { selection: Range::point(at), ..Viewport::default() };
         let tab = Tab { doc, view };
         let reading = Reading { tab, transcript, shell: shell.number, for_story, with_the_shell: true, read_at: Instant::now(), reads: 1, due: false };
         self.terminal.reading = Some(reading);
@@ -132,7 +142,8 @@ impl Editor {
         cx.notify();
     }
 
-    /// Back to the code (or wherever the keys go next): nothing's marked on the terminal.
+    /// The terminal's text is let go of (the keys are going elsewhere, or typing in
+    /// its shell): nothing's marked on it.
     pub(super) fn stop_reading(&mut self) {
         let Some(reading) = self.terminal.reading.take() else { return };
         if let Some(shell) = self.terminal.shells.iter().find(|shell| shell.number == reading.shell) {
@@ -141,9 +152,9 @@ impl Editor {
     }
 
     /// The story's over: if it brought the keys here, they go back.
-    pub(super) fn story_left_the_terminal(&mut self) {
+    pub(super) fn story_left_the_terminal(&mut self, cx: &mut Context<Self>) {
         if self.terminal.reading.as_ref().is_some_and(|reading| reading.for_story) {
-            self.stop_reading();
+            self.focus_on(ViewKind::Code, cx);
         }
     }
 
@@ -234,32 +245,6 @@ impl Editor {
         self.show_reading(true);
     }
 
-    /// The keys that mean something else while reading the terminal: those
-    /// that would type go to the shell's line, Esc goes back to the code,
-    /// Enter opens the file a line names. `None`: it's the modes' as ever.
-    pub(super) fn reading_key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> Option<bool> {
-        if !self.reading() || !self.modal.pending_keys().is_empty() {
-            return None;
-        }
-        let mode = self.modal.mode;
-        match key {
-            Key::Char('i' | 'a' | 'I' | 'A' | 'o' | 'O' | 'c') => {
-                if mode == Mode::Select {
-                    self.modal.mode = Mode::Normal;
-                }
-                self.modal.cancel_pending();
-                self.enter_terminal(cx);
-            }
-            Key::Escape if mode == Mode::Normal => {
-                self.stop_reading();
-                cx.notify();
-            }
-            Key::Enter if mode != Mode::Ai => self.goto_file(window, cx),
-            _ => return None,
-        }
-        Some(true)
-    }
-
     /// `space a` while reading: ask about what's selected on the terminal (or the cursor's line).
     pub(super) fn ask_about_output(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.keyed() else { return };
@@ -270,7 +255,6 @@ impl Editor {
             let line = tab.doc.buffer.line_of(tab.cursor());
             text.slice(tab.doc.buffer.lines_range(line..line + 1)).trim_end().to_string()
         };
-        self.stop_reading();
         self.open_story_about(Some(quoted), "", window, cx);
     }
 
@@ -292,7 +276,7 @@ impl Editor {
             return self.project.say(if named.is_empty() { "no file named here".to_string() } else { format!("no file {named}") });
         };
         let from = self.before_jump();
-        self.stop_reading();
+        self.focus_on(ViewKind::Code, cx);
         self.open_at(&path, line, column, cx);
         self.note_jump(from);
     }

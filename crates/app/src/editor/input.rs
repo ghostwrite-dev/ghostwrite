@@ -18,7 +18,7 @@ impl Editor {
     /// composed (a dead key's accent, an input method's) goes in `as_is`:
     /// no closing quote comes with it, nor an abbreviation.
     fn insert_text(&mut self, text: &str, replacing: Option<Bytes<usize>>, as_is: bool, cx: &mut Context<Self>) {
-        if self.modal.mode != Mode::Insert {
+        if self.modal.mode != Mode::Insert || !self.in_code() {
             return;
         }
         // Composed text is recorded when it's committed, as typed.

@@ -336,7 +336,7 @@ impl Element for CodeView {
             let editor = self.editor.read(cx);
             let mode = if self.other.is_some() { Mode::Normal } else { editor.modal.mode };
             let mut snap = Snapshot::take(self.shown(editor), mode);
-            snap.elsewhere = self.other.is_some() || matches!(editor.modal.mode, Mode::Tree | Mode::Terminal) || editor.reading();
+            snap.elsewhere = self.other.is_some() || !editor.in_code();
             snap
         };
         let focused = self.focus.is_focused(window) && !snap.elsewhere;
@@ -701,7 +701,7 @@ fn cursor(
     let next = text.next(snap.cursor).min(laid.end);
     let width = if next > snap.cursor { (origin_x + laid.x(next) - x).max(metrics.char_width * 0.5) } else { metrics.char_width };
     let cell = Bounds::new(point(x, laid.y), gpui::size(width, metrics.line_height));
-    if !focused || matches!(snap.mode, Mode::Tree | Mode::Terminal) {
+    if !focused {
         return (Some(cell), None);
     }
     let color = match snap.mode {

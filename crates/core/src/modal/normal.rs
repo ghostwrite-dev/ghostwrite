@@ -109,7 +109,7 @@ impl Modal {
         let at_rest = keys.is_empty();
         keys.push(key);
         let keymap = self.keymap;
-        match keymap.find(&keys) {
+        match keymap.find_in(self.view, &keys) {
             // A count before them is for the key after (`5gg`, `2fx`).
             Found::Keys => {
                 self.sticky_col = None;
@@ -135,7 +135,12 @@ impl Modal {
     }
 
     /// Run `command`, bound to `keys`, or wait for the char it takes.
-    fn command(&mut self, command: Command, keys: Vec<Key>, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
+    pub(super) fn command(&mut self, command: Command, keys: Vec<Key>, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
+        // What's about views: going from one to the next, and a view's own keys.
+        if let Some(outcome) = self.view_command(command) {
+            self.sticky_col = None;
+            return outcome;
+        }
         if self.mode.reviewing() && command.waits_for_review() {
             (self.count, self.sticky_col) = (None, None);
             return Outcome::Handled;
@@ -264,6 +269,15 @@ impl Modal {
 
     /// A command that reaches beyond the buffer: an effect for the editor.
     fn act(&mut self, command: Command, count: usize, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
+        if let Some(outcome) = self.effect_of(command, count) {
+            return outcome;
+        }
+        self.change(command, count, regs, t);
+        Outcome::Handled
+    }
+
+    /// What a command that reaches beyond the buffer comes to, if it does.
+    pub(super) fn effect_of(&mut self, command: Command, count: usize) -> Option<Outcome> {
         use Command::*;
         let effect = match command {
             CommandMode => Effect::CommandLine,
@@ -294,14 +308,11 @@ impl Modal {
             RotateView => Effect::OtherPane,
             Wonly => Effect::CloseSplit,
             // While reviewing, `space a` asks about what's under review.
-            Ask if self.mode.reviewing() => return Outcome::Review(Review::Ask),
+            Ask if self.mode.reviewing() => return Some(Outcome::Review(Review::Ask)),
             Ask => Effect::Assist,
             Terminal => Effect::Terminal,
             GotoNextProblem => Effect::NextProblem,
-            FileExplorer => {
-                self.to_tree();
-                Effect::FocusTree
-            }
+            FileExplorer => Effect::Files,
             Hover => Effect::Hover,
             FileDiagnostics => Effect::Diagnostics,
             GlobalSearch => Effect::Search,
@@ -318,12 +329,9 @@ impl Modal {
             MergeSelections | MergeConsecutiveSelections => Effect::MergeSelections { touching: command == MergeConsecutiveSelections },
             AlignSelections => Effect::AlignSelections,
             SelectRegex => Effect::SelectRegex,
-            _ => {
-                self.change(command, count, regs, t);
-                return Outcome::Handled;
-            }
+            _ => return None,
         };
-        Outcome::Effect(effect)
+        Some(Outcome::Effect(effect))
     }
 
     /// A command that changes the mode or the text.

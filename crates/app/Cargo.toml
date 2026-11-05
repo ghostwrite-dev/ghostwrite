@@ -15,7 +15,7 @@ ghostwrite-page.workspace = true
 ghostwrite-project.workspace = true
 ghostwrite-terminal.workspace = true
 ghostwrite-plugin.workspace = true
-ghostwrite-view.workspace = true
+ghostwrite-state.workspace = true
 ghostwrite-wasm = { workspace = true, optional = true }
 
 futures.workspace = true

@@ -16,6 +16,16 @@
 //! }
 //! ```
 //!
+//! A key runs a `:` command (a plugin's own, or the editor's), or an editor command by
+//! its name (`zoom_in`). Keys are for the code, unless one says which view they're
+//! for: `"in": "pages"` for a tab of the pages a plugin makes, `"aside"` for what it
+//! shows beside a file, or `"files"`, `"terminal"`. There they come after that view's
+//! own keys, and the user's:
+//!
+//! ```json
+//! { "keys": [{ "in": "pages", "keys": "space n", "command": "scroll_page_down", "what": "the next page" }] }
+//! ```
+//!
 //! As `plugin.json` in a folder of its own, with the files it names beside it, it
 //! can also have code and a grammar, which a [`Runtime`](crate::Runtime) runs, saying
 //! which version of the plugin interface it was built for:
@@ -565,8 +575,13 @@ impl Manifest {
         let mut keys = vec![];
         for binding in json["keys"].as_array().map_or(&[][..], Vec::as_slice) {
             let field = |name: &str| binding[name].as_str().ok_or(format!("a key has no `{name}`"));
+            let view = match binding["in"].as_str() {
+                None => ghostwrite_core::ViewKind::Code,
+                Some(name) => ghostwrite_core::ViewKind::named(name).ok_or(format!("a key is in `{name}`, which isn't a view"))?,
+            };
             keys.push(Binding {
                 keys: forever(field("keys")?),
+                view,
                 command: forever(field("command")?.trim_start_matches(':')),
                 what: forever(binding["what"].as_str().unwrap_or("")),
             });
@@ -882,6 +897,12 @@ mod tests {
         assert!(Manifest::parse("{").is_err());
         assert_eq!(Manifest::parse(r#"{ "extensions": ["x"] }"#).err().as_deref(), Some("it has no name"));
         assert_eq!(Manifest::parse(r#"{ "name": "x", "keys": [{ "keys": "z" }] }"#).err().as_deref(), Some("a key has no `command`"));
+        assert_eq!(
+            Manifest::parse(r#"{ "name": "x", "keys": [{ "in": "nowhere", "keys": "z", "command": "w" }] }"#).err().as_deref(),
+            Some("a key is in `nowhere`, which isn't a view")
+        );
+        let paged = Manifest::parse(r#"{ "name": "x", "keys": [{ "in": "pages", "keys": "n", "command": "scroll_page_down" }] }"#).unwrap();
+        assert_eq!(paged.keys(None)[0].view, ghostwrite_core::ViewKind::Pages, "keys can be a view's");
         let folder = ghostwrite_project::scratch_dir("manifests");
         std::fs::write(folder.join("good.json"), ZIG).unwrap();
         std::fs::write(folder.join("bad.json"), "{").unwrap();

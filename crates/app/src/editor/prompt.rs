@@ -1,5 +1,5 @@
 //! The one prompt under the code: the `:` line, asking the model, and naming
-//! a file in the tree. While it's open it has the keyboard.
+//! a file in Files (which is insert mode there). While it's open it has the keyboard.
 
 use std::path::PathBuf;
 
@@ -65,12 +65,20 @@ impl Editor {
             self.history.rewind();
             self.project.status = None;
         }
+        // Naming a file in Files is typing there.
+        match (self.prompt.as_ref().is_some_and(|p| naming(&p.kind)), naming(&kind)) {
+            (false, true) => self.modal.enter(ghostwrite_core::Mode::Insert),
+            (true, false) => self.modal.leave(ghostwrite_core::Mode::Insert),
+            _ => {}
+        }
         self.prompt = Some(Prompt { kind, field, _subscription: subscription });
         cx.notify();
     }
 
     pub(super) fn close_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.prompt = None;
+        if self.prompt.take().is_some_and(|p| naming(&p.kind)) {
+            self.modal.leave(ghostwrite_core::Mode::Insert);
+        }
         window.focus(&self.focus);
         cx.notify();
     }
@@ -129,4 +137,9 @@ impl Editor {
         }
         cx.notify();
     }
+}
+
+/// Whether it's naming a file in Files.
+fn naming(kind: &PromptKind) -> bool {
+    matches!(kind, PromptKind::TreeAdd(_) | PromptKind::TreeRename(_))
 }

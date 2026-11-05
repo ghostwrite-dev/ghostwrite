@@ -103,7 +103,7 @@ pub enum Command {
     Grep(String),
     /// Show or hide the file tree.
     Tree,
-    /// Open the terminal, in terminal mode.
+    /// Open the terminal, typing in it.
     Terminal,
     /// A file's pages in their tab, or what's beside it (`:preview`).
     Preview,

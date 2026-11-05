@@ -8,25 +8,24 @@
 //! click puts the file's cursor on what's clicked, for going back to it. They stay where they are while the
 //! cursor moves around; an edit that leaves it on another line, or `space j` (to
 //! the next problem), brings them to it. [`super::page_view`] draws them; where
-//! they're scrolled to is the document's tab's ([`PagesScroll`]).
+//! they're scrolled to is the document's tab's ([`PagesScroll`]). The tab is a view
+//! of its own, with its own keys over the code's: `j`, `k` scroll, `+`, `-` zoom (see
+//! [`ghostwrite_core::modal::VIEWS`]).
 //!
 //! [`Document::view_of`]: super::document::Document::view_of
 
 use std::sync::Arc;
 
-use ghostwrite_core::{Key, Mode, Range, Text as _};
+use ghostwrite_core::{Range, Text as _};
 use ghostwrite_page::{OnlyPages, Pages};
-use gpui::{AppContext as _, Context, Pixels, Point, px};
+use gpui::{AppContext as _, Context, Pixels, Point};
 
-pub use ghostwrite_view::rendered::Rendered;
-use ghostwrite_view::rendered::tab_of_only_pages;
+pub use ghostwrite_state::rendered::Rendered;
+use ghostwrite_state::rendered::tab_of_only_pages;
 
 use super::Editor;
 use super::document::{DocId, Document};
 use super::tabs::Autoscroll;
-
-/// How far a key scrolls pages.
-const LINE: f32 = 40.;
 
 impl Editor {
     /// Keep the pages of the document `id` up to date: make them again when its
@@ -170,7 +169,7 @@ impl Editor {
     /// ⌘= ⌘- ⌘0 with pages in front: their zoom, a step in or out (`by`), or back to
     /// fitting the view (0), not the editor's. `false` if there are none.
     pub(super) fn zoom_pages(&mut self, by: i32, cx: &mut Context<Self>) -> bool {
-        if self.modal.mode == Mode::Tree || self.in_terminal() {
+        if !self.in_code() {
             return false;
         }
         let Some(file) = self.shown_pages().and_then(|id| self.project.tabs.by_id_mut(id)) else { return false };
@@ -187,6 +186,7 @@ impl Editor {
     /// that has the keys, the cursor moves there and the keys stay; pages of anything
     /// else get the keys first.
     pub(super) fn click_page_of(&mut self, doc: Option<DocId>, byte: Option<usize>, shift: bool, count: usize, cx: &mut Context<Self>) {
+        self.focus_on(ghostwrite_core::ViewKind::Code, cx);
         if let Some(doc) = doc {
             let file = self.pages_of(doc);
             if file.is_some() && file == self.tab().map(|tab| tab.doc.id) {
@@ -220,22 +220,5 @@ impl Editor {
         {
             self.project.say(why);
         }
-    }
-
-    /// A key on a tab of pages that has no cursor of its own: it moves them.
-    pub(super) fn page_key(&mut self, key: &Key, cx: &mut Context<Self>) -> bool {
-        if !self.tab().is_some_and(|t| t.doc.view_of.is_some()) {
-            return false;
-        }
-        let rows = self.measured.rows.max(2) as f32;
-        let delta = match key {
-            Key::Char('j') | Key::Down => -LINE,
-            Key::Char('k') | Key::Up => LINE,
-            Key::Ctrl('d') => -LINE * rows,
-            Key::Ctrl('u') => LINE * rows,
-            _ => return false,
-        };
-        self.scroll_pages(None, Point::new(px(0.), px(delta)), cx);
-        true
     }
 }

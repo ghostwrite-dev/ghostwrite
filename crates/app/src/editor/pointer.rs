@@ -37,9 +37,7 @@ impl Editor {
         if self.resizing() {
             return;
         }
-        self.modal.leave_tree();
-        self.modal.leave(Mode::Terminal);
-        self.stop_reading();
+        self.focus_on(ghostwrite_core::ViewKind::Code, cx);
         let mode = self.modal.mode;
         let Some(tab) = self.tab_mut() else { return };
         let (selection, mode) = clicked(&tab.doc.buffer, tab.view.selection, mode, at, extend, clicks);

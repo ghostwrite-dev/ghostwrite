@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use ghostwrite_core::Keymap;
+use ghostwrite_core::{Keymap, ViewKind};
 
 pub struct Config {
     /// Files bigger than this aren't opened, so a stray log or binary can't hang the editor.
@@ -29,14 +29,16 @@ pub struct Config {
     pub max_recent_projects: usize,
     /// Format a file with its language server when it's saved (`:w`, ⌘S).
     pub format_on_save: bool,
-    /// Whether a panel lights up when a story moves to it.
+    /// Whether a view lights up when a story moves to it.
     pub animations: bool,
     /// The debug adapter `:debug` runs: the program and its arguments.
     pub debugger: Vec<String>,
     /// Your own keys in normal and select mode: a `:` command (`"ctrl-s":
     /// ":w"`, `"space w": ":wa"`), a command by name (`"x":
-    /// "extend_line_below"`), or `"no_op"` to unbind a key.
-    pub keys: Vec<(String, String)>,
+    /// "extend_line_below"`), or `"no_op"` to unbind a key. Said flat, they're the
+    /// code's, and every view's under its own; under a view's name, that view's
+    /// alone: `"files": { "r": "rename_file" }`, `"terminal"`, `"pages"`, `"aside"`.
+    pub keys: Vec<(ViewKind, String, String)>,
     /// The keymap, with your keys over the default one.
     pub keymap: Keymap,
     /// What's wrong with your keys, if anything is.
@@ -98,8 +100,15 @@ fn from_json(json: &serde_json::Value) -> Config {
         config.debugger = debugger.iter().filter_map(|word| Some(word.as_str()?.to_string())).collect();
     }
     if let Some(keys) = json.get("keys").and_then(|v| v.as_object()) {
-        config.keys = keys.iter().filter_map(|(key, command)| Some((key.clone(), command.as_str()?.to_string()))).collect();
-        (config.keymap, config.problems) = Keymap::default().with_yours(&config.keys);
+        (config.keys, config.problems) = yours(keys);
+        let mut keymap = Keymap::default();
+        for view in ViewKind::ALL {
+            let theirs: Vec<(String, String)> = config.keys.iter().filter(|(of, ..)| *of == view).map(|(_, keys, to)| (keys.clone(), to.clone())).collect();
+            let wrong;
+            (keymap, wrong) = keymap.with_yours_in(view, &theirs);
+            config.problems.extend(wrong.into_iter().map(|wrong| if view == ViewKind::Code { wrong } else { format!("{}: {wrong}", view.name()) }));
+        }
+        config.keymap = keymap;
     }
     config.theme_light = json.get("theme_light").and_then(|v| v.as_str()).map(str::to_string);
     config.theme_dark = json.get("theme_dark").and_then(|v| v.as_str()).map(str::to_string);
@@ -139,6 +148,25 @@ fn from_json(json: &serde_json::Value) -> Config {
     config
 }
 
+/// Your keys, by view: those said flat are the code's, and those under a view's name
+/// (`"files": { … }`) that view's. And what isn't either.
+fn yours(keys: &serde_json::Map<String, serde_json::Value>) -> (Vec<(ViewKind, String, String)>, Vec<String>) {
+    let (mut found, mut wrong) = (vec![], vec![]);
+    for (key, to) in keys {
+        match to {
+            serde_json::Value::String(to) => found.push((ViewKind::Code, key.clone(), to.clone())),
+            serde_json::Value::Object(theirs) if let Some(view) = ViewKind::named(key) => {
+                found.extend(theirs.iter().filter_map(|(key, to)| Some((view, key.clone(), to.as_str()?.to_string()))));
+            }
+            _ => {
+                let views: Vec<&str> = ViewKind::ALL.iter().map(|view| view.name()).collect();
+                wrong.push(format!("\"{key}\": a command, or a view ({}) and its keys", views.join(", ")));
+            }
+        }
+    }
+    (found, wrong)
+}
+
 #[cfg(test)]
 mod tests {
     use ghostwrite_core::{Key, Modal};
@@ -154,5 +182,33 @@ mod tests {
         assert!(modal.binds(Key::Ctrl('s')));
         assert_eq!(modal.command_for(Key::Char('q')), Some(ghostwrite_core::Command::ReplayMacro), "as it was");
         assert_eq!(config.problems, ["\"q\": no command \"extend_lin_below\" (a : command starts with :)"]);
+    }
+
+    #[test]
+    fn your_keys_can_be_a_views_own() {
+        use ghostwrite_core::ViewKind;
+        let json = serde_json::json!({ "keys": {
+            "x": "extend_line_below",
+            "files": { "R": "rename_file", "r": "no_op" },
+            "terminal": { "Y": ":w" },
+            "pages": { "J": "scroll_down", "q": "no_such" },
+            "nowhere": { "a": "undo" },
+        } });
+        let config: &'static super::Config = Box::leak(Box::new(super::from_json(&json)));
+        let mut modal = Modal::default();
+        modal.set_keymap(&config.keymap);
+        modal.view = ViewKind::Files;
+        assert_eq!(modal.command_for(Key::Char('R')), Some(ghostwrite_core::Command::RenameFile));
+        assert_eq!(modal.command_for(Key::Char('r')), Some(ghostwrite_core::Command::NoOp), "hidden in Files");
+        assert_eq!(modal.command_for(Key::Char('x')), Some(ghostwrite_core::Command::ExtendLineBelow), "the flat ones are every view's");
+        modal.view = ViewKind::Code;
+        assert_eq!(modal.command_for(Key::Char('R')), Some(ghostwrite_core::Command::ReplaceWithYanked), "and a view's are its own");
+        modal.view = ViewKind::Terminal;
+        assert!(modal.binds(Key::Char('Y')));
+        modal.view = ViewKind::Pages;
+        assert_eq!(modal.command_for(Key::Char('J')), Some(ghostwrite_core::Command::ScrollDown));
+        assert_eq!(config.problems.len(), 2, "{:?}", config.problems);
+        assert!(config.problems.iter().any(|p| p.starts_with("\"nowhere\": a command, or a view (code, files")), "{:?}", config.problems);
+        assert!(config.problems.iter().any(|p| p.starts_with("pages: \"q\": no command")), "{:?}", config.problems);
     }
 }

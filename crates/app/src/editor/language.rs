@@ -5,13 +5,13 @@
 
 use ghostwrite_core::{Key, MenuKey, Mode, Range};
 use ghostwrite_lsp::{Completion, convert};
-use ghostwrite_view::document::next_problem;
+use ghostwrite_state::document::next_problem;
 use gpui::{AnyElement, Bounds, Context, Pixels, Window, anchored, deferred, div, point, prelude::*};
 
 use super::{Autoscroll, DocId, Editor, Project};
 use crate::theme::{Theme, pt};
 
-pub(super) use ghostwrite_view::latest::Latest;
+pub(super) use ghostwrite_state::latest::Latest;
 
 const MENU_ROWS: usize = 10;
 

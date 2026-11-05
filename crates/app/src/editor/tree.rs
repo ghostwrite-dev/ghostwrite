@@ -1,12 +1,13 @@
-//! Tree mode: the file tree takes the keys (`space e`), and the panel that
-//! draws it, with whatever the model proposes doing to a file shown in place.
+//! Files: the file tree, a view that takes the keys (`space e`, a click), what its
+//! keys do, and the pane that draws it, with whatever the model proposes doing to
+//! a file shown in place.
 
 use std::path::{Path, PathBuf};
 
-use ghostwrite_core::Mode;
+use ghostwrite_core::ViewKind;
 use ghostwrite_core::modal::TreeCommand;
 use ghostwrite_project::fs;
-use ghostwrite_view::story::Waiting;
+use ghostwrite_state::story::Waiting;
 use gpui::{
     AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, PromptLevel, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*,
     uniform_list,
@@ -40,7 +41,7 @@ impl TreePane {
 const ROW_HEIGHT: f32 = 24.;
 const INDENT: f32 = 14.;
 
-/// A line of the tree panel.
+/// A line of the Files pane.
 #[derive(Clone)]
 enum Line {
     Row(usize),
@@ -71,32 +72,15 @@ pub(super) struct Annex {
 }
 
 impl Editor {
-    pub(super) fn enter_tree(&mut self, cx: &mut Context<Self>) {
-        self.leave_insert();
-        // From the terminal: back to what it was over first. A review is still up
-        // in the tree, and leaving the tree goes back to it.
-        self.modal.leave(Mode::Terminal);
-        self.stop_reading();
-        self.stop_selecting();
-        self.modal.to_tree();
-        self.tree_pane.shown = true;
-        self.project.tree.set_active(self.project.active_path());
-        if let Some(path) = self.project.active_path() {
-            self.project.tree.reveal(&path);
-        }
-        self.scroll_tree_to_cursor(ScrollStrategy::Center);
-        cx.notify();
-    }
-
-    /// ⌘B, `:tree`: as ⌘J for the terminal, into the tree (showing it), or
-    /// out of it, hiding it. During a review it only shows or hides.
+    /// ⌘B, `:tree`: as ⌘J for the terminal, to Files (showing it), or from
+    /// there, hiding it. During a review it only shows or hides.
     pub(super) fn toggle_tree(&mut self, cx: &mut Context<Self>) {
-        if self.modal.mode != Mode::Tree && !self.modal.mode.reviewing() {
-            return self.enter_tree(cx);
+        if self.modal.view != ViewKind::Files && !self.modal.mode.reviewing() {
+            return self.enter_files(cx);
         }
         self.tree_pane.shown = !self.tree_pane.shown;
         if !self.tree_pane.shown {
-            self.modal.leave_tree();
+            self.focus_on(ViewKind::Code, cx);
         }
         cx.notify();
     }
@@ -117,12 +101,11 @@ impl Editor {
             TreeCommand::Open => match self.project.tree.selected().cloned() {
                 Some(row) if row.is_dir => self.project.tree.toggle(self.project.tree.cursor()),
                 Some(row) => {
-                    self.modal.leave_tree();
+                    self.focus_on(ViewKind::Code, cx);
                     self.open_paths(vec![row.path], cx);
                 }
                 None => {}
             },
-            TreeCommand::Leave => {}
             TreeCommand::Add => {
                 let dir = self.project.tree.target_dir();
                 self.open_prompt(PromptKind::TreeAdd(dir), "", window, cx);
@@ -137,7 +120,7 @@ impl Editor {
         self.scroll_tree_to_cursor(ScrollStrategy::Top);
     }
 
-    fn scroll_tree_to_cursor(&self, strategy: ScrollStrategy) {
+    pub(super) fn scroll_tree_to_cursor(&self, strategy: ScrollStrategy) {
         let cursor = self.project.tree.cursor();
         if let Some(ix) = self.tree_lines(None).iter().position(|l| matches!(l, Line::Row(i) if *i == cursor)) {
             self.tree_pane.scroll.scroll_to_item(ix, strategy);
@@ -149,7 +132,7 @@ impl Editor {
             Ok(path) => {
                 self.project.tree.reveal(&path);
                 if path.is_file() {
-                    self.modal.leave_tree();
+                    self.focus_on(ViewKind::Code, cx);
                     self.open_paths(vec![path], cx);
                 }
             }
@@ -231,10 +214,10 @@ impl Editor {
         let Some(row) = self.project.tree.rows().get(ix).cloned() else { return };
         if row.is_dir {
             self.project.tree.toggle(ix);
+            self.focus_on(ViewKind::Files, cx);
         } else {
             self.project.tree.move_to(ix);
-            self.modal.leave_tree();
-            self.stop_selecting();
+            self.focus_on(ViewKind::Code, cx);
             self.open_paths(vec![row.path], cx);
         }
         cx.notify();
@@ -242,7 +225,7 @@ impl Editor {
 
     pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx).clone();
-        let focused = self.modal.mode == Mode::Tree;
+        let focused = self.modal.view == ViewKind::Files;
         let annex = self.story.as_ref().and_then(|s| s.annex(&self.project, self.asking()));
         let lines = self.tree_lines(annex.as_ref());
         let ask_field = annex.as_ref().filter(|a| a.asking).and(self.prompt.as_ref()).map(|p| p.field.clone());
@@ -376,6 +359,8 @@ impl Editor {
             .text_color(theme.sidebar_foreground)
             .border_r_1()
             .border_color(theme.border)
+            // A click anywhere in it puts the keys here (a file's row, then, on the code).
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| this.focus_on(ViewKind::Files, cx)))
             .child(
                 div()
                     .px_3()
@@ -386,7 +371,7 @@ impl Editor {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
                     .child(name)
-                    .when(focused, |d| d.child(div().text_color(theme.warning).child("TREE"))),
+                    .when(focused, |d| d.child(div().text_color(theme.warning).child("FILES"))),
             )
             .children(naming)
             .child(list)

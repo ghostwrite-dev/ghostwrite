@@ -1,10 +1,10 @@
 //! Helix's `:` commands: parsing, Tab completion, history, and running them.
-//! What's typed is parsed in [`ghostwrite_view::commands`].
+//! What's typed is parsed in [`ghostwrite_state::commands`].
 
 use ghostwrite_project::{fs, resolve};
 use gpui::{Context, Window};
 
-pub use ghostwrite_view::commands::*;
+pub use ghostwrite_state::commands::*;
 
 use super::{Editor, EditorEvent};
 
@@ -158,7 +158,7 @@ impl Editor {
             }
             Command::Grep(pattern) => self.start_search(&pattern, window, cx)?,
             Command::Tree => self.toggle_tree(cx),
-            Command::Terminal => self.enter_terminal(cx),
+            Command::Terminal => self.type_in_terminal(cx),
             Command::Preview => self.preview(cx)?,
             Command::Format => self.format(|_, _| {}, cx),
             Command::Model(None) => {

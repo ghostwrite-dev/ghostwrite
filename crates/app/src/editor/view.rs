@@ -1,10 +1,11 @@
-//! The editor on screen: the file tree beside the tabs and the code (and
-//! what's beside a file, beside that: see [`super::aside`]), the terminal
-//! and the `:` line under them, and helix's status line at the bottom.
+//! The editor on screen, its views side by side: Files (the tree) beside the
+//! tabs and the code (and what's beside a file, beside that: see
+//! [`super::aside`]), the terminal and the `:` line under them, and helix's
+//! status line at the bottom, which says the mode and the view with the keys.
 //! Also the panes' edges being dragged, and the menu actions, which act on
 //! the active document.
 
-use ghostwrite_core::{Mode, Range};
+use ghostwrite_core::{Mode, Range, ViewKind};
 use gpui::{AnyElement, ClipboardItem, Context, FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, SharedString, Window, div, prelude::*};
 
 use super::element::{CodeView, Decoration};
@@ -35,9 +36,10 @@ impl gpui::Render for DraggedTab {
     }
 }
 
-/// A line of the cheatsheet: the keys as shown, what they do, and the keys
-/// bound in the keymap it shows (none, for a line written by hand).
+/// A line of the cheatsheet: the view its keys are for, the keys as shown, what
+/// they do, and the keys bound in the keymap it shows (none, for a line written by hand).
 pub(super) struct Row {
+    pub view: ViewKind,
     pub keys: String,
     pub what: String,
     /// What keeps the cheatsheet and the keymap in step reads it.
@@ -50,23 +52,24 @@ pub(super) struct Row {
 pub(super) fn cheatsheet(keymap: &ghostwrite_core::Keymap) -> Vec<(String, Vec<Row>)> {
     let mut sections: Vec<(String, Vec<Row>)> = BY_HAND.iter().map(|(title, _)| (title.to_string(), vec![])).collect();
     for section in keymap.cheatsheet() {
-        let rows = section.lines.iter().map(|line| Row { keys: line.shown(), what: line.what.clone(), bound: line.keys.clone() });
+        let rows = section.lines.iter().map(|line| Row { view: line.view, keys: line.shown(), what: line.what.clone(), bound: line.keys.clone() });
         match sections.iter_mut().find(|(title, _)| title == section.title) {
             Some((_, lines)) => lines.extend(rows),
             None => sections.push((section.title.to_string(), rows.collect())),
         }
     }
     for ((_, lines), (_, by_hand)) in sections.iter_mut().zip(BY_HAND) {
-        lines.extend(by_hand.iter().map(|(keys, what)| Row { keys: keys.to_string(), what: what.to_string(), bound: vec![] }));
+        let view = lines.first().map_or(ViewKind::Code, |row| row.view);
+        lines.extend(by_hand.iter().map(|(keys, what)| Row { view, keys: keys.to_string(), what: what.to_string(), bound: vec![] }));
     }
     sections
 }
 
 /// What the cheatsheet says that isn't in the keymap, after what is, by
-/// section: typing (insert mode), the mouse, the terminal, reviewing, the
-/// tree, `:` commands and ⌘ keys. Helix's keys are as in helix; Ghostwrite's
-/// own are under `space`; ⌘ is for the app and its windows. Keep it in step
-/// with insert mode's, tree mode's and the terminal's keys by hand.
+/// section: typing (insert mode), the mouse, the terminal's shell, reviewing,
+/// `:` commands and ⌘ keys. Helix's keys are as in helix; Ghostwrite's own are
+/// under `space`; ⌘ is for the app and its windows. Keep it in step with insert
+/// mode's keys and the terminal's by hand.
 const BY_HAND: &[(&str, &[(&str, &str)])] = &[
     ("Move", &[]),
     ("Select", &[("click  ⇧click", "move there; select to there (or click after v)"), ("drag  2×  3× click", "select; word; line")]),
@@ -81,22 +84,29 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
     ("Match  m", &[]),
     ("Search", &[]),
     ("Space", &[]),
+    ("Views  ctrl-w", &[("click", "the keys go to the view clicked"), ("mode line", "the mode, and the view: NOR · terminal")]),
+    ("Files  space e", &[]),
     (
-        "Reading the terminal",
+        "Terminal  space t",
         &[
-            ("esc esc", "from typing in it: read it with these keys"),
+            ("i a o c", "insert mode: type in its shell; the model runs only what you accept"),
+            ("esc esc  ctrl-\\ ctrl-n", "(typing) normal mode, to move through it (in vim & co, esc is theirs)"),
             ("motions  / n y", "move, select, search, yank, as in a file"),
-            ("enter  gf", "open the file a line names, at its line"),
-            ("⌘-click", "open a web address or file the terminal shows"),
             ("space a", "ask about what's selected"),
-            ("i a o", "type on the shell's line"),
-            ("esc", "back to the code"),
+            ("⌘-click", "open a web address or file it shows"),
+            ("drag  ⌘C", "select, copy"),
+            ("⌘J", "hide it"),
+            ("⌘T  ⌘W", "another shell in a tab, close it"),
+            ("⌘⇧[  ⌘⇧]", "previous, next tab"),
+            ("⌘⌥←  ⌘⌥→", "move the tab, or drag it"),
         ],
     ),
+    ("Pages  :preview", &[]),
+    ("Beside the file", &[]),
     (
         "Reviewing",
         &[
-            ("tab", "accept the step · next note or match"),
+            ("tab", "accept the step · next note or match (in any view)"),
             ("tab", "a command: run it in the terminal, and on"),
             ("enter  space a", "redirect, or ask about it"),
             ("esc esc", "stop, back where you were"),
@@ -111,7 +121,7 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
             (":n :bn :bp :bc", "new, next, previous, close tab"),
             (":rl  :rm  :42", "reload, trash file, go to line"),
             (":format", "format the file (saving does too)"),
-            (":tree :term :preview", "file tree, terminal, a file's pages or panel"),
+            (":tree :term :preview", "Files, the terminal, a file's pages or what's beside it"),
             (":tab-left :tab-right", "move the tab (⌘⌥← ⌘⌥→, gN gP, or drag it)"),
             (":model opus-5.5", "ask that model from now on (tab completes)"),
             (":api-key ‹key›", "keep a Claude API key safe on this machine"),
@@ -129,33 +139,38 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "Tree  space e",
-        &[("j k  gg G", "move"), ("l h  enter", "open / preview, close, open file"), ("a r d", "add, rename, trash"), ("esc  space e", "back to the text")],
-    ),
-    (
-        "Terminal  space t",
-        &[
-            ("", "your shell has the keys; the model reads it, and runs only what you accept"),
-            ("esc esc", "back where you were (in vim & co, click the code)"),
-            ("drag  ⌘C", "select, copy"),
-            ("⌘J", "hide it"),
-            ("⌘T  ⌘W", "another shell in a tab, close it"),
-            ("⌘⇧[  ⌘⇧]", "previous, next tab"),
-            ("⌘⌥←  ⌘⌥→", "move the tab, or drag it"),
-        ],
-    ),
-    (
         "Window  ⌘",
         &[
             ("⌘N ⌘W", "new, close tab"),
             ("⌘⇧[ ⌘⇧]", "previous, next tab"),
             ("⌘O ⌘⇧O ⌘⇧N", "open file, folder; new window"),
             ("⌘S ⌘⇧S", "save, save as"),
+            ("⌘B", "show or hide Files"),
             ("⌘= ⌘- ⌘0", "zoom in, out, actual size (pages in front: theirs)"),
             ("⌘ scroll", "zoom the pages under the pointer"),
         ],
     ),
 ];
+
+/// The cheatsheet's sections in `columns` columns, in order, each about as long as the others.
+pub(super) fn columns<T>(sections: Vec<(String, Vec<T>)>, columns: usize) -> Vec<Vec<(String, Vec<T>)>> {
+    // A section's title takes about two rows.
+    let size = |rows: usize| rows + 2;
+    let total: usize = sections.iter().map(|(_, rows)| size(rows.len())).sum();
+    let mut out: Vec<Vec<(String, Vec<T>)>> = vec![vec![]];
+    let mut filled = 0;
+    for section in sections {
+        let rows = size(section.1.len());
+        // On to the next column once this one has its share, if there's another.
+        let share = total * out.len() / columns;
+        if filled + rows / 2 > share && out.len() < columns && !out.last().is_some_and(Vec::is_empty) {
+            out.push(vec![]);
+        }
+        filled += rows;
+        out.last_mut().expect("there's always one").push(section);
+    }
+    out
+}
 
 impl Editor {
     /// With no file open: a few ways in.
@@ -456,11 +471,10 @@ impl Editor {
                                 Mode::Normal => theme.foreground,
                                 Mode::Insert => theme.success,
                                 Mode::Select => theme.cursor_select,
-                                Mode::Tree => theme.warning,
                                 Mode::Ai => theme.info,
-                                Mode::Terminal => theme.success,
                             })
-                            .child(mode.label()),
+                            .debug_selector(|| "mode-line".to_string())
+                            .child(self.mode_line()),
                     )
                     .child(div().min_w_0().overflow_hidden().text_ellipsis().child(message)),
             )
@@ -476,6 +490,15 @@ impl Editor {
                     .children(position),
             )
             .into_any_element()
+    }
+
+    /// What the mode line says: the mode, and the view with the keys if it isn't the
+    /// code (`NOR · terminal`, a plugin's by its title: `NOR · goals`).
+    pub(super) fn mode_line(&self) -> String {
+        let view = self.view_now();
+        let mut modal = self.modal.clone();
+        modal.view = view;
+        modal.label(if view == ViewKind::Aside { self.view_title() } else { None })
     }
 
     /// Scroll the cheatsheet if `keystroke` is one that does.
@@ -512,15 +535,16 @@ impl Editor {
         };
         let mut sections: Vec<(String, Vec<(String, String)>)> =
             cheatsheet(self.modal.keymap()).into_iter().map(|(title, rows)| (title, rows.into_iter().map(|row| (row.keys, row.what)).collect())).collect();
-        // What plugins bind for this file, in a section of their own at the end.
-        let bound: Vec<(String, String)> = ghostwrite_plugin::keys(self.active_language()).iter().map(|b| (b.keys.to_string(), b.what.to_string())).collect();
+        // What plugins bind for this file, in a section of their own at the end (in a view, saying which).
+        let bound: Vec<(String, String)> = ghostwrite_plugin::keys(self.active_language())
+            .iter()
+            .map(|b| (b.keys.to_string(), if b.view == ViewKind::Code { b.what.to_string() } else { format!("{}: {}", b.view.name(), b.what) }))
+            .collect();
         if !bound.is_empty() {
             sections.push(("Plugin keys".into(), bound));
         }
-        let columns: [&[usize]; 3] = [&[0, 1, 2], &[3, 4, 5], &[6, 7, 8]];
-        // Yours and the plugins' (after those written by hand) go at the end of the last.
-        let mut at_the_end = sections.split_off(BY_HAND.len().min(sections.len()));
-        let last = columns.len() - 1;
+        // Every section, in three columns about as long.
+        let columns = columns(sections, 3);
         div()
             .absolute()
             .inset_0()
@@ -553,31 +577,25 @@ impl Editor {
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("Keys"))
                             .child(div().text_xs().text_color(theme.muted_foreground).child("j k scroll · any other key closes")),
                     )
-                    .child(div().id("cheatsheet").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.cheatsheet_scroll).min_w_0().child(
-                        div().flex().items_start().gap_6().min_w_0().children(columns.iter().enumerate().map(|(n, col)| {
-                            let extra = if n == last { std::mem::take(&mut at_the_end) } else { vec![] };
-                            div()
-                                .flex_none()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap_4()
-                                .children(col.iter().map(|&i| section(&sections[i])))
-                                .children(extra.iter().map(section))
-                        })),
-                    )),
+                    .child(
+                        div().id("cheatsheet").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.cheatsheet_scroll).min_w_0().child(
+                            div().flex().items_start().gap_6().min_w_0().children(
+                                columns.iter().map(|column| div().flex_none().min_w_0().flex().flex_col().gap_4().children(column.iter().map(section))),
+                            ),
+                        ),
+                    ),
             )
             .into_any_element()
     }
 
     // Menu actions.
 
-    // In terminal mode they're about the shell, where only paste means
+    // Typing in the terminal they're about the shell, where only paste means
     // something. While a story's being reviewed the buffer isn't edited
     // behind its back: copying is all they do.
 
     fn undo_redo(&mut self, redo: bool, cx: &mut Context<Self>) {
-        if self.in_terminal() || self.modal.mode.reviewing() {
+        if !self.in_code() || self.modal.mode.reviewing() {
             return;
         }
         self.leave_insert();
@@ -592,7 +610,7 @@ impl Editor {
     }
 
     fn copy(&mut self, cut: bool, cx: &mut Context<Self>) {
-        if self.modal.mode == Mode::Terminal {
+        if self.typing_in_terminal() {
             return self.terminal_copy(cx);
         }
         let cut = cut && !self.modal.mode.reviewing() && !self.reading();
@@ -611,12 +629,12 @@ impl Editor {
 
     fn paste(&mut self, cx: &mut Context<Self>) {
         if self.reading() {
-            self.enter_terminal(cx);
+            self.type_in_terminal(cx);
         }
-        if self.modal.mode == Mode::Terminal {
+        if self.typing_in_terminal() {
             return self.terminal_paste(cx);
         }
-        if self.modal.mode.reviewing() {
+        if self.modal.mode.reviewing() || !self.in_code() {
             return;
         }
         let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else { return };
@@ -740,7 +758,7 @@ impl gpui::Render for Editor {
             .on_action(cx.listener(|this, _: &Cut, _, cx| this.copy(true, cx)))
             .on_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                let typing = this.modal.mode == Mode::Terminal;
+                let typing = this.typing_in_terminal() || this.modal.view.without_text();
                 if let Some(tab) = this.keyed_mut().filter(|_| !typing) {
                     tab.view.selection = Range::new(0, tab.doc.buffer.len());
                 }

@@ -1,4 +1,4 @@
-//! Asking the language server for its colors (see [`ghostwrite_view::semantic`]).
+//! Asking the language server for its colors (see [`ghostwrite_state::semantic`]).
 //! Only the active file's are asked for.
 
 use gpui::Context;

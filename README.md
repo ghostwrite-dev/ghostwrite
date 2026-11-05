@@ -79,8 +79,9 @@ bracket matching the one at the cursor is marked.
 | Keys | What it does |
 | --- | --- |
 | `space a` | ask about the line or selection; Tab accepts, Enter (or `space a`) says what you want instead, Esc stops |
-| `space e`, `⌘B` | the file tree (`a` `r` `d`: add, rename, trash); the model's file operations are proposed there |
-| `space t`, `⌘J` | terminal mode: your shell, under the code, has the keys; Esc Esc reads it instead (below), `⌘J` hides it |
+| `space e`, `⌘B` | Files, the file tree (`a` `r` `d`: add, rename, trash); again, back to the code; the model's file operations are proposed there |
+| `space t`, `⌘J` | the terminal, your shell under the code, typing in it (insert mode); Esc Esc (or `ctrl-\ ctrl-n`) is normal mode there (below); `space t` again goes back to the code, `⌘J` hides it |
+| `ctrl-w h` `j` `k` `l` | the keys to the view left, below, above or right: Files, the panes of a split, the terminal, what a plugin shows beside the file |
 | `/`, `?`, `n`, `N`, `*` | search the file (as you type, every match marked); the next and previous match, whichever way the search went (`3n`: three on; in select mode, as another selection); `*` makes the selection the search, as a whole word (`alt-*`: anywhere), and `n` finds it |
 | `space f`, `space b` | pick a file of the project, or an open one, by typing a few of its letters |
 | `.`, `Q`/`q`, `"a` | repeat the last change; record and play a macro; use a named register (`"+` is the clipboard) |
@@ -142,7 +143,7 @@ Hold ⌘ over a web address or a file the terminal printed (`src/main.rs:12:5`) 
 underlined: ⌘-click opens the address in your browser, or the file in the editor at that
 line.
 
-The terminal has tabs too, a shell in each. In terminal mode the Mac's tab keys
+The terminal has tabs too, a shell in each. With the keys on the terminal the Mac's tab keys
 are about them: `⌘T` another, `⌘W` closes it, `⌘⇧[` and `⌘⇧]` go through them,
 and `⌘⌥←` and `⌘⌥→` (or dragging) move them. The model reads the one in front, or while a
 story's up, the one its command last ran in. To look around the project it writes
@@ -233,7 +234,7 @@ and nothing below `app` knows about the UI.
 | `wasm` | runs plugins compiled to WebAssembly, sandboxed, and the grammars they bring |
 | `model` | a local model: llama.cpp, in a process of its own, and the memory it may use |
 | `ai` | the model: the reply format, prompts, backends, the review story, placing steps, its notes kept per project |
-| `view` | the editor's state, without drawing: documents, tabs, the project, search, registers, jumps, `:` commands, and the story under review |
+| `state` | the editor's state, without drawing: documents, tabs, the project, search, registers, jumps, `:` commands, and the story under review |
 | `app` | the application (binary `ghostwrite`) |
 
 The editor knows no file type in particular: built in, a file is plain text. What's

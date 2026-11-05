@@ -9,7 +9,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod actions;
-use ghostwrite_view::config;
+use ghostwrite_state::config;
 mod editor;
 mod keys;
 mod plugins;

@@ -2,12 +2,15 @@
 //! then review its reply one item at a time where it applies, across the
 //! project's files, and the terminal. What the story is and what it decides
 //! (the review keys, where its items are, carrying out what's accepted, what
-//! the model is asked) is [`ghostwrite_view::story`], with no gpui. Here is
+//! the model is asked) is [`ghostwrite_state::story`], with no gpui. Here is
 //! what the app does for it:
 //!
 //! - here: starting a story from the keys and commands, doing what a review
 //!   key comes to ([`Do`]), bringing what's next into view ([`Show`]): the
-//!   tab, the tree, the terminal, where the light goes; and ending it;
+//!   tab, Files, the terminal, where the light goes; and ending it. A story is
+//!   asked from the code, and reviewed in AI mode in whichever view has the keys:
+//!   it takes them to the code, or to the terminal for a command, and when it's
+//!   over they go back to the view it was asked from;
 //! - [`request`]: running the requests (the reply, and the next ones asked
 //!   ahead) on the backend in the background, and handing on what they
 //!   report.
@@ -21,11 +24,11 @@ use std::ops::{Deref, DerefMut};
 use ghostwrite_ai::Backend;
 use ghostwrite_ai::protocol::Note;
 use ghostwrite_ai::{Item, Story};
-use ghostwrite_core::{Mode, Review};
-use ghostwrite_view::story::{Do, Show, StoryState};
+use ghostwrite_core::{Mode, Review, ViewKind};
+use ghostwrite_state::story::{Do, Show, StoryState};
 use gpui::{Context, Window};
 
-use super::attention::Panel;
+use super::attention::At;
 use super::{DocId, Editor, PromptKind};
 use request::Requests;
 
@@ -39,11 +42,13 @@ pub(super) struct Live {
     /// Asked about the terminal: the empty tab it was asked from, which goes with it if
     /// it's still empty, and the tab that was in front before.
     scratch: Option<(DocId, Option<DocId>)>,
+    /// The view it was asked from: the keys go back there when it's over.
+    came_from: ViewKind,
 }
 
 impl Live {
-    fn new(state: StoryState) -> Self {
-        Self { state, requests: Requests::default(), ran: false, scratch: None }
+    fn new(state: StoryState, came_from: ViewKind) -> Self {
+        Self { state, requests: Requests::default(), ran: false, scratch: None, came_from }
     }
 }
 
@@ -93,7 +98,7 @@ impl Editor {
             self.new_buffer(cx);
         }
         // The story is reviewed in AI mode, and afterwards it's back to where you were.
-        self.leave_insert();
+        let came_from = self.keys_to_the_code(cx);
         self.modal.enter(Mode::Ai);
         let from_select = self.modal.entered_from() == Some(Mode::Select);
         let state = match quoted.clone() {
@@ -102,7 +107,7 @@ impl Editor {
         };
         let Some(state) = state else { return };
         let doc = state.doc;
-        self.begin_story(state);
+        self.begin_story(state, came_from);
         if let Some(live) = self.story.as_mut().filter(|_| quoted.is_some()) {
             live.scratch = Some((doc, was.filter(|was| *was != doc)));
         }
@@ -129,9 +134,9 @@ impl Editor {
         if self.story.is_some() {
             self.close_story(cx);
         }
-        self.leave_insert();
+        let came_from = self.keys_to_the_code(cx);
         self.modal.enter(Mode::Ai);
-        self.begin_story(state);
+        self.begin_story(state, came_from);
         self.settle_story(cx);
     }
 
@@ -142,17 +147,25 @@ impl Editor {
         if self.story.is_some() {
             return;
         }
-        self.leave_insert();
         let Some(state) = StoryState::docs(&self.project, text) else { return };
+        let came_from = self.keys_to_the_code(cx);
         self.modal.enter(Mode::Ai);
-        self.begin_story(state);
+        self.begin_story(state, came_from);
         self.settle_story(cx);
     }
 
+    /// A story takes the keys to the code, where it's asked: the view they were on.
+    fn keys_to_the_code(&mut self, cx: &mut Context<Self>) -> ViewKind {
+        let came_from = self.modal.view;
+        self.focus_on(ViewKind::Code, cx);
+        self.leave_insert();
+        came_from
+    }
+
     /// The story's up, and the tab it was asked from stays: its items are found from it.
-    fn begin_story(&mut self, state: StoryState) {
+    fn begin_story(&mut self, state: StoryState, came_from: ViewKind) {
         self.project.tabs.hold(Some(state.doc));
-        self.story = Some(Live::new(state));
+        self.story = Some(Live::new(state, came_from));
         // The model reads the shell in front, until this story runs something.
         self.terminal.ran_in = None;
     }
@@ -253,7 +266,7 @@ impl Editor {
     /// Tab in the terminal, at the story's command: it runs, and the story goes on
     /// from where the next step is.
     pub(super) fn run_from_the_terminal(&mut self, cx: &mut Context<Self>) {
-        self.modal.leave(ghostwrite_core::Mode::Terminal);
+        self.start_reading(false, cx);
         self.accept(cx);
     }
 
@@ -297,18 +310,21 @@ impl Editor {
                     live.wandered = false;
                 }
                 let another_file = self.tab().map(|tab| tab.doc.id) != was_at;
-                // A command: the keys read the terminal it's in, in AI mode, to look through it.
+                // A command: the keys go to the terminal it's in, in AI mode, to look through it.
                 if in_terminal {
                     self.start_reading(true, cx);
-                    self.look_at(Panel::Terminal, false, cx);
+                    self.look_at(At::Terminal, false, cx);
                 } else {
-                    self.stop_reading();
-                    self.look_at(Panel::Code, another_file, cx);
+                    // Looking through the terminal, they come back to the code (typing there, they stay).
+                    if self.reading() {
+                        self.focus_on(ViewKind::Code, cx);
+                    }
+                    self.look_at(At::Code, another_file, cx);
                 }
             }
             Show::Tree => {
                 self.tree_pane.shown = true;
-                self.look_at(Panel::Tree, false, cx);
+                self.look_at(At::Files, false, cx);
             }
             Show::Finished => self.finish_story(cx),
         }
@@ -322,7 +338,7 @@ impl Editor {
         if self.story.is_some() {
             return Err("the story is still under review: esc esc ends it first".into());
         }
-        ghostwrite_view::story::undo(&mut self.project, &mut self.last_story)?;
+        ghostwrite_state::story::undo(&mut self.project, &mut self.last_story)?;
         cx.notify();
         Ok(())
     }
@@ -334,7 +350,7 @@ impl Editor {
         if self.story.is_some() {
             self.finish_story(cx);
         }
-        ghostwrite_view::story::forget(&mut self.project);
+        ghostwrite_state::story::forget(&mut self.project);
         cx.notify();
     }
 
@@ -367,15 +383,15 @@ impl Editor {
     }
 
     fn close_story(&mut self, cx: &mut Context<Self>) {
-        self.attention.on = Panel::Code;
-        self.story_left_the_terminal();
+        self.attention.on = At::Code;
+        self.story_left_the_terminal(cx);
         self.forget_where_the_story_was();
         // What it set going isn't waited for any more.
         self.terminal.running = None;
-        let mut ran = false;
-        if let Some(Live { state, requests, ran: ran_last, scratch }) = self.story.take() {
+        let (mut ran, mut came_from) = (false, ViewKind::Code);
+        if let Some(Live { state, requests, ran: ran_last, scratch, came_from: from }) = self.story.take() {
             requests.stop();
-            ran = ran_last;
+            (ran, came_from) = (ran_last, from);
             if let Some(undo) = state.close(&mut self.project) {
                 self.last_story = undo;
             }
@@ -393,8 +409,15 @@ impl Editor {
         // It ended with a command: the keys stay on the terminal, in normal mode, to read what it prints.
         if ran && self.terminal.shown && !self.terminal.shells.is_empty() {
             self.back_to_the_command();
-            self.modal.enter(Mode::Normal);
             self.start_reading(false, cx);
+        } else if self.in_code() {
+            // Back to the view it was asked from, if it's still there.
+            match came_from {
+                ViewKind::Files if self.tree_pane.shown => self.focus_on(ViewKind::Files, cx),
+                ViewKind::Terminal if self.terminal.shown && !self.terminal.shells.is_empty() => self.start_reading(false, cx),
+                ViewKind::Aside if self.aside_showing() => self.focus_on(ViewKind::Aside, cx),
+                _ => {}
+            }
         }
         cx.notify();
     }

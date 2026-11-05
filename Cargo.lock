@@ -2428,8 +2428,8 @@ dependencies = [
  "ghostwrite-page",
  "ghostwrite-plugin",
  "ghostwrite-project",
+ "ghostwrite-state",
  "ghostwrite-terminal",
- "ghostwrite-view",
  "ghostwrite-wasm",
  "gpui",
  "image",
@@ -2538,16 +2538,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ghostwrite-terminal"
-version = "0.2.0"
-dependencies = [
- "alacritty_terminal",
- "futures",
- "libc",
-]
-
-[[package]]
-name = "ghostwrite-view"
+name = "ghostwrite-state"
 version = "0.2.0"
 dependencies = [
  "ghostwrite-ai",
@@ -2558,6 +2549,15 @@ dependencies = [
  "ghostwrite-project",
  "regex",
  "serde_json",
+]
+
+[[package]]
+name = "ghostwrite-terminal"
+version = "0.2.0"
+dependencies = [
+ "alacritty_terminal",
+ "futures",
+ "libc",
 ]
 
 [[package]]

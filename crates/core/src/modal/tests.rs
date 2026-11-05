@@ -259,23 +259,58 @@ fn normal_mode_swallows_letters() {
 }
 
 #[test]
-fn tree_mode_turns_keys_into_tree_commands() {
+fn in_files_the_trees_keys_are_a_layer_of_their_own() {
+    let mut m = Modal { view: ViewKind::Files, ..Modal::default() };
+    assert_eq!(m.view_key(Key::Char('3')), Outcome::Handled);
+    assert_eq!(m.view_key(Key::Char('j')), Outcome::Tree(TreeCommand::Down(3)));
+    assert_eq!(m.view_key(Key::Char('g')), Outcome::Handled);
+    assert_eq!(m.view_key(Key::Char('g')), Outcome::Tree(TreeCommand::First));
+    assert_eq!(m.view_key(Key::Char('x')), Outcome::Handled, "other letters are swallowed");
+    assert_eq!(m.view_key(Key::Char(':')), Outcome::Effect(Effect::CommandLine));
+    assert_eq!(m.view_key(Key::Escape), Outcome::Effect(Effect::FocusCode));
+    assert_eq!(m.mode, Mode::Normal);
+    assert_eq!(m.view_key(Key::Char(' ')), Outcome::Handled);
+    assert_eq!(m.view_key(Key::Char('a')), Outcome::Effect(Effect::Assist), "space a asks, as everywhere");
+    assert_eq!(m.view_key(Key::Char(' ')), Outcome::Handled);
+    assert_eq!(m.view_key(Key::Char('e')), Outcome::Effect(Effect::Files), "space e goes back too");
+    m.view_key(Key::Ctrl('w'));
+    assert_eq!(m.view_key(Key::Char('l')), Outcome::Effect(Effect::Focus(Direction::Right)), "ctrl-w l: the view on the right");
+    m.enter(Mode::Ai);
+    assert_eq!(m.view_key(Key::Tab), Outcome::Review(Review::Next), "Tab accepts a story's step from here too");
+    assert_eq!(m.view_key(Key::Enter), Outcome::Tree(TreeCommand::Open), "Enter is the tree's");
+}
+
+#[test]
+fn on_the_terminal_the_keys_that_type_type_in_its_shell() {
+    let mut s = Session::new("ab\n");
+    s.modal.view = ViewKind::Terminal;
+    s.keys("w");
+    assert_eq!(s.selection, Range::new(0, 2), "the code's motions move through it");
+    let indent = IndentUnit::default();
+    let mut t = Target { buffer: &mut s.buffer, selection: &mut s.selection, indent: &indent, page_rows: 20, language: None };
+    assert_eq!(s.modal.key(Key::Char('i'), &mut s.regs, &mut t), Outcome::Effect(Effect::TypeInTerminal));
+    assert_eq!(s.modal.key(Key::Char('c'), &mut s.regs, &mut t), Outcome::Effect(Effect::TypeInTerminal));
+    assert_eq!(s.modal.key(Key::Enter, &mut s.regs, &mut t), Outcome::Effect(Effect::GotoFile), "Enter opens the file a line names");
+    assert_eq!(s.modal.key(Key::Char('v'), &mut s.regs, &mut t), Outcome::Handled);
+    assert_eq!(s.modal.key(Key::Escape, &mut s.regs, &mut t), Outcome::Handled, "Esc ends select mode first");
+    assert_eq!(s.modal.mode, Mode::Normal);
+    assert_eq!(s.modal.key(Key::Escape, &mut s.regs, &mut t), Outcome::Effect(Effect::FocusCode), "then goes back to the code");
+    assert_eq!(s.text(), "ab\n");
+}
+
+#[test]
+fn the_mode_line_names_the_view_unless_its_the_code() {
     let mut m = Modal::default();
-    m.to_tree();
-    assert_eq!(m.tree_key(Key::Char('3')), Outcome::Handled);
-    assert_eq!(m.tree_key(Key::Char('j')), Outcome::Tree(TreeCommand::Down(3)));
-    assert_eq!(m.tree_key(Key::Char('g')), Outcome::Handled);
-    assert_eq!(m.tree_key(Key::Char('g')), Outcome::Tree(TreeCommand::First));
-    assert_eq!(m.tree_key(Key::Char('x')), Outcome::Handled, "other letters are swallowed");
-    assert_eq!(m.tree_key(Key::Char(':')), Outcome::Effect(Effect::CommandLine));
-    assert_eq!(m.tree_key(Key::Escape), Outcome::Tree(TreeCommand::Leave));
-    assert_eq!(m.mode, Mode::Normal);
-    m.to_tree();
-    assert_eq!(m.tree_key(Key::Char(' ')), Outcome::Handled);
-    assert_eq!(m.tree_key(Key::Char('a')), Outcome::Effect(Effect::Assist), "space a asks, as everywhere");
-    assert_eq!(m.tree_key(Key::Char(' ')), Outcome::Handled);
-    assert_eq!(m.tree_key(Key::Char('e')), Outcome::Tree(TreeCommand::Leave), "space e goes back too");
-    assert_eq!(m.mode, Mode::Normal);
+    assert_eq!(m.label(None), "NOR");
+    m.view = ViewKind::Terminal;
+    assert_eq!(m.label(None), "NOR · terminal");
+    m.enter(Mode::Insert);
+    assert_eq!(m.label(None), "INS · terminal");
+    m.leave(Mode::Insert);
+    m.view = ViewKind::Files;
+    assert_eq!(m.label(None), "NOR · files");
+    m.view = ViewKind::Aside;
+    assert_eq!(m.label(Some("Goals")), "NOR · goals", "a plugin's view, by its title");
 }
 
 #[test]
@@ -306,23 +341,23 @@ fn reviewing_moves_but_never_edits() {
 
 #[test]
 fn leaving_a_mode_below_the_current_one_drops_it() {
-    let mut m = Modal::default();
-    m.enter(Mode::Tree);
+    let mut m = Modal { view: ViewKind::Terminal, ..Modal::default() };
     m.enter(Mode::Ai);
-    m.leave(Mode::Tree);
-    assert_eq!(m.mode, Mode::Ai);
+    m.enter(Mode::Insert);
     m.leave(Mode::Ai);
+    assert_eq!(m.mode, Mode::Insert);
+    m.leave(Mode::Insert);
     assert_eq!(m.mode, Mode::Normal);
 }
 
 #[test]
-fn space_e_enters_tree_mode() {
+fn space_e_goes_to_files() {
     let mut s = Session::new("abc\n");
     let indent = IndentUnit::default();
     let mut t = Target { buffer: &mut s.buffer, selection: &mut s.selection, indent: &indent, page_rows: 20, language: None };
     s.modal.key(Key::Char(' '), &mut s.regs, &mut t);
-    assert_eq!(s.modal.key(Key::Char('e'), &mut s.regs, &mut t), Outcome::Effect(Effect::FocusTree));
-    assert_eq!(s.modal.mode, Mode::Tree);
+    assert_eq!(s.modal.key(Key::Char('e'), &mut s.regs, &mut t), Outcome::Effect(Effect::Files));
+    assert_eq!(s.modal.mode, Mode::Normal, "the mode goes with the keys");
 }
 
 #[test]
@@ -341,13 +376,14 @@ fn effects_come_back() {
 }
 
 #[test]
-fn terminal_mode_leaves_the_keys_alone_and_goes_back_where_it_came_from() {
+fn typing_on_the_terminal_leaves_the_keys_alone_and_goes_back_where_it_came_from() {
     let mut s = Session::new("abc\n");
     s.modal.enter(Mode::Ai);
-    s.modal.enter(Mode::Terminal);
-    s.keys("d d x");
-    assert_eq!((s.text().as_str(), s.modal.mode), ("abc\n", Mode::Terminal), "the editor sends them to the shell");
-    s.modal.leave(Mode::Terminal);
+    s.modal.view = ViewKind::Terminal;
+    s.modal.enter(Mode::Insert);
+    s.keys("d d x ret");
+    assert_eq!((s.text().as_str(), s.modal.mode), ("abc\n", Mode::Insert), "the editor sends them to the shell");
+    s.modal.leave(Mode::Insert);
     assert_eq!(s.modal.mode, Mode::Ai, "back to the review");
 }
 
@@ -541,19 +577,33 @@ fn join_increment_comment_and_registers() {
 }
 
 #[test]
-fn the_tree_goes_back_to_the_mode_it_came_from() {
+fn the_mode_stays_as_the_keys_go_from_view_to_view() {
     let mut m = Modal::default();
-    m.to_tree();
-    m.leave_tree();
-    assert_eq!(m.mode, Mode::Normal);
     m.enter(Mode::Ai);
-    m.to_tree();
-    m.leave_tree();
+    m.view = ViewKind::Files;
     assert_eq!(m.mode, Mode::Ai, "a story's still up");
-    m.to_tree();
+    m.view = ViewKind::Code;
     m.leave(Mode::Ai);
-    m.leave_tree();
     assert_eq!(m.mode, Mode::Normal, "it ended meanwhile");
+}
+
+#[test]
+fn a_views_layer_goes_over_the_codes_and_yours_over_both() {
+    let (keymap, wrong) = Keymap::default()
+        .with_yours_in(ViewKind::Files, &[("r".into(), "delete_file".into()), ("x".into(), "rename_file".into()), ("d".into(), "no_op".into())]);
+    let keymap: &'static Keymap = Box::leak(Box::new(keymap));
+    assert!(wrong.is_empty(), "{wrong:?}");
+    let mut m = Modal { view: ViewKind::Files, ..Modal::default() };
+    m.set_keymap(keymap);
+    assert_eq!(m.view_key(Key::Char('x')), Outcome::Tree(TreeCommand::Rename));
+    assert_eq!(m.view_key(Key::Char('r')), Outcome::Tree(TreeCommand::Delete));
+    assert_eq!(m.view_key(Key::Char('d')), Outcome::Handled, "no_op hides it");
+    assert_eq!(m.view_key(Key::Char('a')), Outcome::Tree(TreeCommand::Add), "the rest as they were");
+    m.view = ViewKind::Code;
+    assert_eq!(m.command_for(Key::Char('x')), Some(Command::ExtendLineBelow), "the code's keys are its own");
+    m.view = ViewKind::Pages;
+    assert_eq!(m.command_for(Key::Char('j')), Some(Command::ScrollDown), "pages scroll");
+    assert_eq!(m.command_for(Key::Char('w')), Some(Command::MoveNextWordStart), "and have the code's keys under theirs");
 }
 
 #[test]

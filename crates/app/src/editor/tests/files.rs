@@ -259,32 +259,32 @@ fn leaving_a_file_writes_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn tree_mode_drives_the_file_tree(cx: &mut TestAppContext) {
+fn files_drives_the_file_tree(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[], cx);
     std::fs::create_dir_all(t.dir.join("src")).unwrap();
     std::fs::write(t.dir.join("src/main.rs"), "fn main() {}\n").unwrap();
     t.editor.update(t.cx, |e, _| e.project.tree.refresh());
     // Rows: src/, doc.txt (the active file, under the cursor).
     t.keys("space e");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tree);
+    assert_eq!(t.at(), (ViewKind::Files, Mode::Normal));
     t.keys("k l");
     assert_eq!(t.read(|e| e.project.tree.rows().len()), 3, "l opens the folder");
     t.keys("j l");
     assert_eq!(t.active().as_deref(), Some("src/main.rs"), "l on a file previews it");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tree, "and the keys stay in the tree");
+    assert_eq!(t.at(), (ViewKind::Files, Mode::Normal), "and the keys stay in Files");
     t.keys("j enter");
     assert_eq!(t.active().as_deref(), Some("doc.txt"));
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Normal, "enter opens it and leaves the tree");
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "enter opens it and goes to the code");
     t.keys("space e escape");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Normal);
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal));
     t.keys("space e");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Tree, "space e opens the tree");
+    assert_eq!(t.at(), (ViewKind::Files, Mode::Normal), "space e goes to Files");
     t.keys("space e");
-    assert_eq!(t.read(|e| e.modal.mode), Mode::Normal, "and closes it");
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "and back");
 }
 
 #[gpui::test]
-fn tree_mode_adds_and_renames(cx: &mut TestAppContext) {
+fn files_adds_and_renames(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[], cx);
     t.keys("space e a").input("notes/todo.md").keys("enter");
     assert!(t.dir.join("notes/todo.md").is_file());

@@ -7,11 +7,12 @@ mod languages;
 mod plugins;
 mod story;
 mod terminal;
+mod views;
 
 use std::path::PathBuf;
 
 use ghostwrite_ai::Backend;
-use ghostwrite_core::Mode;
+use ghostwrite_core::{Mode, ViewKind};
 use ghostwrite_project::tree::Proposal;
 use ghostwrite_project::{fs, scratch_dir, store};
 use gpui::{Entity, TestAppContext, VisualTestContext, WindowAppearance};
@@ -88,6 +89,16 @@ impl Setup<'_> {
 
     fn cursor(&mut self) -> usize {
         self.read(|e| e.tab().map_or(0, |t| t.view.selection.head))
+    }
+
+    /// The view with the keys, and the mode.
+    fn at(&mut self) -> (ViewKind, Mode) {
+        self.read(|e| (e.modal.view, e.modal.mode))
+    }
+
+    /// What the mode line says, as drawn.
+    fn mode_line(&mut self) -> String {
+        self.read(|e| e.mode_line())
     }
 
     fn reviewing(&mut self) -> bool {

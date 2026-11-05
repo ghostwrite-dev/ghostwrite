@@ -1,8 +1,10 @@
-//! The terminal under the code: the user's own shell. Terminal mode (`space t`,
-//! `:term` or `cmd-j`) gives it the keyboard; Esc Esc goes to reading it with the
-//! editor's keys, in the mode it was entered from (see [`super::reading`]; not
-//! while a full-screen program like vim has it: Esc is its; a click on the code leaves then),
-//! and `cmd-j` hides it. Dragging the mouse selects (a double click a word,
+//! The terminal under the code: the user's own shell, a view of its own. `space t`,
+//! `:term`, `cmd-j` or a click puts the keys there in insert mode, typing in the
+//! shell; Esc Esc, or `ctrl-\ ctrl-n` as in Neovim, goes to normal mode (or the mode
+//! it was entered from), to move through what it shows with the editor's keys (see
+//! [`super::reading`]). While a full-screen program like vim has it, Esc is the
+//! program's, however often: `ctrl-\ ctrl-n` still leaves, and so does a click on the
+//! code. `cmd-j` hides it. Dragging the mouse selects (a double click a word,
 //! a triple click a line), and `cmd-c` copies it.
 //! The model is shown what's on it with every request (and, in a follow-up,
 //! what's come since the last command, when that's changed); what it types there is only a command the
@@ -18,8 +20,8 @@
 //! last the pane. Its top edge drags to resize it, and the height is kept for
 //! next time.
 //!
-//! It has tabs of its own, each a shell of its own: in terminal mode, where
-//! only ⌘ keys are the app's, the keys for tabs mean these. The tabs show once
+//! It has tabs of its own, each a shell of its own: with the keys on it, the ⌘
+//! keys for tabs mean these. The tabs show once
 //! there are two. The model reads the one in front, or while a story's up, the one
 //! its command last ran in; a story's Ctrl-C goes there too, wherever you've been since.
 //! [`super::terminal_view`] draws it.
@@ -29,9 +31,9 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedSender;
 use ghostwrite_ai::protocol::{Run, RunIn};
-use ghostwrite_core::Mode;
+use ghostwrite_core::{Mode, ViewKind};
+use ghostwrite_state::story::TerminalNow;
 use ghostwrite_terminal::{Button, LinkTo, Palette, Press, Terminal, Waited, link_in};
-use ghostwrite_view::story::TerminalNow;
 use gpui::{
     AnyElement, Context, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, Task, Window, div,
     prelude::*,
@@ -54,7 +56,8 @@ const MAX_CONTEXT: usize = 8_000;
 const HEIGHT: f32 = 290.;
 const MIN_HEIGHT: f32 = 60.;
 const ROOM_ABOVE: f32 = 120.;
-/// How long an Esc in the terminal waits for a second, which would leave, before it goes to the shell.
+/// How long an Esc (or a `ctrl-\`) typed in the terminal waits for a second Esc (or a
+/// `ctrl-n`), which would leave typing, before it goes to the shell.
 const ESCAPE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 /// How long the shell has to have printed nothing, back at its prompt, to be done.
 const QUIET: Duration = Duration::from_millis(250);
@@ -75,9 +78,12 @@ pub(super) struct TerminalPane {
     /// The number of the shell the story's command last ran in.
     pub(super) ran_in: Option<usize>,
     /// An Esc that hasn't gone to the shell yet: another straight after leaves
-    /// terminal mode, and the shell never sees either (zsh would take the next key
+    /// typing, and the shell never sees either (zsh would take the next key
     /// as Alt and it); anything else, or a moment, and it goes on its way.
     pub(super) held_escape: Option<(Vec<u8>, Task<()>)>,
+    /// The same for a `ctrl-\`: a `ctrl-n` straight after leaves typing, as in Neovim, even
+    /// in a full-screen program.
+    pub(super) held_quit: Option<(Vec<u8>, Task<()>)>,
     /// Scrolling that hasn't added up to a line yet.
     scrolled: f32,
     /// Where its cells are on screen, as last drawn: the top left one, and a cell's size.
@@ -160,6 +166,7 @@ impl Default for TerminalPane {
             active: 0,
             ran_in: None,
             held_escape: None,
+            held_quit: None,
             scrolled: 0.,
             cells: None,
             selecting: false,
@@ -182,6 +189,7 @@ impl TerminalPane {
     pub(super) fn switch_to(&mut self, ix: usize) {
         self.active = ix.min(self.shells.len().saturating_sub(1));
         self.held_escape = None;
+        self.held_quit = None;
         self.selecting = false;
         self.scrolled = 0.;
     }
@@ -193,32 +201,31 @@ impl TerminalPane {
 }
 
 impl Editor {
-    /// `space t`, `:term`, `cmd-j`, a click on the pane: into terminal mode,
-    /// starting a shell if there's none.
-    pub(super) fn enter_terminal(&mut self, cx: &mut Context<Self>) {
+    /// `space t`, `:term`, `cmd-j`, a click on the pane, `i` on its text: the keys on the
+    /// terminal in insert mode, typing in its shell, starting one if there's none.
+    pub(super) fn type_in_terminal(&mut self, cx: &mut Context<Self>) {
         if self.terminal.shells.is_empty()
             && let Err(e) = self.start_shell(cx)
         {
             self.project.say(e);
             return cx.notify();
         }
-        self.leave_insert();
-        self.stop_selecting();
-        self.stop_reading();
         self.terminal.shown = true;
+        self.focus_on(ViewKind::Terminal, cx);
+        self.stop_reading();
         self.terminal.held_escape = None;
-        self.modal.enter(Mode::Terminal);
+        self.terminal.held_quit = None;
+        self.modal.enter(Mode::Insert);
         cx.notify();
     }
 
-    /// `cmd-j`: into terminal mode, or from it (or reading it), hide the terminal.
+    /// `cmd-j`: typing in the terminal, or with the keys on it, hide it.
     pub(super) fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
         if !self.in_terminal() {
-            return self.enter_terminal(cx);
+            return self.type_in_terminal(cx);
         }
         self.terminal.shown = false;
-        self.stop_reading();
-        self.modal.leave(Mode::Terminal);
+        self.focus_on(ViewKind::Code, cx);
         cx.notify();
     }
 
@@ -421,7 +428,7 @@ impl Editor {
         Ok(())
     }
 
-    /// ⌘T in terminal mode: another shell.
+    /// ⌘T on the terminal: another shell.
     pub(super) fn new_shell(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = self.start_shell(cx) {
             self.project.say(e);
@@ -430,7 +437,7 @@ impl Editor {
         cx.notify();
     }
 
-    /// ⌘W in terminal mode, or a tab's ×: that shell goes, with whatever is running in it.
+    /// ⌘W on the terminal, or a tab's ×: that shell goes, with whatever is running in it.
     pub(super) fn close_shell(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.terminal.shells.len() {
             return;
@@ -445,13 +452,15 @@ impl Editor {
         if self.terminal.shells.is_empty() {
             self.terminal.shown = false;
             self.stop_reading();
-            self.modal.leave(Mode::Terminal);
+            if self.in_terminal() {
+                self.focus_on(ViewKind::Code, cx);
+            }
         }
         self.read_the_shell_in_front(cx);
         cx.notify();
     }
 
-    /// ⌘⇧] and ⌘⇧[ in terminal mode: the next or previous shell, around the end.
+    /// ⌘⇧] and ⌘⇧[ on the terminal: the next or previous shell, around the end.
     pub(super) fn cycle_shell(&mut self, forward: bool, cx: &mut Context<Self>) {
         let count = self.terminal.shells.len();
         if count > 1 {
@@ -461,7 +470,7 @@ impl Editor {
         }
     }
 
-    /// ⌘⌥→ and ⌘⌥← in terminal mode: the shell in front moves over a place.
+    /// ⌘⌥→ and ⌘⌥← on the terminal: the shell in front moves over a place.
     pub(super) fn nudge_shell(&mut self, right: bool, cx: &mut Context<Self>) {
         let active = self.terminal.active;
         let to = if right { active + 1 } else { active.wrapping_sub(1) };
@@ -522,16 +531,33 @@ impl Editor {
         (!text.trim().is_empty()).then(|| TerminalNow { text, since_command: terminal.since_command(MAX_CONTEXT) })
     }
 
-    /// A key in terminal mode: to the shell, unless it's the app's (cmd), a
-    /// second Esc in a row, which leaves, or Tab with a story's command up.
+    /// A key typed in the terminal: to the shell, unless it's the app's (cmd), a
+    /// second Esc in a row or `ctrl-\ ctrl-n`, which leave typing, or Tab with a
+    /// story's command up.
     pub(super) fn terminal_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
         let Some(terminal) = self.terminal.current() else { return false };
-        // In a full-screen program Esc is the program's, however often.
         let modes = terminal.modes();
+        let ctrl = |key: &str| keystroke.key == key && keystroke.modifiers == Modifiers::control();
+        // `ctrl-\ ctrl-n`, as in Neovim: out of typing, whatever's running.
+        if self.terminal.held_quit.take().is_some_and(|_| ctrl("n")) {
+            self.start_reading(false, cx);
+            return true;
+        }
+        self.let_go_of_quit();
+        if ctrl("\\") {
+            let Some(bytes) = key_bytes(keystroke, &modes) else { return false };
+            self.let_go_of_escape();
+            let wait = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(ESCAPE_WAIT).await;
+                this.update(cx, |this, _| this.let_go_of_quit()).ok();
+            });
+            self.terminal.held_quit = Some((bytes, wait));
+            return true;
+        }
+        // In a full-screen program Esc is the program's, however often.
         let escape = keystroke.key == "escape" && keystroke.modifiers == Modifiers::none() && !modes.full_screen;
         if escape {
             if self.terminal.held_escape.take().is_some() {
-                self.modal.leave(Mode::Terminal);
                 self.start_reading(false, cx);
                 return true;
             }
@@ -566,7 +592,23 @@ impl Editor {
         }
     }
 
-    /// `cmd-c` in terminal mode: what's selected.
+    /// A `ctrl-\` held back goes to the shell after all.
+    fn let_go_of_quit(&mut self) {
+        if let Some((bytes, wait)) = self.terminal.held_quit.take() {
+            wait.detach();
+            if let Some(terminal) = self.terminal.current() {
+                terminal.input(bytes);
+            }
+        }
+    }
+
+    /// Out of typing: what's held back goes to the shell first.
+    pub(super) fn let_go_of_held_keys(&mut self) {
+        self.let_go_of_quit();
+        self.let_go_of_escape();
+    }
+
+    /// `cmd-c` typing in the terminal: what's selected.
     pub(super) fn terminal_copy(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = self.terminal.current().and_then(Terminal::selected) {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
@@ -621,15 +663,14 @@ impl Editor {
                 LinkTo::Web(address) => cx.open_url(&address),
                 LinkTo::File(path, line, column) => {
                     let from = self.before_jump();
-                    self.modal.leave(Mode::Terminal);
-                    self.stop_reading();
+                    self.focus_on(ViewKind::Code, cx);
                     self.open_at(&path, line, column, cx);
                     self.note_jump(from);
                 }
             }
             return cx.notify();
         }
-        self.enter_terminal(cx);
+        self.type_in_terminal(cx);
         let Some((row, col)) = self.terminal_cell(event.position) else { return };
         // A program that asked for the mouse has it; shift-click still selects, as in
         // other terminals.
@@ -695,7 +736,7 @@ impl Editor {
         }
     }
 
-    /// `cmd-v` in terminal mode.
+    /// `cmd-v` typing in the terminal.
     pub(super) fn terminal_paste(&mut self, cx: &mut Context<Self>) {
         let Some(terminal) = self.terminal.current() else { return };
         let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else { return };
@@ -759,7 +800,7 @@ impl Editor {
                 .debug_selector(move || format!("shell-tab-{ix}"))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.terminal.switch_to(ix);
-                    this.enter_terminal(cx);
+                    this.type_in_terminal(cx);
                 }))
                 .on_drag(DraggedShell { ix, number }, |shell, _, _, cx| cx.new(|_| shell.clone()))
                 .drag_over::<DraggedShell>({
@@ -810,7 +851,7 @@ impl Editor {
                         .child("+")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.new_shell(cx);
-                            this.enter_terminal(cx);
+                            this.type_in_terminal(cx);
                         })),
                 )
                 .into_any_element(),

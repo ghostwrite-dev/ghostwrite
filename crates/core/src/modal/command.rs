@@ -182,6 +182,11 @@ commands! {
     Vsplit "vsplit" "two panes: this file's pages, or the next tab",
     RotateView "rotate_view" "the keys to the other pane",
     Wonly "wonly" "only this pane",
+    JumpViewLeft "jump_view_left" "the keys to the view on the left",
+    JumpViewDown "jump_view_down" "the keys to the view below",
+    JumpViewUp "jump_view_up" "the keys to the view above",
+    JumpViewRight "jump_view_right" "the keys to the view on the right",
+    FocusCode "focus_code" "back to the code (from select mode, normal mode first)",
     Ask "ask" "ask the model about the line or selection, or to change it",
     FileExplorer "file_explorer" "the file tree",
     Terminal "terminal" "the terminal: type in it",
@@ -198,6 +203,27 @@ commands! {
     PasteClipboardAfter "paste_clipboard_after" "paste the clipboard after the selection",
     PasteClipboardBefore "paste_clipboard_before" "paste the clipboard before the selection",
     Cheatsheet "cheatsheet" "every key",
+
+    // In Files.
+    FilesDown "files_down" "the row below",
+    FilesUp "files_up" "the row above",
+    FilesFirst "files_first" "the first row",
+    FilesLast "files_last" "the last row",
+    ExpandFolder "expand_folder" "open the folder, or preview the file",
+    CollapseFolder "collapse_folder" "close the folder, or go up to the one it's in",
+    OpenFile "open_file" "open the file (and go to the code), or open or close the folder",
+    AddFile "add_file" "a new file or folder here (name/ for a folder)",
+    RenameFile "rename_file" "rename the file or folder",
+    DeleteFile "delete_file" "move the file or folder to the Trash",
+
+    // On pages, and beside a file.
+    ScrollDown "scroll_down" "scroll down",
+    ScrollUp "scroll_up" "scroll up",
+    ScrollPageDown "scroll_page_down" "scroll down a screen",
+    ScrollPageUp "scroll_page_up" "scroll up a screen",
+    ZoomIn "zoom_in" "zoom in",
+    ZoomOut "zoom_out" "zoom out",
+    ZoomReset "zoom_reset" "back to fitting the view",
 }
 
 impl Command {
@@ -256,6 +282,34 @@ impl Command {
     pub(super) fn waits_for_review(self) -> bool {
         use Command::*;
         matches!(self, GotoNextProblem | FileDiagnostics | GlobalSearch | RenameSymbol | CodeAction | PasteClipboardBefore) || self.cursors()
+    }
+
+    /// Whether it works in any view, as it isn't about text: `:`, most under
+    /// `space`, and going from view to view.
+    pub fn anywhere(self) -> bool {
+        use Command::*;
+        matches!(
+            self,
+            CommandMode
+                | Ask
+                | Terminal
+                | FileExplorer
+                | GlobalSearch
+                | FilePicker
+                | BufferPicker
+                | Cheatsheet
+                | JumpViewLeft
+                | JumpViewDown
+                | JumpViewUp
+                | JumpViewRight
+                | FocusCode
+        )
+    }
+
+    /// Whether it types (`i`, `a`, `o`, `c`…): on the terminal, it types in its shell.
+    pub fn types(self) -> bool {
+        use Command::*;
+        matches!(self, InsertMode | AppendMode | InsertAtLineStart | InsertAtLineEnd | OpenBelow | OpenAbove | ChangeSelection | ChangeSelectionNoyank)
     }
 
     /// Whether it's about the cursors themselves, which the editor keeps.

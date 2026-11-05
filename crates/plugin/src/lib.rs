@@ -33,13 +33,16 @@ use ghostwrite_lsp::registry::Spec;
 pub use ghostwrite_page::{Bitmap, Renderer};
 use serde_json::Value;
 
-/// A key sequence that runs a `:` command, in normal and select mode. Keys built in
+/// A key sequence that runs a command, in normal and select mode: in the code, or in
+/// one of the views a plugin has (its pages, what's beside a file). Keys built in
 /// are the editor's to give: a plugin's mustn't be one of them (a test keeps to that).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Binding {
     /// The keys, as the help writes them: `space v`, `g x`.
     pub keys: &'static str,
-    /// The command line, without its `:`.
+    /// The view they're for: the code if none's said.
+    pub view: ghostwrite_core::ViewKind,
+    /// An editor command by name (`zoom_in`), or a command line, without its `:`.
     pub command: &'static str,
     /// What it does, for the help.
     pub what: &'static str,

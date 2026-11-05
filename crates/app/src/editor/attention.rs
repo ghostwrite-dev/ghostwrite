@@ -16,12 +16,12 @@ use crate::theme::{pt, theme};
 const TRAVEL: Duration = Duration::from_millis(420);
 const SETTLE: Duration = Duration::from_millis(380);
 
-/// A place a story can be, that isn't where it was.
+/// The view a story's step is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) enum Panel {
+pub(super) enum At {
     #[default]
     Code,
-    Tree,
+    Files,
     Terminal,
 }
 
@@ -58,7 +58,7 @@ pub(super) struct Jump {
 #[derive(Default)]
 pub(super) struct Attention {
     /// Where the story last was.
-    pub(super) on: Panel,
+    pub(super) on: At,
     /// Where what's shown of it was last seen.
     last: Option<Seen>,
     pub(super) jump: Option<Jump>,
@@ -67,9 +67,9 @@ pub(super) struct Attention {
 }
 
 impl Editor {
-    /// The story is now at `panel`.
-    pub(super) fn look_at(&mut self, panel: Panel, _anyway: bool, cx: &mut Context<Self>) {
-        self.attention.on = panel;
+    /// The story is now at `view`.
+    pub(super) fn look_at(&mut self, view: At, _anyway: bool, cx: &mut Context<Self>) {
+        self.attention.on = view;
         cx.notify();
     }
 
@@ -106,7 +106,7 @@ impl Editor {
         attention.last = Some(seen);
     }
 
-    /// What of the story the code, the tree or the terminal shows, where it's at: the
+    /// What of the story the code, Files or the terminal shows, where it's at: the
     /// prompt or a step (thinking, or a step that waits, is in the corner).
     pub(super) fn step_mark(&self) -> Option<Mark> {
         self.story_mark().filter(|mark| matches!(mark, Mark::Asking | Mark::Item(_)))

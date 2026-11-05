@@ -2,14 +2,16 @@
 //! [`ghostwrite_plugin::Panel`], which says what to ask the file's language server
 //! about the cursor and what to show of the answers. It's kept on the document, kept
 //! up to date as the cursor moves and the file is edited, and drawn in a pane beside
-//! the code, whose left edge drags to resize it. `:preview` shows or hides it.
+//! the code, whose left edge drags to resize it. `:preview` shows or hides it. It's a
+//! view: `ctrl-w l` or a click puts the keys there, where `j` and `k` scroll it, and
+//! the mode line calls it by its title.
 
 use ghostwrite_lsp::{Diagnostic, Severity};
 use ghostwrite_plugin::{Block, Panel};
 use gpui::{AnyElement, Context, Hsla, MouseButton, MouseDownEvent, div, prelude::*};
 use serde_json::Value;
 
-pub use ghostwrite_view::aside::Aside;
+pub use ghostwrite_state::aside::Aside;
 
 use super::document::DocId;
 use super::page_view::PageView;
@@ -111,7 +113,7 @@ impl Editor {
 
     /// The pane beside `tab`'s code, if there's something to show in it.
     pub(super) fn render_aside(&self, tab: &Tab, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.project.aside_shown || tab.doc.lsp.is_none() {
+        if !self.project.aside_shown {
             return None;
         }
         let content = self.render_panel(tab.doc.aside.as_ref()?.panel.as_ref(), cx);
@@ -127,8 +129,10 @@ impl Editor {
                 .flex()
                 .flex_col()
                 .border_l_1()
-                .border_color(theme.border)
+                .border_color(if self.modal.view == ghostwrite_core::ViewKind::Aside { theme.success } else { theme.border })
                 .bg(theme.tab_bar)
+                .debug_selector(|| "aside".to_string())
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| this.focus_on(ghostwrite_core::ViewKind::Aside, cx)))
                 .child(div().flex_1().min_h_0().child(content))
                 .child(self.aside_width.handle("aside-edge").on_mouse_down(
                     MouseButton::Left,
@@ -185,6 +189,7 @@ impl Editor {
             .id("panel")
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.aside_scroll)
             .p_3()
             .flex()
             .flex_col()

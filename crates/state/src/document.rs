@@ -1,7 +1,7 @@
 //! One open file: its buffer, where it lives on disk, its language and
 //! highlights, its language server, and what's beside it (see
 //! [`crate::aside`]). How it's shown (selection, scroll) is its tab's
-//! [`View`](crate::tabs::View). A file that's only pages is a line for each, read-only, and where
+//! [`Viewport`](crate::tabs::Viewport). A file that's only pages is a line for each, read-only, and where
 //! that text is on its pages.
 
 use std::path::{Path, PathBuf};

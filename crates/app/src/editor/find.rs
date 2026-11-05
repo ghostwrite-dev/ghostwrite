@@ -10,8 +10,8 @@ use std::ops::Range as Bytes;
 
 use gpui::{Context, Window};
 
-pub(super) use ghostwrite_view::find::Find;
-use ghostwrite_view::find::{select_next, selection_pattern};
+pub(super) use ghostwrite_state::find::Find;
+use ghostwrite_state::find::{select_next, selection_pattern};
 
 use super::Autoscroll;
 use super::Editor;

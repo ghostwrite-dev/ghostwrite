@@ -1,11 +1,11 @@
 //! Stories the editor gives: `space d` goes through the file's diagnostics,
 //! `:grep` and `space /` the project's matches. Each stop is a note, reviewed like any
 //! story's: Tab reads on, and Enter asks the model about it, which takes over
-//! from there. The items themselves are made in [`ghostwrite_view::story::stops`].
+//! from there. The items themselves are made in [`ghostwrite_state::story::stops`].
 
 use ghostwrite_ai::Item;
 use ghostwrite_project::files::{MAX_FOUND, grep, search_pattern};
-use ghostwrite_view::story::stops::{note_at, replacing};
+use ghostwrite_state::story::stops::{note_at, replacing};
 use gpui::{AppContext as _, Context, Window};
 
 use super::Editor;

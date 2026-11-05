@@ -8,17 +8,20 @@
 //! [`Editor`] is the gpui view around all of that: it routes keys, owns focus
 //! and prompts, runs background work, and decides when to switch tabs.
 //!
-//! Every key goes through [`Editor::key_down`] as a modal [`Key`]: the
-//! completion menu gets first say in insert mode, then the mode decides.
-//! Normal, select and insert mode edit the active document; tree mode
-//! drives the file tree; AI mode reviews a story, with the review keys;
-//! terminal mode sends them to the terminal's shell. Text typed in insert
+//! Every key goes through [`Editor::key_down`] as a modal [`Key`], to the
+//! [`views`] that has the keys: the code, Files, the terminal, a plugin's view.
+//! The modes are the same in each. In the code, the completion menu gets first
+//! say in insert mode, then the mode decides: normal, select and insert mode
+//! edit the active document, and AI mode reviews a story, with the review keys.
+//! In Files the keys drive the tree; on the terminal, insert mode sends them to
+//! its shell, and the others move through what it shows. Text typed in insert
 //! mode arrives through the platform's input handler.
 //!
-//! - [`project`], [`tabs`], [`document`]: the model, from [`ghostwrite_view`]
+//! - [`project`], [`tabs`], [`document`]: the model, from [`ghostwrite_state`]
 //! - [`commands`]: `:` commands, in the [`prompt`]
 //! - [`input`]: text from the platform; [`pointer`]: the mouse in the code
-//! - [`story`], [`stops`], [`shell`], [`terminal`], [`tree`], [`find`], [`picker`], [`jumps`], [`repeat`]: features
+//! - [`views`]: which view has the keys, and going from one to the next
+//! - [`story`], [`stops`], [`terminal`], [`tree`], [`find`], [`picker`], [`jumps`], [`repeat`]: features
 //! - [`language`], [`server_actions`], [`semantic`]: what language servers do
 //! - [`rendered`]: a document's pages, whatever makes them
 //! - [`aside`]: what's beside a file, from a plugin
@@ -58,6 +61,7 @@ mod terminal_view;
 mod tree;
 mod update;
 mod view;
+mod views;
 
 #[cfg(test)]
 mod tests;
@@ -69,16 +73,16 @@ use std::sync::Arc;
 use futures::StreamExt as _;
 use ghostwrite_ai::Backend;
 use ghostwrite_core::modal::{self, Outcome, Target};
-use ghostwrite_core::{Buffer, Effect, Key, Modal, Mode, Range, Review};
+use ghostwrite_core::{Buffer, Command, Effect, Key, Modal, Mode, Range, Review, ViewKind};
 use ghostwrite_project::store::{self, Session};
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Keystroke, PathPromptOptions, Pixels, PromptLevel,
     Subscription, Window,
 };
 
-use ghostwrite_view::registers::Registers;
-pub use ghostwrite_view::{Autoscroll, DocId, Project, Tab};
-use ghostwrite_view::{document, project, tabs};
+use ghostwrite_state::registers::Registers;
+pub use ghostwrite_state::{Autoscroll, DocId, Project, Tab};
+use ghostwrite_state::{document, project, tabs};
 
 use crate::keys::key_of;
 use prompt::{Prompt, PromptKind};
@@ -151,6 +155,8 @@ pub struct Editor {
     tree_pane: tree::TreePane,
     terminal: terminal::TerminalPane,
     aside_width: crate::ui::pane::Resizable,
+    /// Where what's beside the file is scrolled to.
+    aside_scroll: gpui::ScrollHandle,
 
     // On screen.
     focus: FocusHandle,
@@ -179,7 +185,7 @@ pub struct Editor {
     /// The next redraw while the model is thinking.
     ticking: Option<gpui::Task<()>>,
     /// What the last story changed: each document, its steps, and its version when the story ended.
-    last_story: ghostwrite_view::story::Undo,
+    last_story: ghostwrite_state::story::Undo,
     /// Copies of unsaved changes, for after a crash.
     recovery: recovery::Recovery,
     /// Watches the project for changes made by other programs.
@@ -321,6 +327,7 @@ impl Editor {
             tree_pane: tree::TreePane::new(),
             terminal: terminal::TerminalPane::default(),
             aside_width: aside::width(),
+            aside_scroll: gpui::ScrollHandle::new(),
             focus,
             refocus: false,
             pointer: Default::default(),
@@ -626,7 +633,7 @@ impl Editor {
 
     /// Close an insert session in the active document, as one undo step.
     fn leave_insert(&mut self) {
-        if self.modal.mode != Mode::Insert {
+        if self.modal.mode != Mode::Insert || !self.in_code() {
             return;
         }
         self.marked = None;
@@ -649,7 +656,8 @@ impl Editor {
             cx.notify();
             return true;
         }
-        if self.modal.mode == Mode::Terminal {
+        self.settle_view(cx);
+        if self.typing_in_terminal() {
             let handled = self.terminal_key(keystroke, cx);
             if handled {
                 cx.notify();
@@ -667,7 +675,7 @@ impl Editor {
         }
         let from = self.before_jump();
         self.record_key(key, command);
-        let handled = (self.modal.mode == Mode::Insert && self.menu_key(key, cx)) || self.mode_key(key, window, cx);
+        let handled = (self.modal.mode == Mode::Insert && self.in_code() && self.menu_key(key, cx)) || self.mode_key(key, window, cx);
         self.recorded_key(command);
         if !matches!(command, Some(JumpBackward | JumpForward)) {
             self.note_jump(from);
@@ -706,21 +714,32 @@ impl Editor {
     }
 
     fn mode_key_here(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let reading = self.reading();
-        if let Some(handled) = self.reading_key(key, window, cx) {
-            return handled;
-        }
-        if !reading && self.cursor_key(key, cx) {
+        self.settle_view(cx);
+        if self.in_code() && self.cursor_key(key, cx) {
             return true;
         }
-        if let Some(command) = self.plugin_key(key).filter(|_| !reading) {
+        let outcome = if let Some(command) = self.plugin_key(key) {
             self.modal.cancel_pending();
-            if let Err(why) = self.run_command(command, window, cx) {
-                self.project.say(why);
+            // An editor command by its name, or a command line.
+            match Command::named(command) {
+                Some(command) => self.buffer_key(Press::Command(command), cx),
+                None => {
+                    if let Err(why) = self.run_command(command, window, cx) {
+                        self.project.say(why);
+                    }
+                    return true;
+                }
             }
-            return true;
-        }
-        let outcome = if self.modal.mode == Mode::Tree { self.modal.tree_key(key) } else { self.buffer_key(key, cx) };
+        } else if self.modal.view.without_text() {
+            self.modal.view_key(key)
+        } else {
+            self.buffer_key(Press::Key(key), cx)
+        };
+        self.outcome(outcome, window, cx)
+    }
+
+    /// Carry out what a key came to: whether it was anything.
+    fn outcome(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match outcome {
             Outcome::Ignored => return false,
             Outcome::Handled => {}
@@ -740,8 +759,8 @@ impl Editor {
         }
     }
 
-    /// The command a plugin binds this key to, the keys so far included.
-    /// The keymap comes first: yours are in it.
+    /// The command a plugin binds this key to in the view with the keys, the keys so
+    /// far included. The keymap comes first: yours are in it, and the view's own.
     fn plugin_key(&self, key: Key) -> Option<&'static str> {
         if !matches!(self.modal.mode, Mode::Normal | Mode::Select) || self.modal.binds(key) {
             return None;
@@ -753,15 +772,23 @@ impl Editor {
         };
         let pending = self.modal.pending_keys();
         let typed = if pending.is_empty() { name } else { format!("{pending} {name}") };
-        ghostwrite_plugin::keys(self.active_language()).into_iter().find(|binding| binding.keys == typed).map(|binding| binding.command)
+        // Those for the code are for a tab of its pages too, which is in a pane as the code is.
+        let view = self.modal.view;
+        let here = |binding: &&ghostwrite_plugin::Binding| binding.view == view || binding.view == ViewKind::Code && self.in_code();
+        ghostwrite_plugin::keys(self.active_language()).into_iter().filter(here).find(|binding| binding.keys == typed).map(|binding| binding.command)
     }
 
-    /// A key for the active document (or, with none open, for the commands that work anyway).
-    fn buffer_key(&mut self, key: Key, cx: &mut Context<Self>) -> Outcome {
-        let reading = self.reading();
-        if !reading && self.page_key(&key, cx) {
-            return Outcome::Handled;
+    /// A key (or a command, run as if by one) for the active document, or the terminal's
+    /// text while it's being read (or, with none open, for the commands that work anyway).
+    fn buffer_key(&mut self, press: Press, cx: &mut Context<Self>) -> Outcome {
+        if self.modal.view.without_text() {
+            let Press::Command(command) = press else { return Outcome::Ignored };
+            let (mut buffer, mut selection, indent) = (Buffer::default(), Range::default(), Default::default());
+            let mut target = Target { buffer: &mut buffer, selection: &mut selection, indent: &indent, page_rows: 1, language: None };
+            let mut regs = Regs { registers: &mut self.registers, cx };
+            return self.modal.run_named(command, &mut regs, &mut target);
         }
+        let reading = self.reading();
         let rows = if reading { self.reading_rows() } else { self.measured.rows.max(2) };
         let mut edited = false;
         let mut regs = Regs { registers: &mut self.registers, cx };
@@ -769,7 +796,7 @@ impl Editor {
         let outcome = match keyed {
             Some(tab) if reading => {
                 let version = tab.doc.buffer.version();
-                let outcome = cursors::key_at_each(&mut self.modal, key, &mut regs, tab, rows);
+                let outcome = press.at_each(&mut self.modal, &mut regs, tab, rows);
                 if self.modal.mode == Mode::Insert {
                     self.modal.to_normal(&mut tab.target(rows));
                 }
@@ -778,7 +805,7 @@ impl Editor {
             }
             Some(tab) => {
                 let before = (tab.doc.buffer.version(), tab.view.selection);
-                let outcome = cursors::key_at_each(&mut self.modal, key, &mut regs, tab, rows);
+                let outcome = press.at_each(&mut self.modal, &mut regs, tab, rows);
                 // What's read-only: no inserting, and an edit is undone as it syncs.
                 let read_only = tab.doc.read_only();
                 let refused = read_only && (self.modal.mode == Mode::Insert || tab.doc.buffer.version() != before.0);
@@ -799,7 +826,10 @@ impl Editor {
                 let (mut buffer, mut selection) = (Buffer::default(), Range::default());
                 let indent = Default::default();
                 let mut target = Target { buffer: &mut buffer, selection: &mut selection, indent: &indent, page_rows: rows, language: None };
-                let outcome = self.modal.key(key, &mut regs, &mut target);
+                let outcome = match press {
+                    Press::Key(key) => self.modal.key(key, &mut regs, &mut target),
+                    Press::Command(command) => self.modal.run_named(command, &mut regs, &mut target),
+                };
                 if self.modal.mode == Mode::Insert {
                     self.modal.to_normal(&mut target);
                 }
@@ -838,8 +868,12 @@ impl Editor {
                 | Effect::RecordMacro
                 | Effect::PlayMacro
                 | Effect::GotoFile
-                | Effect::Terminal => {}
-                _ => self.stop_reading(),
+                | Effect::Terminal
+                | Effect::Files
+                | Effect::FocusCode
+                | Effect::Focus(_)
+                | Effect::TypeInTerminal => {}
+                _ => self.focus_on(ViewKind::Code, cx),
             }
         }
         match effect {
@@ -848,7 +882,15 @@ impl Editor {
             Effect::PrevBuffer(steps) => self.step_tab(false, steps, cx),
             Effect::MoveBufferNext(places) => self.nudge_tab(true, places, cx),
             Effect::MoveBufferPrev(places) => self.nudge_tab(false, places, cx),
-            Effect::FocusTree => self.enter_tree(cx),
+            Effect::Files if self.modal.view == ViewKind::Files => self.focus_on(ViewKind::Code, cx),
+            Effect::Files => self.enter_files(cx),
+            Effect::FocusCode => self.focus_on(ViewKind::Code, cx),
+            Effect::Focus(towards) => self.focus_towards(towards, cx),
+            Effect::TypeInTerminal => self.type_in_terminal(cx),
+            Effect::Scroll { by, pages } => self.scroll_view(by, pages, cx),
+            Effect::Zoom(by) => {
+                self.zoom_pages(by, cx);
+            }
             Effect::SplitRight => {
                 if let Err(why) = self.split_right(cx) {
                     self.project.say(why);
@@ -884,7 +926,8 @@ impl Editor {
             Effect::Hover => self.show_hover(window, cx),
             Effect::NextProblem => self.next_problem(cx),
             Effect::Diagnostics => self.diagnostics_story(cx),
-            Effect::Terminal => self.enter_terminal(cx),
+            Effect::Terminal if self.modal.view == ViewKind::Terminal => self.focus_on(ViewKind::Code, cx),
+            Effect::Terminal => self.type_in_terminal(cx),
             Effect::Run(command) => {
                 if let Err(why) = self.run_command(command, window, cx) {
                     self.project.say(why);
@@ -897,6 +940,23 @@ impl Editor {
             | Effect::MergeSelections { .. }
             | Effect::AlignSelections
             | Effect::SelectRegex => self.cursors(effect, window, cx),
+        }
+    }
+}
+
+/// What a key is for the document: the key, or a command run as if one were bound to it.
+#[derive(Clone, Copy)]
+enum Press {
+    Key(Key),
+    Command(Command),
+}
+
+impl Press {
+    /// Carry it out at each of `tab`'s cursors (a command, at the main one).
+    fn at_each(self, modal: &mut Modal, regs: &mut Regs, tab: &mut Tab, rows: usize) -> Outcome {
+        match self {
+            Press::Key(key) => cursors::key_at_each(modal, key, regs, tab, rows),
+            Press::Command(command) => modal.run_named(command, regs, &mut tab.target(rows)),
         }
     }
 }

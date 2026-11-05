@@ -546,12 +546,19 @@ fn your_keys_run_commands_by_name_or_a_colon_command_and_no_op_unbinds(cx: &mut 
 fn the_cheatsheet_and_the_keymap_agree() {
     use std::collections::HashSet;
     let (yours, _) = your_keys(&[("Z", "extend_line_below"), ("x", "no_op"), ("ctrl-s", ":w"), ("g", "goto_file_start")]);
+    let yours = {
+        let keys = [("R", "rename_file"), ("r", "no_op"), ("Y", ":w")].map(|(keys, to)| (keys.to_string(), to.to_string()));
+        &*Box::leak(Box::new(yours.clone().with_yours_in(ghostwrite_core::ViewKind::Files, &keys).0))
+    };
     for keymap in [ghostwrite_core::Keymap::standard(), yours] {
         let sheet = crate::editor::view::cheatsheet(keymap);
-        let shown: Vec<&Vec<ghostwrite_core::Key>> = sheet.iter().flat_map(|(_, rows)| rows).flat_map(|row| &row.bound).collect();
-        let bound: HashSet<Vec<ghostwrite_core::Key>> = keymap.bindings().into_iter().map(|(keys, _)| keys).collect();
+        // Each view's keys: the same keys can be the code's and a view's.
+        let shown: Vec<(ghostwrite_core::ViewKind, &Vec<ghostwrite_core::Key>)> =
+            sheet.iter().flat_map(|(_, rows)| rows).flat_map(|row| row.bound.iter().map(|keys| (row.view, keys))).collect();
+        let bound: HashSet<(ghostwrite_core::ViewKind, Vec<ghostwrite_core::Key>)> =
+            keymap.bindings().into_iter().map(|(view, keys, _)| (view, keys)).collect();
         assert_eq!(shown.len(), bound.len(), "each binding once");
-        assert_eq!(shown.into_iter().cloned().collect::<HashSet<_>>(), bound);
+        assert_eq!(shown.into_iter().map(|(view, keys)| (view, keys.clone())).collect::<HashSet<_>>(), bound);
         for row in sheet.iter().flat_map(|(_, rows)| rows).filter(|row| !row.bound.is_empty()) {
             for keys in &row.bound {
                 assert!(row.keys.contains(&ghostwrite_core::modal::sequence(keys)), "{} shows {keys:?}", row.keys);

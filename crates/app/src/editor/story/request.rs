@@ -1,6 +1,6 @@
 //! Running what the model is asked. What a request is, and what's done with
 //! what comes back, is the story's state's
-//! ([`ghostwrite_view::story::request`]); here it's sent to the backend
+//! ([`ghostwrite_state::story::request`]); here it's sent to the backend
 //! and the reply streams in on a background thread, each thing it reports
 //! handed on as an [`Event`]. While an item is reviewed, the next one is
 //! asked for ahead the same way.
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt as _;
 use ghostwrite_ai::backend::Listener;
-use ghostwrite_view::story::Event;
+use ghostwrite_state::story::Event;
 use gpui::{AppContext as _, Context, Task};
 
 use super::Live;

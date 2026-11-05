@@ -9,7 +9,7 @@
 use ghostwrite_ai::placement;
 use ghostwrite_ai::protocol::{self, FileOp, Note};
 use ghostwrite_ai::{Item, Story, lines};
-use ghostwrite_view::story::Located;
+use ghostwrite_state::story::Located;
 use gpui::{AnyElement, Entity, Hsla, div, prelude::*, px};
 
 use super::element::{Block, BlockSizes, Decoration};

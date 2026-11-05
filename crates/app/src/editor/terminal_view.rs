@@ -18,7 +18,7 @@ type Point = gpui::Point<Pixels>;
 
 pub(super) struct TerminalView {
     editor: Entity<Editor>,
-    /// In terminal mode: the cursor is drawn solid.
+    /// Typing in it: the cursor is drawn solid.
     active: bool,
 }
 

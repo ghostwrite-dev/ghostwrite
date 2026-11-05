@@ -1,5 +1,5 @@
 [package]
-name = "ghostwrite-view"
+name = "ghostwrite-state"
 description = "The editor's state: documents, tabs, the project, and what keys work on, with no drawing"
 version.workspace = true
 edition.workspace = true

@@ -424,7 +424,8 @@ fn a_plugin_binds_keys_for_its_files(cx: &mut TestAppContext) {
 fn plugins_keys_are_free(cx: &mut TestAppContext) {
     let _t = open("", &[], cx);
     let cheatsheet = crate::editor::view::cheatsheet(ghostwrite_core::Keymap::standard());
-    let builtin: Vec<&str> = cheatsheet.iter().flat_map(|(_, rows)| rows.iter().map(|row| row.keys.as_str())).collect();
+    let builtin: Vec<(ghostwrite_core::ViewKind, &str)> =
+        cheatsheet.iter().flat_map(|(_, rows)| rows.iter().map(|row| (row.view, row.keys.as_str()))).collect();
     let mut seen = 0;
     for language in ghostwrite_core::Language::all().into_iter().map(Some).chain([None]) {
         for binding in ghostwrite_plugin::keys(language) {
@@ -432,7 +433,9 @@ fn plugins_keys_are_free(cx: &mut TestAppContext) {
             // The help writes `space v`, but `gv`.
             let joined = binding.keys.replace(' ', "");
             let taken = |keys: &&str| keys.contains(binding.keys) || keys.split_whitespace().any(|key| key == joined);
-            assert!(!builtin.iter().any(taken), "{} is built in", binding.keys);
+            // In its view, the code's keys are under that view's own, and both come first.
+            let there = builtin.iter().filter(|(view, _)| *view == binding.view || *view == ghostwrite_core::ViewKind::Code).map(|(_, keys)| keys);
+            assert!(!there.into_iter().any(taken), "{} is built in", binding.keys);
         }
     }
     assert!(seen >= 2, "the plugins bind some");

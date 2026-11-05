@@ -95,7 +95,7 @@ mod tests {
     fn only_the_plugins_name_themselves() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let mut found = vec![];
-        for krate in ["core", "lsp", "dap", "ai", "project", "terminal", "page", "model", "plugin", "plugin-api", "wasm", "view", "app"] {
+        for krate in ["core", "lsp", "dap", "ai", "project", "terminal", "page", "model", "plugin", "plugin-api", "wasm", "state", "app"] {
             walk(&root.join(krate).join("src"), &mut found);
         }
         assert!(found.is_empty(), "these name a plugin or a language:\n{}", found.join("\n"));

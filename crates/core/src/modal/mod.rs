@@ -7,10 +7,15 @@
 //! In normal and select mode a key is looked up in the [`Keymap`], which
 //! binds keys to named [`Command`]s, and every key is consumed, so stray
 //! letters never reach the text; in insert mode typed text arrives through
-//! [`Modal::insert`]. Tree mode drives the file tree instead of a buffer:
-//! [`Modal::tree_key`] turns keys into [`TreeCommand`]s. Terminal mode
-//! gives the keys to the user's shell: the editor sends them there itself,
-//! and it's entered and left like the review modes, so a story under
+//! [`Modal::insert`].
+//!
+//! The modes are the same in every view: the code, Files (the file tree),
+//! the Terminal, and a plugin's views (a tab of pages, and what's beside a
+//! file). [`Modal::view`] says which has the keys, and its layer of the
+//! keymap goes over the code's: in Files, `j` is a row down, and keys that
+//! are about text do nothing ([`Modal::view_key`]); on the terminal, insert
+//! mode types in its shell (the editor sends the keys there itself), entered
+//! and left with [`Modal::enter`] and [`Modal::leave`], so a story under
 //! review is still there to go back to.
 //!
 //! AI mode is for reviewing a story: the model's, or one of the editor's
@@ -23,17 +28,18 @@
 //!
 //! The modes live in their own files: `normal` (normal and select mode's
 //! commands, which AI mode shares), `insert` (with the completion menu's
-//! keys), and `tree`; the commands' names are in `command`, and which keys
-//! run them in `keymap`. Insert and tree mode's keys are their own.
+//! keys), and `views` (the keys of views with no text: Files, and what's
+//! beside a file); the commands' names are in `command`, and which keys run
+//! them in `keymap`. Insert mode's keys are its own.
 
 mod command;
 mod insert;
 mod keymap;
 mod normal;
-mod tree;
+mod views;
 
 pub use command::Command;
-pub use keymap::{Bound, CheatLine, DEFAULT, Keymap, Section, YOURS, parse_keys, sequence};
+pub use keymap::{Bound, CheatLine, DEFAULT, Keymap, Section, VIEWS, YOURS, parse_keys, sequence};
 
 #[cfg(test)]
 mod tests;
@@ -49,12 +55,8 @@ pub enum Mode {
     Normal,
     Insert,
     Select,
-    /// The file tree has the keyboard.
-    Tree,
     /// Reviewing a story.
     Ai,
-    /// The terminal has the keyboard.
-    Terminal,
 }
 
 impl Mode {
@@ -63,9 +65,7 @@ impl Mode {
             Mode::Normal => "NOR",
             Mode::Insert => "INS",
             Mode::Select => "SEL",
-            Mode::Tree => "TRE",
             Mode::Ai => "AI",
-            Mode::Terminal => "TERM",
         }
     }
 
@@ -73,6 +73,58 @@ impl Mode {
     pub fn reviewing(self) -> bool {
         self == Mode::Ai
     }
+}
+
+/// A view: a place on screen that takes the keys. Each has the modes, and its
+/// own layer of the keymap over the code's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum ViewKind {
+    /// A file's text, in either pane of a split.
+    #[default]
+    Code,
+    /// The file tree.
+    Files,
+    /// The terminal under the code.
+    Terminal,
+    /// A tab of a file's pages, which a plugin makes.
+    Pages,
+    /// What a plugin shows beside a file (Lean's goals, say).
+    Aside,
+}
+
+impl ViewKind {
+    pub const ALL: [ViewKind; 5] = [ViewKind::Code, ViewKind::Files, ViewKind::Terminal, ViewKind::Pages, ViewKind::Aside];
+
+    /// Its name, as the mode line and the config say it: `files`.
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewKind::Code => "code",
+            ViewKind::Files => "files",
+            ViewKind::Terminal => "terminal",
+            ViewKind::Pages => "pages",
+            ViewKind::Aside => "aside",
+        }
+    }
+
+    /// The view called `name`.
+    pub fn named(name: &str) -> Option<ViewKind> {
+        ViewKind::ALL.into_iter().find(|view| view.name() == name)
+    }
+
+    /// Whether it has no text for the keys to move through: only its own keys, and
+    /// those that work anywhere, do something there.
+    pub fn without_text(self) -> bool {
+        matches!(self, ViewKind::Files | ViewKind::Aside)
+    }
+}
+
+/// A way across the screen, from one view to the next (`ctrl-w h j k l`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Down,
+    Up,
+    Right,
 }
 
 /// A key, as modal editing sees it (the UI translates its keystrokes).
@@ -114,8 +166,22 @@ pub enum Effect {
     /// `gN`, `gP`: move the tab so many places along, as far as there are (`4gN`).
     MoveBufferNext(usize),
     MoveBufferPrev(usize),
-    /// `space e`: tree mode has begun; show the tree.
-    FocusTree,
+    /// `space e`: Files, or from there, back to the code.
+    Files,
+    /// Esc in a view that isn't the code: back to it.
+    FocusCode,
+    /// `ctrl-w h j k l`: the view that way.
+    Focus(Direction),
+    /// `i`, `a` and the other keys that type, on the terminal: type in its shell.
+    TypeInTerminal,
+    /// `j`, `k`, `ctrl-d`, `ctrl-u` on pages or beside a file: scroll so many lines
+    /// down (up, if less than none), or (`pages`) so many screens.
+    Scroll {
+        by: i32,
+        pages: bool,
+    },
+    /// `+`, `-`, `=` on pages: zoom in a step, out, or back to fitting the view.
+    Zoom(i32),
     /// `:`
     CommandLine,
     /// `space a`: ask the model about the selection or current line, or to change it.
@@ -169,7 +235,7 @@ pub enum Effect {
     Diagnostics,
     /// `space /`: search the project.
     Search,
-    /// `space t`: the terminal, and terminal mode.
+    /// `space t`: the terminal, typing in it; or from there, back to the code.
     Terminal,
     /// `gf`: the file named under the cursor (or selected), at the line and column after it.
     GotoFile,
@@ -209,7 +275,7 @@ pub enum Place {
     Bottom,
 }
 
-/// What a key does in tree mode.
+/// What a key does in Files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeCommand {
     Down(usize),
@@ -220,10 +286,8 @@ pub enum TreeCommand {
     Expand,
     /// `h`: close a folder, or go up to the one holding this row.
     Collapse,
-    /// Enter: open the file (and leave the tree), or toggle a folder.
+    /// Enter: open the file (and go to the code), or toggle a folder.
     Open,
-    /// Esc, or `space e` again: back to the buffer.
-    Leave,
     /// `a`, `r`, `d`: add, rename, trash.
     Add,
     Rename,
@@ -313,17 +377,17 @@ enum Pending {
 #[derive(Debug, Clone)]
 pub struct Modal {
     pub mode: Mode,
+    /// The view that has the keys: its layer of the keymap comes first.
+    pub view: ViewKind,
     /// Which keys run which command in normal and select mode.
     keymap: &'static Keymap,
-    /// The modes AI and terminal mode were entered from, innermost last.
+    /// The modes AI mode, and insert mode on the terminal, were entered from, innermost last.
     entered_from: Vec<Mode>,
     pending: Option<Pending>,
     count: Option<usize>,
     sticky_col: Option<usize>,
     /// The abbreviation being typed (`\alp`), from its backslash to the cursor.
     abbreviating: Option<(usize, usize)>,
-    /// The mode tree mode goes back to: normal, or AI mode while a story's up.
-    tree_from: Mode,
     /// Esc was pressed in a review: another stops it.
     stopping: bool,
     /// The last key would have edited, but a review was up.
@@ -341,13 +405,13 @@ impl Default for Modal {
     fn default() -> Self {
         Self {
             mode: Mode::Normal,
+            view: ViewKind::Code,
             keymap: Keymap::standard(),
             entered_from: vec![],
             pending: None,
             count: None,
             sticky_col: None,
             abbreviating: None,
-            tree_from: Mode::Normal,
             stopping: false,
             refused: false,
             register: None,
@@ -358,6 +422,16 @@ impl Default for Modal {
 }
 
 impl Modal {
+    /// The mode, and the view if it isn't the code (or its own name, `title`, a
+    /// plugin's view has), for the mode line: `NOR`, `INS · terminal`.
+    pub fn label(&self, title: Option<&str>) -> String {
+        match (self.view, title) {
+            (ViewKind::Code, _) => self.mode.label().to_string(),
+            (_, Some(title)) => format!("{} · {}", self.mode.label(), title.to_lowercase()),
+            (view, None) => format!("{} · {}", self.mode.label(), view.name()),
+        }
+    }
+
     /// Keys typed so far toward a command, for the status line.
     pub fn pending_label(&self) -> String {
         let count = self.count.map(|c| c.to_string()).unwrap_or_default();
@@ -403,7 +477,7 @@ impl Modal {
 
     /// The command `key` would run now, after the keys typed so far.
     pub fn command_for(&self, key: Key) -> Option<Command> {
-        match self.keymap.find(&self.keys_with(key)?) {
+        match self.keymap.find_in(self.view, &self.keys_with(key)?) {
             keymap::Found::Bound(Bound::Command(command)) => Some(*command),
             _ => None,
         }
@@ -412,7 +486,7 @@ impl Modal {
     /// Whether the keymap has `key`, after the keys typed so far: bound, or
     /// leading on to more.
     pub fn binds(&self, key: Key) -> bool {
-        self.keys_with(key).is_some_and(|keys| !matches!(self.keymap.find(&keys), keymap::Found::Nothing))
+        self.keys_with(key).is_some_and(|keys| !matches!(self.keymap.find_in(self.view, &keys), keymap::Found::Nothing))
     }
 
     /// Forget the command started, and its count.
@@ -430,14 +504,14 @@ impl Modal {
         t.buffer.commit(*t.selection);
     }
 
-    /// Typed text in insert mode; `false` (and nothing typed) in other modes.
+    /// Typed text in insert mode in the code; `false` (and nothing typed) in other modes or views.
     /// It goes in at the head (the bar cursor); the selection's other end
     /// stays on its text, as in helix. A typed opening bracket or quote comes
     /// with its closing one (see [`insert::paired`]), and typing a closing
     /// one that's next steps over it. In a language with abbreviations, a
     /// backslash starts an abbreviation (see [`Modal::abbreviate`]).
     pub fn insert(&mut self, text: &str, t: &mut Target) -> bool {
-        if self.mode != Mode::Insert {
+        if self.mode != Mode::Insert || self.view != ViewKind::Code {
             return false;
         }
         if t.abbreviations().is_some() {
@@ -475,7 +549,7 @@ impl Modal {
     /// Text typed in insert mode just as it is: no pairs, no abbreviations
     /// (what an input method is composing, or commits).
     pub fn insert_as_is(&mut self, text: &str, t: &mut Target) -> bool {
-        if self.mode != Mode::Insert {
+        if self.mode != Mode::Insert || self.view != ViewKind::Code {
             return false;
         }
         self.sticky_col = None;
@@ -494,8 +568,8 @@ impl Modal {
         self.count.take()
     }
 
-    /// Enter AI or terminal mode over the current one (an insert session should
-    /// be closed first). Entering the mode you're in changes nothing.
+    /// Enter AI mode over the current one, or insert mode on the terminal (an insert
+    /// session in the code should be closed first). Entering the mode you're in changes nothing.
     pub fn enter(&mut self, mode: Mode) {
         if self.mode == mode {
             return;
@@ -507,8 +581,8 @@ impl Modal {
         self.count = None;
     }
 
-    /// Leave AI or terminal mode for the mode it was entered from. If it isn't
-    /// the current mode but one further down, it's dropped from under it.
+    /// Leave AI mode, or insert mode on the terminal, for the mode it was entered from.
+    /// If it isn't the current mode but one further down, it's dropped from under it.
     pub fn leave(&mut self, mode: Mode) {
         if self.mode == mode {
             self.mode = self.entered_from.pop().unwrap_or(Mode::Normal);
@@ -517,10 +591,6 @@ impl Modal {
         } else if let Some(at) = self.entered_from.iter().rposition(|m| *m == mode) {
             // What was entered from it goes back to what it was entered from.
             self.entered_from.remove(at);
-        }
-        // Over while in the tree: the tree goes back to normal mode.
-        if self.tree_from == mode {
-            self.tree_from = Mode::Normal;
         }
     }
 
@@ -539,10 +609,11 @@ impl Modal {
     /// [`Modal::take_added`].
     pub fn key(&mut self, key: Key, regs: &mut dyn Registers, t: &mut Target) -> Outcome {
         self.added.clear();
-        if self.mode == Mode::Tree {
-            return self.tree_key(key);
+        if self.view.without_text() {
+            return self.view_key(key);
         }
-        if self.mode == Mode::Terminal {
+        // Typing on the terminal: the editor sends the keys to its shell.
+        if self.view == ViewKind::Terminal && self.mode == Mode::Insert {
             return Outcome::Ignored;
         }
         let stopping = std::mem::take(&mut self.stopping);
@@ -567,26 +638,6 @@ impl Modal {
             t.buffer.commit(*t.selection);
         }
         outcome
-    }
-
-    /// Enter tree mode (any insert session is closed first). From AI mode, leaving
-    /// it ([`Self::leave_tree`]) goes back there: a story's still up.
-    pub fn to_tree(&mut self) {
-        if self.mode != Mode::Tree {
-            self.tree_from = if self.mode == Mode::Ai { Mode::Ai } else { Mode::Normal };
-        }
-        self.mode = Mode::Tree;
-        self.pending = None;
-        self.count = None;
-    }
-
-    /// Out of tree mode, to where it was entered from.
-    pub fn leave_tree(&mut self) {
-        if self.mode == Mode::Tree {
-            self.mode = std::mem::replace(&mut self.tree_from, Mode::Normal);
-            self.pending = None;
-            self.count = None;
-        }
     }
 }
 

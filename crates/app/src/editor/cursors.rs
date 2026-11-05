@@ -12,7 +12,7 @@ use ghostwrite_core::{Effect, Key, Mode};
 use gpui::Context;
 use regex::Regex;
 
-pub(super) use ghostwrite_view::cursors::key_at_each;
+pub(super) use ghostwrite_state::cursors::key_at_each;
 
 use super::{Editor, Tab};
 

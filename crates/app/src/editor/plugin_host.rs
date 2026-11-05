@@ -8,8 +8,8 @@ use std::path::Path;
 
 use ghostwrite_plugin::manifest::Manifest;
 use ghostwrite_plugin::{Action, Context as Shown, Plugin, Reply, install};
-pub(super) use ghostwrite_view::plugin_host::apply_edits;
-use ghostwrite_view::plugin_host::{Heard, shown};
+pub(super) use ghostwrite_state::plugin_host::apply_edits;
+use ghostwrite_state::plugin_host::{Heard, shown};
 use gpui::{AppContext as _, Context};
 
 use super::commands::ManagePlugins;
