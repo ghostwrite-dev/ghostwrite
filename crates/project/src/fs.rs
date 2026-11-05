@@ -31,7 +31,7 @@ impl Encoding {
     /// The text in `bytes`, and how it's stored. A file with NUL bytes that isn't UTF-16 is
     /// binary, not text, and an error: opened as text, saving it would ruin it.
     pub fn decode(bytes: &[u8]) -> std::io::Result<(String, Encoding)> {
-        let units = |bytes: &[u8], make: fn([u8; 2]) -> u16| String::from_utf16_lossy(&bytes.chunks_exact(2).map(|b| make([b[0], b[1]])).collect::<Vec<u16>>());
+        let units = |bytes: &[u8], make: fn([u8; 2]) -> u16| String::from_utf16_lossy(&bytes.as_chunks::<2>().0.iter().map(|b| make(*b)).collect::<Vec<u16>>());
         if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
             return Ok((units(rest, u16::from_le_bytes), Encoding::Utf16Le));
         }
