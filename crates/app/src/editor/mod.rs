@@ -415,7 +415,8 @@ impl Editor {
 
     fn reread(&mut self, disk: project::Disk, cx: &mut Context<Self>) {
         // An insert session can't outlive its text being replaced.
-        let replaced = self.tab().is_some_and(|t| !t.doc.dirty && t.doc.path.as_deref().and_then(|p| disk.text(p)).is_some_and(|text| text != t.doc.text()));
+        let replaced =
+            self.tab().is_some_and(|t| !t.doc.dirty && t.doc.path.as_deref().and_then(|p| disk.text(p)).is_some_and(|text| *t.doc.buffer.rope() != *text));
         if replaced {
             self.leave_insert();
         }

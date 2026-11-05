@@ -59,7 +59,7 @@ impl Editor {
             let (doc, version) = (&tab.doc, tab.doc.buffer.version());
             let name = name_of(doc.path.as_ref(), doc.id as u64);
             if self.recovery.kept.get(&name) != Some(&version) {
-                let copy = json!({ "path": doc.path, "text": doc.buffer.text() });
+                let copy = json!({ "path": doc.path, "text": doc.buffer.to_string() });
                 writes.push((format!("{dir}/{name}"), copy.to_string()));
             }
             wanted.insert(name, version);
@@ -96,7 +96,7 @@ impl Editor {
             let open = path.as_ref().and_then(|path| self.project.open(path));
             let ix = open.unwrap_or_else(|| self.project.add(None, String::new()));
             let Some(tab) = self.project.tabs.get_mut(ix) else { continue };
-            if tab.doc.buffer.text() == text {
+            if *tab.doc.buffer.rope() == *text {
                 continue;
             }
             let selection = tab.view.selection;

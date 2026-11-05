@@ -79,13 +79,13 @@ impl Session {
         self
     }
 
-    fn text(&self) -> &str {
-        self.buffer.text()
+    fn text(&self) -> String {
+        self.buffer.to_string()
     }
 
     /// What's selected.
-    fn selected(&self) -> &str {
-        &self.buffer.text()[self.selection.bytes()]
+    fn selected(&self) -> String {
+        self.buffer.slice(self.selection.bytes()).into_owned()
     }
 
     /// What the last key gave back, for a key that's an effect.
@@ -148,15 +148,15 @@ fn i_and_a_keep_the_selection_as_helix_does() {
     let mut s = Session::new("one two\n");
     s.keys("e i X esc");
     assert_eq!(s.text(), "Xone two\n");
-    assert_eq!((s.selected(), s.selection.head), ("one", 1), "still the word, the cursor at its start");
+    assert_eq!((s.selected().as_str(), s.selection.head), ("one", 1), "still the word, the cursor at its start");
     let mut s = Session::new("one two\n");
     s.keys("e a XY esc");
     assert_eq!(s.text(), "oneXY two\n");
     assert_eq!(s.selected(), "oneXY", "after a, what was typed is selected too");
-    assert_eq!(s.selection.cursor(s.text()), 4, "with the cursor on the last char typed");
+    assert_eq!(s.selection.cursor(&s.buffer), 4, "with the cursor on the last char typed");
     let mut s = Session::new("ab\n");
     s.keys("i X esc");
-    assert_eq!((s.text(), s.selection), ("Xab\n", Range::point(1)), "a cursor alone stays one");
+    assert_eq!((s.text().as_str(), s.selection), ("Xab\n", Range::point(1)), "a cursor alone stays one");
     let mut s = Session::new("one two\n");
     s.keys("e i bs");
     assert_eq!(s.text(), "one two\n", "Backspace in insert mode takes the char before, never the selection");
@@ -193,7 +193,7 @@ fn o_opens_lines_as_enter_would() {
     assert_eq!((s.selection, s.modal.take_added()), (Range::point(2), vec![Range::point(3), Range::point(4)]), "three lines, each with a cursor");
     let mut s = Session::in_file("fn f() {\n}\n", "a.rs");
     s.keys("o");
-    assert_eq!((s.text(), s.selection.head), ("fn f() {\n    \n}\n", 13), "in a level after an open bracket");
+    assert_eq!((s.text().as_str(), s.selection.head), ("fn f() {\n    \n}\n", 13), "in a level after an open bracket");
     let mut s = Session::in_file("fn f() {\n}\n", "a.rs");
     s.keys("j O");
     assert_eq!(s.text(), "fn f() {\n    \n}\n", "O: as if Enter at the end of the line above");
@@ -346,7 +346,7 @@ fn terminal_mode_leaves_the_keys_alone_and_goes_back_where_it_came_from() {
     s.modal.enter(Mode::Ai);
     s.modal.enter(Mode::Terminal);
     s.keys("d d x");
-    assert_eq!((s.text(), s.modal.mode), ("abc\n", Mode::Terminal), "the editor sends them to the shell");
+    assert_eq!((s.text().as_str(), s.modal.mode), ("abc\n", Mode::Terminal), "the editor sends them to the shell");
     s.modal.leave(Mode::Terminal);
     assert_eq!(s.modal.mode, Mode::Ai, "back to the review");
 }
@@ -390,7 +390,7 @@ fn a_language_has_pairs_of_its_own() {
     };
     s.keys("i");
     typed(&mut s, "$x");
-    assert_eq!((s.text(), s.selection.head), ("$x$\n", 2), "`$` closes itself");
+    assert_eq!((s.text().as_str(), s.selection.head), ("$x$\n", 2), "`$` closes itself");
     typed(&mut s, "$ '");
     assert_eq!(s.text(), "$x$ '\n", "its close steps over, and `'` is just one here");
     let mut plain = Session::new("\n");
@@ -421,7 +421,7 @@ fn backslash_abbreviations_become_symbols() {
                 }
             };
         }
-        (s.buffer.text().to_string(), s.selection.head)
+        (s.buffer.to_string().to_string(), s.selection.head)
     };
     assert_eq!(typed("\\alpha").0, "α", "as soon as no longer one starts with it");
     assert_eq!(typed("\\a ").0, "α ", "finished by a space: the shortest it starts");
@@ -443,14 +443,14 @@ fn surround_delete_keeps_the_selection_on_the_text() {
     let mut s = Session::new("(a)é");
     s.selection = Range::new(1, 3);
     s.keys("m d (");
-    assert_eq!(s.buffer.text(), "aé");
+    assert_eq!(s.buffer.to_string(), "aé");
     assert_eq!(s.selection, Range::new(0, 1), "over the a, not inside é");
     s.keys("l d");
-    assert_eq!(s.buffer.text(), "a");
+    assert_eq!(s.buffer.to_string(), "a");
     let mut s = Session::new("x[ab]y");
     s.selection = Range::new(2, 4);
     s.keys("m r [ (");
-    assert_eq!((s.buffer.text(), s.selection), ("x(ab)y", Range::new(2, 4)));
+    assert_eq!((s.buffer.to_string().as_str(), s.selection), ("x(ab)y", Range::new(2, 4)));
 }
 
 #[test]
@@ -460,7 +460,7 @@ fn counts_reach_the_key_after_g_and_f() {
     assert_eq!(s.buffer.line_of(s.selection.head), 4, "5gg is line 5");
     let mut s = Session::new("axbxcx");
     s.keys("2 f x");
-    assert_eq!(s.selection.cursor(s.buffer.text()), 3, "2fx is the second x");
+    assert_eq!(s.selection.cursor(&s.buffer), 3, "2fx is the second x");
     let mut s = Session::new("ab");
     s.keys("y 9 9 9 9 9 9 9 9 9 9 9 9 9 9 p");
     assert!(s.buffer.len() < 1 << 20, "a huge count is capped");
@@ -473,45 +473,45 @@ fn on_a_bracket_its_own_pair_is_the_one() {
     let mut s = Session::new("f(a(b)c)");
     s.selection = Range::new(3, 4);
     s.keys("m i (");
-    assert_eq!(&s.buffer.text()[s.selection.bytes()], "b", "the inner pair, from its opening bracket");
+    assert_eq!(&s.buffer.slice(s.selection.bytes()), "b", "the inner pair, from its opening bracket");
     let mut s = Session::new("f(a(b)c)");
     s.selection = Range::new(5, 6);
     s.keys("m d (");
-    assert_eq!(s.buffer.text(), "f(abc)", "from its closing one");
+    assert_eq!(s.buffer.to_string(), "f(abc)", "from its closing one");
 }
 
 #[test]
 fn moves_are_by_characters_as_seen_and_columns_as_shown() {
     let mut s = Session::new("e\u{301}x");
     s.keys("d");
-    assert_eq!(s.buffer.text(), "x", "the accent goes with its letter");
+    assert_eq!(s.buffer.to_string(), "x", "the accent goes with its letter");
     let mut s = Session::new("\u{1f1f8}\u{1f1ea}x");
     s.keys("d");
-    assert_eq!(s.buffer.text(), "x", "a flag is one character");
+    assert_eq!(s.buffer.to_string(), "x", "a flag is one character");
     let mut s = Session::new("\tabc\n        xyz\n");
     s.selection = Range::new(2, 3);
     s.keys("j");
-    assert_eq!(s.selection.cursor(s.buffer.text()), "\tabc\n".len() + 5, "b is in column 5, on screen");
+    assert_eq!(s.selection.cursor(&s.buffer), "\tabc\n".len() + 5, "b is in column 5, on screen");
 }
 
 #[test]
 fn enter_trims_the_line_left_and_indents_after_an_opener() {
     let mut s = Session::new("");
     s.keys("i if_x:   ret");
-    assert_eq!(s.buffer.text(), "if_x:\n", "trimmed; no deeper outside Python");
+    assert_eq!(s.buffer.to_string(), "if_x:\n", "trimmed; no deeper outside Python");
     let mut s = Session::new("");
     s.keys("i call( ret");
-    assert_eq!(s.buffer.text(), "call(\n    ", "in a level after an open bracket");
+    assert_eq!(s.buffer.to_string(), "call(\n    ", "in a level after an open bracket");
 }
 
 #[test]
 fn indenting_lines_keeps_them_selected_whole() {
     let mut s = Session::new("a\nb\n");
     s.keys("x >");
-    assert_eq!(s.buffer.text(), "    a\nb\n");
-    assert_eq!(&s.buffer.text()[s.selection.bytes()], "    a\n");
+    assert_eq!(s.buffer.to_string(), "    a\nb\n");
+    assert_eq!(&s.buffer.slice(s.selection.bytes()), "    a\n");
     s.keys("x");
-    assert_eq!(&s.buffer.text()[s.selection.bytes()], "    a\nb\n", "so x takes in the next line");
+    assert_eq!(&s.buffer.slice(s.selection.bytes()), "    a\nb\n", "so x takes in the next line");
 }
 
 #[test]
@@ -519,25 +519,25 @@ fn a_word_around_at_the_end_takes_the_space_before() {
     let mut s = Session::new("foo bar");
     s.selection = Range::new(5, 6);
     s.keys("m a w d");
-    assert_eq!(s.buffer.text(), "foo");
+    assert_eq!(s.buffer.to_string(), "foo");
 }
 
 #[test]
 fn join_increment_comment_and_registers() {
     let mut s = Session::new("a\n   b\nc\n");
     s.keys("J");
-    assert_eq!(s.buffer.text(), "a b\nc\n", "J joins the next line, its indent gone");
+    assert_eq!(s.buffer.to_string(), "a b\nc\n", "J joins the next line, its indent gone");
     let mut s = Session::new("x = 41;\n");
     s.keys("ctrl-a");
-    assert_eq!(s.buffer.text(), "x = 42;\n", "the number after the cursor");
+    assert_eq!(s.buffer.to_string(), "x = 42;\n", "the number after the cursor");
     s.keys("3 ctrl-x");
-    assert_eq!(s.buffer.text(), "x = 39;\n");
+    assert_eq!(s.buffer.to_string(), "x = 39;\n");
     let mut s = Session::new("n -1\n");
     s.keys("ctrl-a ctrl-a");
-    assert_eq!(s.buffer.text(), "n 1\n", "negative numbers too");
+    assert_eq!(s.buffer.to_string(), "n 1\n", "negative numbers too");
     let mut s = Session::new("ab cd\n");
     s.keys("e \" a y \" a P");
-    assert_eq!(s.buffer.text(), "abab cd\n", "a named register");
+    assert_eq!(s.buffer.to_string(), "abab cd\n", "a named register");
 }
 
 #[test]
@@ -579,13 +579,13 @@ fn counts_go_where_helix_takes_them() {
 fn select_mode_ends_after_r_and_case_changes() {
     let mut s = Session::new("ab cd\n");
     s.keys("v l r x");
-    assert_eq!((s.text(), s.modal.mode), ("xx cd\n", Mode::Normal));
+    assert_eq!((s.text().as_str(), s.modal.mode), ("xx cd\n", Mode::Normal));
     s.keys("v l ~");
-    assert_eq!((s.text(), s.modal.mode), ("XX cd\n", Mode::Normal));
+    assert_eq!((s.text().as_str(), s.modal.mode), ("XX cd\n", Mode::Normal));
     s.keys("` w alt-`");
     assert_eq!(s.text(), "xx CD\n", "` lower case, alt-` upper");
     s.keys("v g h R");
-    assert_eq!((s.text(), s.modal.mode), ("xx CD\n", Mode::Select), "R with nothing yanked does nothing");
+    assert_eq!((s.text().as_str(), s.modal.mode), ("xx CD\n", Mode::Select), "R with nothing yanked does nothing");
     s.keys("y l R");
     assert_eq!(s.modal.mode, Mode::Normal, "with something, it ends select mode");
 }
@@ -635,11 +635,11 @@ fn finds_cross_lines_and_alt_dot_finds_again() {
     s.keys("f d");
     assert_eq!(s.selected(), "ab\ncd");
     s.keys("f tab");
-    assert_eq!(s.selection.cursor(s.text()), 5, "Tab finds a tab");
+    assert_eq!(s.selection.cursor(&s.buffer), 5, "Tab finds a tab");
     s.keys("g g f ret");
     assert_eq!(s.selected(), "ab\n", "Enter: the line's end");
     s.keys("g g f b alt-.");
-    assert_eq!(s.selection.cursor(s.text()), 9, "alt-. finds the next b");
+    assert_eq!(s.selection.cursor(&s.buffer), 9, "alt-. finds the next b");
 }
 
 #[test]
@@ -658,9 +658,9 @@ fn match_mode_counts_and_letters() {
 fn blank_lines_paragraphs_and_the_last_change() {
     let mut s = Session::new("a\nb\n");
     s.keys("2 ] space");
-    assert_eq!((s.text(), s.selection), ("a\n\n\nb\n", Range::point(0)), "blank lines below, the cursor where it was");
+    assert_eq!((s.text().as_str(), s.selection), ("a\n\n\nb\n", Range::point(0)), "blank lines below, the cursor where it was");
     s.keys("[ space");
-    assert_eq!((s.text(), s.selection), ("\na\n\n\nb\n", Range::point(1)), "and above");
+    assert_eq!((s.text().as_str(), s.selection), ("\na\n\n\nb\n", Range::point(1)), "and above");
     s.keys("g g ] p");
     assert_eq!(s.selected(), "a\n\n\n", "]p: on to the next paragraph");
     s.keys("g e g .");
@@ -676,7 +676,7 @@ fn trimming_splitting_and_shrinking_selections() {
     s.keys("%");
     s.keys("alt-s");
     let added = s.modal.take_added();
-    assert_eq!((s.selected(), added), ("ab", vec![Range::new(3, 5), Range::new(6, 8)]), "alt-s: a selection a line");
+    assert_eq!((s.selected().as_str(), added), ("ab", vec![Range::new(3, 5), Range::new(6, 8)]), "alt-s: a selection a line");
 }
 
 #[test]
@@ -691,7 +691,7 @@ fn reviewing_refuses_the_new_edits_too() {
 #[test]
 fn the_syntax_tree_selects_by_its_nodes() {
     let code = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn two() -> i32 {\n    add(1, 1)\n}\n";
-    let shown = |s: &Session| s.buffer.text()[s.selection.bytes()].to_string();
+    let shown = |s: &Session| s.buffer.to_string()[s.selection.bytes()].to_string();
     let mut s = Session::in_file(code, "a.rs");
     s.selection = Range::point(code.find("b: i32").unwrap());
     s.keys("alt-o");

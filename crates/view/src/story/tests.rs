@@ -106,7 +106,7 @@ impl Setup {
     }
 
     fn text(&self) -> String {
-        self.project.tab().unwrap().doc.text().to_string()
+        self.project.tab().unwrap().doc.buffer.to_string()
     }
 
     fn current(&self) -> Option<ItemId> {

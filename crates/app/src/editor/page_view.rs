@@ -99,7 +99,7 @@ impl Element for PageView {
             let max_width = pages.max_width().map(|width| px(width * theme.zoom));
             let stack = Stack::new(pages.sizes(), bounds.size.width, max_width, scroll.zoom, px(scroll.left));
             let buffer = &tab.doc.buffer;
-            let (selection, text) = (tab.view.selection, buffer.text());
+            let (selection, text) = (tab.view.selection, buffer);
             let cursor = selection.cursor(text);
 
             // Scroll to what was asked for. Only a tab showing its own text follows

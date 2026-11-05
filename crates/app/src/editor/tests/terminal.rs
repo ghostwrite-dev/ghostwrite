@@ -483,7 +483,7 @@ fn printed(text: &'static str) -> impl Fn(&Editor) -> bool {
 /// What's selected where the keys are reading.
 fn read_selected(e: &Editor) -> String {
     let tab = e.keyed().unwrap();
-    tab.doc.text()[tab.view.selection.bytes()].to_string()
+    tab.doc.buffer.slice(tab.view.selection.bytes()).into_owned()
 }
 
 #[gpui::test]
@@ -505,7 +505,7 @@ fn esc_esc_reads_the_terminal_with_the_editors_keys(cx: &mut TestAppContext) {
     assert!(t.read(|e| e.reading_cursor()).is_some(), "with the cursor on it");
 
     t.keys("d");
-    assert_eq!(t.read(|e| e.keyed().unwrap().doc.text().lines().filter(|l| l.trim() == "4").count()), 1, "it can't be edited");
+    assert_eq!(t.read(|e| e.keyed().unwrap().doc.buffer.to_string().lines().filter(|l| l.trim() == "4").count()), 1, "it can't be edited");
     assert_eq!(t.text(), "x\n");
 
     t.keys("i");

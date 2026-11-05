@@ -17,7 +17,6 @@ pub fn pair_of(c: char) -> (char, char) {
 pub fn matching_bracket(b: &Buffer, at: usize) -> Option<usize> {
     let c = b.char_at(at)?;
     let (open, close) = BRACKETS.into_iter().find(|(o, cl)| *o == c || *cl == c)?;
-    let text = b.text();
     let mut depth = 0i32;
     let mut step = |(i, ch): (usize, char), toward: char, away: char| {
         if ch == away {
@@ -30,23 +29,18 @@ pub fn matching_bracket(b: &Buffer, at: usize) -> Option<usize> {
         }
         None
     };
-    if c == open {
-        text[at..].char_indices().find_map(|(i, ch)| step((at + i, ch), close, open))
-    } else {
-        text[..b.next(at)].char_indices().rev().find_map(|ch| step(ch, open, close))
-    }
+    if c == open { b.chars_at(at).find_map(|ch| step(ch, close, open)) } else { b.chars_before(b.next(at)).find_map(|ch| step(ch, open, close)) }
 }
 
 /// The nearest `open`…`close` pair around `from..to`: where the open and
 /// close chars are. Same-char pairs (quotes) are looked for on the line.
 pub fn surrounding(b: &Buffer, from: usize, to: usize, (open, close): (char, char)) -> Option<(usize, usize)> {
-    let text = b.text();
     if open == close {
         let start = b.line_start_at(from);
         let end = b.line_end_at(b.prev(to).max(from));
-        let left = text[start..from].rfind(open)? + start;
+        let left = b.chars_before(from).take_while(|(i, _)| *i >= start).find(|(_, c)| *c == open)?.0;
         let after = to.max(if from == to { b.next(from) } else { from }).min(end);
-        let right = text[after..end].find(close)? + after;
+        let right = b.chars_at(after).take_while(|(i, _)| *i < end).find(|(_, c)| *c == close)?.0;
         return Some((left, right));
     }
     // On the pair's own bracket (a one-char selection): that pair, as in helix.
@@ -59,7 +53,7 @@ pub fn surrounding(b: &Buffer, from: usize, to: usize, (open, close): (char, cha
     }
     let mut depth = 0i32;
     let mut left = None;
-    for (i, ch) in text[..from].char_indices().rev() {
+    for (i, ch) in b.chars_before(from) {
         if ch == close {
             depth += 1;
         } else if ch == open && depth == 0 {
@@ -95,8 +89,7 @@ pub fn pair_around(b: &Buffer, from: usize, to: usize, which: char, count: usize
 /// an object of a syntax tree or a diff, which there aren't here, and
 /// anything else is a pair of itself.
 pub fn text_object(b: &Buffer, r: Range, object: char, around: bool, count: usize) -> Option<Range> {
-    let text = b.text();
-    let cursor = r.cursor(text);
+    let cursor = r.cursor(b);
     match object {
         'w' | 'W' => {
             let long = object == 'W';
@@ -104,13 +97,14 @@ pub fn text_object(b: &Buffer, r: Range, object: char, around: bool, count: usiz
             if !is_word(b.char_at(cursor)?) {
                 return None;
             }
-            let mut start = text[..cursor].char_indices().rev().take_while(|(_, c)| is_word(*c)).last().map_or(cursor, |(i, _)| i);
-            let mut end = text[cursor..].char_indices().find(|(_, c)| !is_word(*c)).map_or(text.len(), |(i, _)| cursor + i);
+            let blank = |(_, c): &(usize, char)| matches!(c, ' ' | '\t');
+            let mut start = b.chars_before(cursor).take_while(|(_, c)| is_word(*c)).last().map_or(cursor, |(i, _)| i);
+            let mut end = b.chars_at(cursor).find(|(_, c)| !is_word(*c)).map_or(b.len(), |(i, _)| i);
             if around {
-                let after = text[end..].len() - text[end..].trim_start_matches([' ', '\t']).len();
+                let after = b.chars_at(end).find(|c| !blank(c)).map_or(b.len(), |(i, _)| i) - end;
                 // None after (the line's last word): the space before goes instead.
                 if after == 0 {
-                    start = text[..start].trim_end_matches([' ', '\t']).len();
+                    start = b.chars_before(start).find(|c| !blank(c)).map_or(0, |(i, c)| i + c.len_utf8());
                 }
                 end += after;
             }
@@ -129,8 +123,8 @@ pub fn text_object(b: &Buffer, r: Range, object: char, around: bool, count: usiz
 /// the blank lines after; as helix's `textobject_paragraph`.
 fn paragraph(b: &Buffer, r: Range, around: bool, count: usize) -> Range {
     let (empty, lines) = (|line: usize| movement::empty_line(b, line), b.line_count());
-    let r = r.min_width_1(b.text());
-    let cursor = r.cursor(b.text());
+    let r = r.min_width_1(b);
+    let cursor = r.cursor(b);
     let mut line = b.line_of(cursor);
     let curr_line_empty = empty(line);
     let last_char = b.prev(movement::start_of(b, line + 1)) == cursor;

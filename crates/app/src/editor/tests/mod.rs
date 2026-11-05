@@ -74,7 +74,7 @@ impl Setup<'_> {
     }
 
     fn text(&mut self) -> String {
-        self.read(|e| e.tab().map(|t| t.doc.text().to_string()).unwrap_or_default())
+        self.read(|e| e.tab().map(|t| t.doc.buffer.to_string()).unwrap_or_default())
     }
 
     fn status(&mut self) -> Option<String> {

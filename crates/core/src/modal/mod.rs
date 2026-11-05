@@ -452,7 +452,10 @@ impl Modal {
         }
         let at = t.selection.head;
         self.sticky_col = None;
-        let (before, after) = (&t.buffer.text()[..at], &t.buffer.text()[at..]);
+        // The chars either side are all that's looked at.
+        let before: String = t.buffer.chars_before(at).next().map(|(_, c)| c).into_iter().collect();
+        let after: String = t.buffer.char_at(at).into_iter().collect();
+        let (before, after) = (before.as_str(), after.as_str());
         let mut typed = text.chars();
         if let (Some(c), None) = (typed.next(), typed.next()) {
             let pairs = t.pairs();

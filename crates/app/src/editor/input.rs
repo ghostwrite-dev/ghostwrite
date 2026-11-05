@@ -3,7 +3,7 @@
 
 use std::ops::Range as Bytes;
 
-use ghostwrite_core::{Mode, Range};
+use ghostwrite_core::{Mode, Range, Rope};
 use gpui::{Bounds, Context, EntityInputHandler, Pixels, Point, UTF16Selection, Window};
 
 use super::{Autoscroll, Editor};
@@ -54,10 +54,10 @@ impl Editor {
 
 impl EntityInputHandler for Editor {
     fn text_for_range(&mut self, range: Bytes<usize>, actual: &mut Option<Bytes<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
-        let text = self.tab()?.doc.text();
-        let range = from_utf16(text, &range);
-        actual.replace(to_utf16(text, &range));
-        Some(text[range].to_string())
+        let text = &self.tab()?.doc.buffer;
+        let range = from_utf16(text.rope(), &range);
+        actual.replace(to_utf16(text.rope(), &range));
+        Some(text.slice(range).into_owned())
     }
 
     /// In insert mode, where typing goes: the head (the selection stays, and isn't typed over).
@@ -65,11 +65,11 @@ impl EntityInputHandler for Editor {
         let tab = self.tab()?;
         let sel = tab.view.selection;
         let range = if self.modal.mode == Mode::Insert { sel.head..sel.head } else { sel.bytes() };
-        Some(UTF16Selection { range: to_utf16(tab.doc.text(), &range), reversed: sel.head < sel.anchor })
+        Some(UTF16Selection { range: to_utf16(tab.doc.buffer.rope(), &range), reversed: sel.head < sel.anchor })
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Bytes<usize>> {
-        Some(to_utf16(self.tab()?.doc.text(), self.marked.as_ref()?))
+        Some(to_utf16(self.tab()?.doc.buffer.rope(), self.marked.as_ref()?))
     }
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
@@ -80,12 +80,12 @@ impl EntityInputHandler for Editor {
         // Committing what was being composed. One char is as if typed: a
         // quote from a dead key (US International's `"`) closes itself.
         let composed = self.marked.is_some() && text.chars().nth(1).is_some();
-        let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.text(), &range?)));
+        let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.buffer.rope(), &range?)));
         self.insert_text(text, replacing, composed, cx);
     }
 
     fn replace_and_mark_text_in_range(&mut self, range: Option<Bytes<usize>>, text: &str, _: Option<Bytes<usize>>, _: &mut Window, cx: &mut Context<Self>) {
-        let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.text(), &range?)));
+        let replacing = self.marked.take().or_else(|| Some(from_utf16(self.tab()?.doc.buffer.rope(), &range?)));
         let start = replacing.as_ref().map(|r| r.start).or_else(|| self.tab().map(|t| t.view.selection.head));
         self.insert_text(text, replacing, true, cx);
         if self.modal.mode == Mode::Insert {
@@ -102,21 +102,13 @@ impl EntityInputHandler for Editor {
     }
 }
 
-fn to_utf16(text: &str, range: &Bytes<usize>) -> Bytes<usize> {
-    let units = |at: usize| text[..at.min(text.len())].chars().map(char::len_utf16).sum::<usize>();
+/// Bytes as the system counts them, in UTF-16 units: the rope has them counted.
+fn to_utf16(text: &Rope, range: &Bytes<usize>) -> Bytes<usize> {
+    let units = |at: usize| text.char_to_utf16_cu(text.byte_to_char(at.min(text.len_bytes())));
     units(range.start)..units(range.end)
 }
 
-fn from_utf16(text: &str, range: &Bytes<usize>) -> Bytes<usize> {
-    let byte = |units: usize| {
-        let mut count = 0;
-        for (i, c) in text.char_indices() {
-            if count >= units {
-                return i;
-            }
-            count += c.len_utf16();
-        }
-        text.len()
-    };
+fn from_utf16(text: &Rope, range: &Bytes<usize>) -> Bytes<usize> {
+    let byte = |units: usize| text.char_to_byte(text.utf16_cu_to_char(units.min(text.len_utf16_cu())));
     byte(range.start)..byte(range.end)
 }

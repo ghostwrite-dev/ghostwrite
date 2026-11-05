@@ -511,8 +511,8 @@ fn replacing_goes_through_the_project_as_steps(cx: &mut TestAppContext) {
     assert_eq!(t.text(), "old one\nkeep\nold old\n", "nothing yet");
     t.keys("tab tab tab");
     assert!(!t.reviewing());
-    let doc = t.read(|e| e.project.tabs.iter().find(|tab| tab.doc.name().as_ref() as &str == "doc.txt").unwrap().doc.buffer.text().to_string());
-    let other = t.read(|e| e.project.tabs.iter().find(|tab| tab.doc.name().as_ref() as &str == "other.txt").map(|tab| tab.doc.buffer.text().to_string()));
+    let doc = t.read(|e| e.project.tabs.iter().find(|tab| tab.doc.name().as_ref() as &str == "doc.txt").unwrap().doc.buffer.to_string());
+    let other = t.read(|e| e.project.tabs.iter().find(|tab| tab.doc.name().as_ref() as &str == "other.txt").map(|tab| tab.doc.buffer.to_string()));
     assert_eq!(doc, "new one\nkeep\nnew new\n");
     assert_eq!(other.unwrap_or_else(|| std::fs::read_to_string(t.dir.join("other.txt")).unwrap()), "an new line\n");
 }

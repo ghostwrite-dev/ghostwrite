@@ -289,7 +289,7 @@ impl Project {
                 // Our own write (typing may have gone on since), or read before it landed.
                 continue;
             }
-            if ghostwrite_project::fs::normalize(text.clone()).0 == tab.doc.text() {
+            if *tab.doc.buffer.rope() == ghostwrite_project::fs::normalize(text.clone()).0 {
                 // Our own write, or someone wrote what's on screen.
                 changed |= tab.doc.dirty;
                 tab.doc.on_disk();

@@ -184,7 +184,7 @@ impl StoryState {
     /// The files as they'd be with `accepted` applied.
     fn assume(&self, project: &Project, accepted: &[Item]) -> Option<Assumed> {
         let asked = project.tabs.by_id(self.doc)?;
-        let asked = Asked { path: asked.doc.path.as_deref(), text: asked.doc.text(), lines: self.lines.clone() };
+        let asked = Asked { path: asked.doc.path.as_deref(), text: asked.doc.buffer.whole_text(), lines: self.lines.clone() };
         Some(self.placer.assume(&asked, &project.files(), accepted))
     }
 

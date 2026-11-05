@@ -79,10 +79,10 @@ fn the_language_server_formats_renames_and_lists_symbols(cx: &mut TestAppContext
         }
         panic!("timed out waiting for {what}: {}", t.text());
     };
-    wait(&mut t, "formatting", &|e| e.tab().unwrap().doc.text().contains("i32 {\n    a + b\n}"), &|t| {
+    wait(&mut t, "formatting", &|e| e.tab().unwrap().doc.buffer.to_string().contains("i32 {\n    a + b\n}"), &|t| {
         t.command("format");
     });
-    wait(&mut t, "renaming", &|e| e.tab().unwrap().doc.text().matches("plus").count() == 2, &|t| {
+    wait(&mut t, "renaming", &|e| e.tab().unwrap().doc.buffer.to_string().matches("plus").count() == 2, &|t| {
         t.keys("escape g g f d space r");
         assert_eq!(
             t.read(|e| e.prompt.as_ref().map(|p| p.field.clone())).map(|f| t.cx.update(|_, cx| f.read(cx).text().to_string())).as_deref(),
@@ -370,7 +370,7 @@ fn a_preview_beside_its_file_keeps_up_and_clicking_it_keeps_the_keys(cx: &mut Te
     assert_ne!(made(&mut t), first, "and made again as the file changes");
 
     let place = t.read(|e| {
-        e.tab().unwrap().doc.rendered.as_ref().unwrap().pages.as_ref().unwrap().cursor(e.tab().unwrap().doc.buffer.text().find("cat").unwrap()).unwrap()
+        e.tab().unwrap().doc.rendered.as_ref().unwrap().pages.as_ref().unwrap().cursor(e.tab().unwrap().doc.buffer.to_string().find("cat").unwrap()).unwrap()
     });
     let bounds = t.cx.debug_bounds("other-pane").expect("drawn");
     let scale = f32::from(bounds.size.width) / 300.;
@@ -378,7 +378,7 @@ fn a_preview_beside_its_file_keeps_up_and_clicking_it_keeps_the_keys(cx: &mut Te
     t.cx.simulate_click(at, gpui::Modifiers::none());
     t.cx.run_until_parked();
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ"), "the keys stay on the file");
-    let (text, cursor) = t.read(|e| (e.tab().unwrap().doc.buffer.text().to_string(), e.tab().unwrap().cursor()));
+    let (text, cursor) = t.read(|e| (e.tab().unwrap().doc.buffer.to_string(), e.tab().unwrap().cursor()));
     // Within a character or so: the pane's edge moves the pages a little from where this works it out.
     assert!(
         text[cursor..].trim_start().starts_with("cat") || text[cursor..].starts_with("at"),

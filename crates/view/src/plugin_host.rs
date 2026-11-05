@@ -27,7 +27,7 @@ pub fn shown(root: &Path, tab: &Tab) -> Shown {
         root: root.display().to_string(),
         path: tab.doc.path.as_ref().map(|path| path.display().to_string()),
         language: tab.doc.language.map(|language| language.name.to_string()),
-        text: tab.doc.text().to_string(),
+        text: tab.doc.buffer.whole_text().to_string(),
         cursor: tab.cursor(),
         selection: selection.from()..selection.to(),
     }
@@ -51,7 +51,7 @@ pub fn apply_edits(tab: &mut Tab, mut edits: Vec<(Range<usize>, String)>) -> Res
     if tab.doc.read_only() {
         return Err("this file is read-only".into());
     }
-    let text = tab.doc.text();
+    let text = &tab.doc.buffer;
     edits.sort_by_key(|(range, _)| range.start);
     let mut reached = 0;
     for (range, _) in &edits {
@@ -63,7 +63,7 @@ pub fn apply_edits(tab: &mut Tab, mut edits: Vec<(Range<usize>, String)>) -> Res
         }
         reached = range.end;
     }
-    edits.retain(|(range, new)| text[range.clone()] != **new);
+    edits.retain(|(range, new)| text.slice(range.clone()) != **new);
     if edits.is_empty() {
         return Ok(());
     }

@@ -45,7 +45,7 @@ impl Editor {
     fn edit_file(&mut self, path: &std::path::Path, edits: &[TextEdit]) -> bool {
         let Some(ix) = self.project.tabs.index_of_path(path).or_else(|| self.project.open(path)) else { return false };
         let Some(tab) = self.project.tabs.get_mut(ix) else { return false };
-        let placed = convert::apply(tab.doc.text(), edits);
+        let placed = convert::apply(&tab.doc.buffer, edits);
         if placed.is_empty() {
             return false;
         }
@@ -59,7 +59,7 @@ impl Editor {
             }
             tab.doc.buffer.edit(range, &text);
         }
-        tab.view.selection = Range::point(cursor).within(tab.doc.text());
+        tab.view.selection = Range::point(cursor).within(&tab.doc.buffer);
         tab.doc.buffer.commit(tab.view.selection);
         tab.sync();
         true
@@ -84,7 +84,7 @@ impl Editor {
         }
         let Some(tab) = self.tab() else { return };
         let Some(lsp) = tab.doc.lsp.as_ref() else { return };
-        let position = convert::position(tab.doc.text(), tab.cursor());
+        let position = convert::position(&tab.doc.buffer, tab.cursor());
         let answer = lsp.request("textDocument/references", json!({ "position": position, "context": { "includeDeclaration": true } }));
         cx.spawn(async move |this, cx| {
             let found = answer.await.ok().and_then(Result::ok).map(|v| convert::locations(&v)).unwrap_or_default();
@@ -124,7 +124,7 @@ impl Editor {
         }
         let Some(tab) = self.tab() else { return };
         let word = ghostwrite_core::textobject::text_object(&tab.doc.buffer, Range::point(tab.cursor()), 'w', false, 1)
-            .map(|r| tab.doc.text()[r.bytes()].to_string())
+            .map(|r| tab.doc.buffer.slice(r.bytes()).into_owned())
             .unwrap_or_default();
         self.open_prompt(PromptKind::Rename, &word, window, cx);
     }
@@ -133,7 +133,7 @@ impl Editor {
     pub(super) fn rename_to(&mut self, name: &str, cx: &mut Context<Self>) {
         let Some(tab) = self.tab() else { return };
         let Some(lsp) = tab.doc.lsp.as_ref() else { return };
-        let position = convert::position(tab.doc.text(), tab.cursor());
+        let position = convert::position(&tab.doc.buffer, tab.cursor());
         let answer = lsp.request("textDocument/rename", json!({ "position": position, "newName": name }));
         cx.spawn(async move |this, cx| {
             let answer = answer.await.ok();
@@ -154,7 +154,7 @@ impl Editor {
         }
         let Some(tab) = self.tab() else { return };
         let Some(lsp) = tab.doc.lsp.as_ref() else { return };
-        let text = tab.doc.text();
+        let text = &tab.doc.buffer;
         let bytes = tab.view.selection.bytes();
         let range = json!({ "start": convert::position(text, bytes.start), "end": convert::position(text, bytes.end) });
         // The diagnostics there, as the server sent them back would be best; their ranges and messages do.
@@ -232,7 +232,7 @@ impl Editor {
         cx.spawn_in(window, async move |this, cx| {
             let found = answer.await.ok().and_then(Result::ok).map(|v| convert::symbols(&v)).unwrap_or_default();
             this.update_in(cx, |this, window, cx| {
-                let Some(text) = this.project.tabs.by_id_mut(doc).map(|t| t.doc.text().to_string()) else { return };
+                let Some(text) = this.project.tabs.by_id_mut(doc).map(|t| t.doc.buffer.rope().clone()) else { return };
                 if found.is_empty() {
                     return this.project.say("no symbols in this file");
                 }
@@ -300,7 +300,7 @@ impl Editor {
         if !lsp.signature_triggers().iter().any(|t| typed.ends_with(t.as_str())) && self.signature.is_none() {
             return;
         }
-        let (answer, asked) = self.signature_asked.ask(lsp, "textDocument/signatureHelp", tab.doc.text(), tab.view.selection.head);
+        let (answer, asked) = self.signature_asked.ask(lsp, "textDocument/signatureHelp", tab.doc.buffer.rope(), tab.view.selection.head);
         cx.spawn(async move |this, cx| {
             let found = answer.await.ok().and_then(Result::ok).and_then(|v| convert::signature(&v));
             this.update(cx, |this, cx| {

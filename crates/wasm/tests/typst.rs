@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use ghostwrite_core::Rope;
 use ghostwrite_page::Pages;
 use ghostwrite_plugin::Plugin as _;
 use ghostwrite_plugin::manifest::Manifest;
@@ -321,18 +322,18 @@ fn tinymist_jumps_completes_and_rechecks_while_typing() {
 
     // Completion after `#gr`, before saving anything.
     let typed = format!("{text}#gr");
-    doc.changed(&typed, None);
+    doc.changed(&Rope::from_str(&typed), None);
     let items = convert::completions(answer(doc.ask("textDocument/completion", &typed, typed.len())), &typed, typed.len());
     assert!(items.iter().any(|c| c.text == "greet"), "{:?}", items.iter().map(|c| &c.label).collect::<Vec<_>>());
 
     // An error typed (not saved) is reported, and goes away once fixed.
     let broken = format!("{text}#nope\n");
-    doc.changed(&broken, None);
+    doc.changed(&Rope::from_str(&broken), None);
     wait(|| match events.try_recv() {
         Ok(Event::Diagnostics { diagnostics, .. }) if diagnostics.iter().any(|d| d.message.contains("nope")) => Some(()),
         _ => None,
     });
-    doc.changed(text, None);
+    doc.changed(&Rope::from_str(text), None);
     wait(|| match events.try_recv() {
         Ok(Event::Diagnostics { path, diagnostics, .. }) if path.ends_with("main.typ") && diagnostics.is_empty() => Some(()),
         _ => None,

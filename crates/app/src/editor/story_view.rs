@@ -124,7 +124,7 @@ impl Live {
         let keys = |what: &str| (ask.is_none()).then(|| Row::Hint(format!("{file}{what}{progress}"), theme.muted_foreground));
         match &item {
             Item::Step(step) => {
-                let Some(view) = placement::view(doc.text(), step, located.near.clone()) else {
+                let Some(view) = placement::view(doc.buffer.whole_text(), step, located.near.clone()) else {
                     let line = located.near.end.saturating_sub(1).min(doc.buffer.last_line());
                     let rows = vec![Row::Hint(format!("{file}can't place this one · ⏎ redirect"), theme.danger)];
                     return (vec![], Some(block(line, BlockSpec { indent: 0, rows, prompt: prompt("⏎ send · esc") }, theme)));
@@ -145,7 +145,9 @@ impl Live {
                 (struck.into_iter().collect(), Some(block(view.anchor, BlockSpec { indent: lead, rows, prompt: prompt("⏎ send · esc") }, theme)))
             }
             Item::Note(Note { at, text, line, .. }) => {
-                let Some(lines) = lines::find(doc.text(), at, located.near.clone(), line.is_some()).map(|f| f.lines) else { return (vec![], None) };
+                let Some(lines) = lines::find(doc.buffer.whole_text(), at, located.near.clone(), line.is_some()).map(|f| f.lines) else {
+                    return (vec![], None);
+                };
                 let marked = Decoration::background(doc.buffer.lines_range(lines.clone()), theme.info.opacity(0.12));
                 let mut rows = vec![Row::Prose(text.clone())];
                 rows.extend(keys("⇥ next · ⏎ ask"));

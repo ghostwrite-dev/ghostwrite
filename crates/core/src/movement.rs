@@ -5,7 +5,7 @@ use crate::buffer::Buffer;
 use crate::selection::Range;
 
 pub fn move_horizontally(b: &Buffer, r: Range, forward: bool, count: usize, extend: bool) -> Range {
-    let mut at = r.cursor(b.text());
+    let mut at = r.cursor(b);
     for _ in 0..count {
         let next = if forward { b.next(at) } else { b.prev(at) };
         if next == at {
@@ -13,7 +13,7 @@ pub fn move_horizontally(b: &Buffer, r: Range, forward: bool, count: usize, exte
         }
         at = next;
     }
-    r.put_cursor(b.text(), at, extend)
+    r.put_cursor(b, at, extend)
 }
 
 /// Returns the new range and the column to keep for the next vertical move.
@@ -21,15 +21,15 @@ pub fn move_horizontally(b: &Buffer, r: Range, forward: bool, count: usize, exte
 /// wide characters two columns.
 pub fn move_vertically(b: &Buffer, r: Range, down: bool, count: usize, extend: bool, sticky: Option<usize>, tab_width: usize) -> (Range, usize) {
     use unicode_segmentation::UnicodeSegmentation as _;
-    let cursor = r.cursor(b.text());
+    let cursor = r.cursor(b);
     let line = b.line_of(cursor);
-    let col = sticky.unwrap_or_else(|| crate::display_width(&b.text()[b.line_start(line)..cursor], tab_width));
+    let col = sticky.unwrap_or_else(|| crate::display_width(&b.slice(b.line_start(line)..cursor), tab_width));
     let target = if down { line.saturating_add(count).min(b.line_count() - 1) } else { line.saturating_sub(count) };
     let (start, end) = (b.line_start(target), b.line_end(target));
     // The character covering that column, or the line's end.
-    let row = &b.text()[start..end];
+    let row = b.slice(start..end);
     let at = row.grapheme_indices(true).find(|(i, g)| crate::display_width(&row[..i + g.len()], tab_width) > col).map_or(end, |(i, _)| start + i);
-    (r.put_cursor(b.text(), at, extend), col)
+    (r.put_cursor(b, at, extend), col)
 }
 
 /// The last char before the line break; the line start on an empty line.
@@ -100,21 +100,21 @@ fn reached_target(target: Word, prev: char, next: char) -> bool {
 
 /// `CharHelpers::range_to_target` from helix. The head walks one char at a
 /// time in the target's direction until it reaches the target.
-fn range_to_target(text: &str, target: Word, origin: Range) -> Range {
+fn range_to_target(b: &Buffer, target: Word, origin: Range) -> Range {
     let back = target.is_prev();
     // The char the head steps over next, and where it lands.
     let step = |at: usize| -> Option<(char, usize)> {
         if back {
-            let c = text[..at].chars().next_back()?;
-            Some((c, at - c.len_utf8()))
+            let (at, c) = b.chars_before(at).next()?;
+            Some((c, at))
         } else {
-            let c = text[at..].chars().next()?;
+            let c = b.char_at(at)?;
             Some((c, at + c.len_utf8()))
         }
     };
     let mut anchor = origin.anchor;
     let mut head = origin.head;
-    let mut prev_ch = if back { text[head..].chars().next() } else { text[..head].chars().next_back() };
+    let mut prev_ch = if back { b.char_at(head) } else { b.chars_before(head).next().map(|(_, c)| c) };
 
     // Skip any initial line breaks.
     while let Some((c, next)) = step(head) {
@@ -145,8 +145,7 @@ fn range_to_target(text: &str, target: Word, origin: Range) -> Range {
 
 /// `word_move` from helix: the range selecting the next word in `target`'s direction.
 pub fn word_move(b: &Buffer, r: Range, count: usize, target: Word) -> Range {
-    let text = b.text();
-    if (target.is_prev() && r.head == 0) || (!target.is_prev() && r.head == text.len()) {
+    if (target.is_prev() && r.head == 0) || (!target.is_prev() && r.head == b.len()) {
         return r;
     }
     let start = if target.is_prev() {
@@ -158,7 +157,7 @@ pub fn word_move(b: &Buffer, r: Range, count: usize, target: Word) -> Range {
     };
     let mut range = start;
     for _ in 0..count {
-        let next = range_to_target(text, target, range);
+        let next = range_to_target(b, target, range);
         if next == range {
             break;
         }
@@ -170,18 +169,17 @@ pub fn word_move(b: &Buffer, r: Range, count: usize, target: Word) -> Range {
 /// `f`/`t`/`F`/`T`: select up to (`till`) or through the `count`th `ch`
 /// after the cursor (or before it), over lines too, as in helix.
 pub fn find_char(b: &Buffer, r: Range, ch: char, forward: bool, till: bool, count: usize, extend: bool) -> Option<Range> {
-    let text = b.text();
-    let cursor = r.cursor(text);
+    let cursor = r.cursor(b);
     let at = if forward {
         let mut from = b.next(cursor);
         if till {
             from = b.next(from);
         }
-        let found = text[from..].char_indices().filter(|(_, c)| *c == ch).nth(count - 1)?.0 + from;
+        let found = b.chars_at(from).filter(|(_, c)| *c == ch).nth(count - 1)?.0;
         if till { b.prev(found) } else { found }
     } else {
         let upto = if till { b.prev(cursor) } else { cursor };
-        let found = text[..upto].char_indices().rev().filter(|(_, c)| *c == ch).nth(count - 1)?.0;
+        let found = b.chars_before(upto).filter(|(_, c)| *c == ch).nth(count - 1)?.0;
         if till { b.next(found) } else { found }
     };
     Some(found_from(b, r, at, extend))
@@ -190,7 +188,7 @@ pub fn find_char(b: &Buffer, r: Range, ch: char, forward: bool, till: bool, coun
 /// `f`/`t`/`F`/`T` then Enter: to the `count`th line's end on (or back),
 /// as helix's `find_char_line_ending_motion` goes.
 pub fn find_line_end(b: &Buffer, r: Range, forward: bool, till: bool, count: usize, extend: bool) -> Option<Range> {
-    let cursor = r.cursor(b.text());
+    let cursor = r.cursor(b);
     let line = b.line_of(cursor);
     let at = if forward {
         let end = b.line_end(line);
@@ -211,8 +209,7 @@ pub fn find_line_end(b: &Buffer, r: Range, forward: bool, till: bool, count: usi
 
 /// What a find selects: from the cursor to `at`, or, extending, the selection on to it.
 fn found_from(b: &Buffer, r: Range, at: usize, extend: bool) -> Range {
-    let text = b.text();
-    if extend { r.put_cursor(text, at, true) } else { Range::point(r.cursor(text)).put_cursor(text, at, true) }
+    if extend { r.put_cursor(b, at, true) } else { Range::point(r.cursor(b)).put_cursor(b, at, true) }
 }
 
 /// Whether `line` is empty: nothing but its line break (the line after a
@@ -228,7 +225,7 @@ pub(crate) fn start_of(b: &Buffer, line: usize) -> usize {
 
 /// `[p`: back to the start of the `count`th paragraph, as helix's `move_prev_paragraph`.
 pub fn prev_paragraph(b: &Buffer, r: Range, count: usize, extend: bool) -> Range {
-    let text = b.text();
+    let text = b;
     let r = r.min_width_1(text);
     let cursor = r.cursor(text);
     let mut line = b.line_of(cursor);
@@ -261,7 +258,7 @@ pub fn prev_paragraph(b: &Buffer, r: Range, count: usize, extend: bool) -> Range
 
 /// `]p`: on to the start of the `count`th paragraph, as helix's `move_next_paragraph`.
 pub fn next_paragraph(b: &Buffer, r: Range, count: usize, extend: bool) -> Range {
-    let text = b.text();
+    let text = b;
     let r = r.min_width_1(text);
     let cursor = r.cursor(text);
     let mut line = b.line_of(cursor);
@@ -295,7 +292,7 @@ pub fn next_paragraph(b: &Buffer, r: Range, count: usize, extend: bool) -> Range
 /// The line `at` is on, and its column on screen.
 fn screen_position(b: &Buffer, at: usize, tab_width: usize) -> (usize, usize) {
     let line = b.line_of(at);
-    (line, crate::display_width(&b.text()[b.line_start(line)..at], tab_width))
+    (line, crate::display_width(&b.slice(b.line_start(line)..at), tab_width))
 }
 
 /// Where on `line` the screen column `column` starts a character (or is
@@ -303,7 +300,7 @@ fn screen_position(b: &Buffer, at: usize, tab_width: usize) -> (usize, usize) {
 fn at_screen_column(b: &Buffer, line: usize, column: usize, tab_width: usize) -> Option<usize> {
     use unicode_segmentation::UnicodeSegmentation as _;
     let (start, end) = (b.line_start(line), b.line_end(line));
-    let row = &b.text()[start..end];
+    let row = b.slice(start..end);
     let starts = row.grapheme_indices(true).map(|(i, _)| i).chain([row.len()]);
     let mut widths = starts.map(|i| (i, crate::display_width(&row[..i], tab_width)));
     widths.find(|&(_, width)| width >= column).filter(|&(_, width)| width == column).map(|(i, _)| start + i)
@@ -313,7 +310,7 @@ fn at_screen_column(b: &Buffer, line: usize, column: usize, tab_width: usize) ->
 /// `copy_selection_on_line`: as wide, in the same screen columns, `count`
 /// of them, passing lines too short to hold one.
 pub fn copy_to_lines(b: &Buffer, r: Range, below: bool, count: usize, tab_width: usize) -> Vec<Range> {
-    let text = b.text();
+    let text = b;
     let wide = r.min_width_1(text);
     // The chars the head and anchor are on.
     let (head, anchor) = if wide.anchor < wide.head { (b.prev(wide.head), wide.anchor) } else { (wide.head, b.prev(wide.anchor)) };
@@ -348,7 +345,7 @@ pub fn extend_line_below(b: &Buffer, r: Range, count: usize) -> Range {
     let (from, to) = (r.from(), r.to());
     let len = b.len();
     let start = b.line_start_at(from);
-    let full = from == start && to > from && (to == len || b.text()[..to].ends_with('\n'));
+    let full = from == start && to > from && (to == len || b.rope().byte(to - 1) == b'\n');
     let next_line = |at: usize| (b.line_end_at(at) + 1).min(len);
     let mut head = if full { to } else { next_line(if to > from { b.prev(to) } else { to }) };
     for _ in 0..if full { count } else { count - 1 } {

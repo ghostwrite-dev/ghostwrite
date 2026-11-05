@@ -86,14 +86,14 @@ impl Tab {
     /// Select `range` and bring it into view.
     pub fn select(&mut self, range: Range, scroll: Autoscroll) {
         self.view.others.clear();
-        self.view.selection = range.within(self.doc.text());
+        self.view.selection = range.within(&self.doc.buffer);
         self.view.autoscroll = Some(scroll);
     }
 
     /// After an edit: the document syncs, and the selection stays in the text.
     pub fn sync(&mut self) {
         self.doc.sync();
-        self.view.selection = self.view.selection.within(self.doc.text());
+        self.view.selection = self.view.selection.within(&self.doc.buffer);
     }
 
     /// Take the file's new text from disk as one undo step, the selection moving with the text.
@@ -109,14 +109,14 @@ impl Tab {
 
     /// The char the block cursor is on.
     pub fn cursor(&self) -> usize {
-        self.view.selection.cursor(self.doc.text())
+        self.view.selection.cursor(&self.doc.buffer)
     }
 
     /// The cursor as (zero-based line, char column).
     pub fn cursor_position(&self) -> (usize, usize) {
         let (buffer, cursor) = (&self.doc.buffer, self.cursor());
         let line = buffer.line_of(cursor);
-        (line, buffer.text()[buffer.line_start(line)..cursor].chars().count())
+        (line, buffer.slice(buffer.line_start(line)..cursor).chars().count())
     }
 
     /// The diagnostic under the cursor, most severe first.
@@ -192,7 +192,7 @@ impl Tabs {
 
     /// The text of an open file, as it is on screen.
     pub fn text_of(&self, path: &Path) -> Option<&str> {
-        self.tabs.iter().find(|t| t.doc.path.as_deref() == Some(path)).map(|t| t.doc.text())
+        self.tabs.iter().find(|t| t.doc.path.as_deref() == Some(path)).map(|t| t.doc.buffer.whole_text())
     }
 
     /// Keep `doc` from being taken over, even while it's untouched; `None`, no longer.

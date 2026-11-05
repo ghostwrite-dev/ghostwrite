@@ -4,7 +4,8 @@
 //! [`language`] (it has none of its own: plugins add them), and [`syntax`] over
 //! any grammar, its highlights and text objects, and [`abbreviation`]s.
 //!
-//! Every offset is a byte offset into the text, always on a char boundary.
+//! The text is a rope ([`Rope`]): what reads it reads a line or a range at a
+//! time. Every offset is a byte offset into it, always on a char boundary.
 
 pub mod abbreviation;
 pub mod buffer;
@@ -15,12 +16,15 @@ pub mod movement;
 pub mod nodes;
 pub mod selection;
 pub mod syntax;
+pub mod text;
 pub mod textobject;
 
 pub use buffer::{Buffer, Edit};
 pub use language::Language;
 pub use modal::{Command, Effect, Key, Keymap, MenuKey, Modal, Mode, Outcome, Place, Registers, Review, Target, TreeCommand};
+pub use ropey::{Rope, RopeSlice};
 pub use selection::Range;
+pub use text::Text;
 
 /// The boundary after the character at `i` (or the end): a character as
 /// it's seen, which may be several code points (`é` as `e` and an accent,

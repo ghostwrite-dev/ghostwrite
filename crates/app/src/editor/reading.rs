@@ -38,15 +38,15 @@ pub(super) struct Reading {
 /// Where byte `at` is: its line, and char along it.
 fn place(buffer: &Buffer, at: usize) -> (usize, usize) {
     let line = buffer.line_of(at);
-    (line, buffer.text()[buffer.line_start(line)..at].chars().count())
+    (line, buffer.slice(buffer.line_start(line)..at).chars().count())
 }
 
 /// The byte of the `ch`th char of `line`, or its end.
 fn offset(buffer: &Buffer, (line, ch): (usize, usize)) -> usize {
     let line = line.min(buffer.last_line());
-    let (start, end) = (buffer.line_start(line), buffer.line_end(line));
-    let text = &buffer.text()[start..end];
-    let text = text.strip_suffix('\n').unwrap_or(text);
+    let start = buffer.line_start(line);
+    let text = buffer.line(line);
+    let text = text.strip_suffix('\n').unwrap_or(&text);
     start + text.char_indices().nth(ch).map_or(text.len(), |(at, _)| at)
 }
 
@@ -150,7 +150,7 @@ impl Editor {
         let Some(shell) = self.terminal.shells.iter().find(|shell| shell.number == number) else { return };
         let Some(reading) = self.terminal.reading.as_mut().filter(|reading| reading.shell == number) else { return };
         let transcript = shell.terminal.transcript();
-        if transcript.text != reading.tab.doc.text() {
+        if *reading.tab.doc.buffer.rope() != transcript.text {
             reading.tab.reload(transcript.text.clone());
         }
         if reading.with_the_shell {
@@ -166,7 +166,7 @@ impl Editor {
     fn show_reading(&self, scroll: bool) {
         let Some(reading) = self.terminal.reading.as_ref() else { return };
         let Some(shell) = self.terminal.shells.iter().find(|shell| shell.number == reading.shell) else { return };
-        let (buffer, text) = (&reading.tab.doc.buffer, reading.tab.doc.text());
+        let (buffer, text) = (&reading.tab.doc.buffer, &reading.tab.doc.buffer);
         let selection = reading.tab.view.selection.min_width_1(text);
         let cell = |at: usize| cell_of(&reading.transcript, place(buffer, at));
         let (from, to) = (cell(selection.from()), cell(buffer.prev(selection.to())));
@@ -232,12 +232,12 @@ impl Editor {
     /// `space a` while reading: ask about what's selected on the terminal (or the cursor's line).
     pub(super) fn ask_about_output(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.keyed() else { return };
-        let (text, selection) = (tab.doc.text(), tab.view.selection);
+        let (text, selection) = (&tab.doc.buffer, tab.view.selection);
         let quoted = if selection.is_wide(text) {
-            text[selection.bytes()].to_string()
+            text.slice(selection.bytes()).into_owned()
         } else {
             let line = tab.doc.buffer.line_of(tab.cursor());
-            text[tab.doc.buffer.lines_range(line..line + 1)].trim_end().to_string()
+            text.slice(tab.doc.buffer.lines_range(line..line + 1)).trim_end().to_string()
         };
         self.stop_reading();
         self.open_story("", window, cx);
@@ -252,11 +252,12 @@ impl Editor {
     pub(super) fn goto_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
         let Some(tab) = self.keyed() else { return };
-        let (text, selection) = (tab.doc.text(), tab.view.selection);
+        let (text, selection) = (&tab.doc.buffer, tab.view.selection);
         let near = tab.doc.path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
-        // What's selected, if it's a file; or what's under the cursor.
-        let selected = selection.is_wide(text).then(|| text[selection.bytes()].trim().to_string());
-        let under = path_at(text, tab.cursor());
+        // What's selected, if it's a file; or what's under the cursor (a path is on one line).
+        let selected = selection.is_wide(text).then(|| text.slice(selection.bytes()).trim().to_string());
+        let (cursor, line) = (tab.cursor(), text.line_of(tab.cursor()));
+        let under = path_at(&text.line(line), cursor - text.line_start(line));
         let found = selected.iter().chain([&under]).find_map(|named| located(named, &self.project.root, near.as_deref()));
         let named = selected.unwrap_or(under);
         let Some((path, line, column)) = found else {
@@ -286,7 +287,7 @@ mod tests {
 
     #[test]
     fn a_place_is_a_line_and_char() {
-        let buffer = Buffer::new("ab\nçd\n".to_string());
+        let buffer = Buffer::new("ab\nçd\n");
         assert_eq!(place(&buffer, 5), (1, 1));
         assert_eq!(offset(&buffer, (1, 1)), 5);
         assert_eq!(offset(&buffer, (1, 9)), 6, "past the end: the line's end");

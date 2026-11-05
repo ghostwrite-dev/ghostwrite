@@ -135,11 +135,11 @@ impl StoryState {
         let tab = project.tab_mut()?;
         let sel = tab.view.selection;
         let kept = from_select.then_some(sel);
-        let (from, to) = if sel.is_wide(tab.doc.text()) { (sel.from(), tab.doc.buffer.prev(sel.to())) } else { (tab.cursor(), tab.cursor()) };
+        let (from, to) = if sel.is_wide(&tab.doc.buffer) { (sel.from(), tab.doc.buffer.prev(sel.to())) } else { (tab.cursor(), tab.cursor()) };
         let buffer = &tab.doc.buffer;
         let lines = buffer.line_of(from)..buffer.line_of(to) + 1;
         let span = buffer.lines_range(lines.clone());
-        let end = span.end - usize::from(buffer.text()[span.clone()].ends_with('\n'));
+        let end = span.end - usize::from(span.end > span.start && buffer.char_at(span.end - 1) == Some('\n'));
         tab.view.selection = Range::new(span.start, end.max(span.start));
         let mut state = StoryState::new(tab.doc.id, lines, root);
         state.selection = kept;

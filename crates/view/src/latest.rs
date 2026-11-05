@@ -13,7 +13,13 @@ pub struct Latest {
 impl Latest {
     /// Ask `method` about `offset` in `text`, cancelling what's still out:
     /// the answer, and the question's number, to check it's still the latest.
-    pub fn ask(&mut self, lsp: &ghostwrite_lsp::Document, method: &str, text: &str, offset: usize) -> (ghostwrite_lsp::document::Answer, u64) {
+    pub fn ask(
+        &mut self,
+        lsp: &ghostwrite_lsp::Document,
+        method: &str,
+        text: &ghostwrite_core::Rope,
+        offset: usize,
+    ) -> (ghostwrite_lsp::document::Answer, u64) {
         self.cancel(lsp);
         self.asked += 1;
         let (id, answer) = lsp.ask_cancelable(method, text, offset);
@@ -22,7 +28,7 @@ impl Latest {
     }
 
     /// Another question with the latest (asked together, both answers wanted).
-    pub fn also(&mut self, lsp: &ghostwrite_lsp::Document, method: &str, text: &str, offset: usize) -> ghostwrite_lsp::document::Answer {
+    pub fn also(&mut self, lsp: &ghostwrite_lsp::Document, method: &str, text: &ghostwrite_core::Rope, offset: usize) -> ghostwrite_lsp::document::Answer {
         let (id, answer) = lsp.ask_cancelable(method, text, offset);
         self.pending.push(id);
         answer

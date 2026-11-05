@@ -11,7 +11,7 @@
 use std::ops::Range as Bytes;
 
 use ghostwrite_core::syntax::SCOPES;
-use ghostwrite_core::{Mode, Range};
+use ghostwrite_core::{Buffer, Mode, Range};
 use ghostwrite_lsp::Severity;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, FocusHandle, Font, GlobalElementId,
@@ -121,7 +121,7 @@ impl Snapshot {
             mode,
             line_count: tab.doc.buffer.line_count(),
             selection: tab.view.selection,
-            others: tab.view.others.iter().map(|other| other.within(tab.doc.text())).collect(),
+            others: tab.view.others.iter().map(|other| other.within(&tab.doc.buffer)).collect(),
             autoscroll: tab.view.autoscroll.clone(),
             scroll_top: px(tab.view.scroll_top),
             cursor,
@@ -157,8 +157,8 @@ impl Metrics {
 }
 
 /// A file's rows, wrapped: for which file, version of its text and width,
-/// the rows above each line, and the total last.
-pub(super) type Wrapped = ((DocId, u64, usize), std::sync::Arc<Vec<usize>>);
+/// how many rows each line takes, and the rows above each line, and the total last.
+pub(super) type Wrapped = ((DocId, u64, usize), Vec<usize>, std::sync::Arc<Vec<usize>>);
 
 /// Where lines are, top to bottom, with the block pushing those below it down.
 struct Geometry {
@@ -352,7 +352,7 @@ impl Element for CodeView {
         let cursor_row = {
             let doc = &self.shown(self.editor.read(cx)).doc;
             let start = doc.buffer.line_start(snap.cursor_line);
-            let rows = wrap_rows(&doc.text()[start..doc.buffer.line_end(snap.cursor_line)], cols);
+            let rows = wrap_rows(&doc.buffer.line(snap.cursor_line), cols);
             rows.iter().position(|r| snap.cursor - start < r.end).unwrap_or(rows.len() - 1)
         };
         let geometry = Geometry { line_height: metrics.line_height, rows: offsets, block: self.lay_out_block(sizes, window, cx), cursor_row };
@@ -365,7 +365,7 @@ impl Element for CodeView {
         let scroll_left = px(0.);
         let flash = snap.motion.flash.clone().filter(|_| animate).and_then(|(range, since)| Some((range, 1. - progress(since, FLASH)?)));
         let (quads, cursor_bounds, cursor_glyph, cursor_glide) = {
-            let text = self.shown(self.editor.read(cx)).doc.text();
+            let text = &self.shown(self.editor.read(cx)).doc.buffer;
             let mut quads = self.backgrounds(&snap, &lines, text, &theme, text_bounds, scroll_left, metrics.line_height, focused, flash.clone());
             let mut cursor_quads = vec![];
             let (cell, mut glyph) = cursor(&snap, &lines, text, &metrics, &theme, text_bounds.left() - scroll_left, focused, &mut cursor_quads, window);
@@ -497,7 +497,6 @@ impl CodeView {
     ) -> (Vec<LaidLine>, Vec<Glyph>, Vec<PaintQuad>) {
         let editor = self.editor.read(cx);
         let doc = &self.shown(editor).doc;
-        let text = doc.text();
         let first = geometry.first_below(scroll_top, snap.line_count);
         // Only the diagnostics near what's on screen are looked through, line by line.
         let (near_start, near_end) = (doc.buffer.line_start(first), doc.buffer.line_end(first + 400));
@@ -506,18 +505,22 @@ impl CodeView {
         let mut gutter = vec![];
         let mut marks = vec![];
         let breakpoints = doc.path.as_deref().and_then(|path| editor.breakpoints_in(path));
+        // The colors of what's on screen (a few screens' worth at most), moved past any edit since they were worked out.
+        let last = (first + 400).min(snap.line_count.saturating_sub(1));
+        let highlights = doc.highlights_in(doc.buffer.line_start(first)..doc.buffer.line_end(last));
         for line in first..snap.line_count {
             let y = bounds.top() + geometry.top(line) - scroll_top;
             if y > bounds.bottom() {
                 break;
             }
-            let (start, end) = (doc.buffer.line_start(line), doc.buffer.line_end(line));
-            let rows = wrap_rows(&text[start..end], cols);
+            let start = doc.buffer.line_start(line);
+            let text = doc.buffer.line(line);
+            let rows = wrap_rows(&text, cols);
             let last = rows.len() - 1;
             for (i, row) in rows.into_iter().enumerate() {
                 let (from, to) = (start + row.start, start + row.end);
-                let (shown, map) = expand_tabs(&text[from..to]);
-                let runs = line_runs(from..to, &map, doc.cached_highlights(), &self.decorations, &near, theme, &metrics.font);
+                let (shown, map) = expand_tabs(&text[row]);
+                let runs = line_runs(from..to, &map, &highlights, &self.decorations, &near, theme, &metrics.font);
                 let shaped = window.text_system().shape_line(SharedString::from(shown), metrics.size, &runs, None);
                 lines.push(LaidLine { start: from, end: to, last: i == last, y: y + metrics.line_height * i as f32, shaped, map });
             }
@@ -561,7 +564,7 @@ impl CodeView {
         &self,
         snap: &Snapshot,
         lines: &[LaidLine],
-        text: &str,
+        text: &Buffer,
         theme: &Theme,
         text_bounds: Bounds<Pixels>,
         scroll_left: Pixels,
@@ -607,7 +610,7 @@ impl CodeView {
                     span(&other.bytes(), theme.selection, &mut quads);
                 }
                 let at = other.cursor(text).min(text.len());
-                let next = text[at..].chars().next().map_or(at, |c| if c == '\n' { at } else { at + c.len_utf8() });
+                let next = text.char_at(at).map_or(at, |c| if c == '\n' { at } else { at + c.len_utf8() });
                 if next > at {
                     span(&(at..next), theme.accent.opacity(0.7), &mut quads);
                 } else if let Some(laid) = lines.iter().find(|l| l.holds(at)) {
@@ -685,7 +688,7 @@ impl CodeView {
 fn cursor(
     snap: &Snapshot,
     lines: &[LaidLine],
-    text: &str,
+    text: &Buffer,
     metrics: &Metrics,
     theme: &Theme,
     origin_x: Pixels,
@@ -695,7 +698,7 @@ fn cursor(
 ) -> (Option<Bounds<Pixels>>, Option<Glyph>) {
     let Some(laid) = lines.iter().find(|l| l.holds(snap.cursor)) else { return (None, None) };
     let x = origin_x + laid.x(snap.cursor);
-    let next = ghostwrite_core::next_char(text, snap.cursor).min(laid.end);
+    let next = text.next(snap.cursor).min(laid.end);
     let width = if next > snap.cursor { (origin_x + laid.x(next) - x).max(metrics.char_width * 0.5) } else { metrics.char_width };
     let cell = Bounds::new(point(x, laid.y), gpui::size(width, metrics.line_height));
     if !focused || matches!(snap.mode, Mode::Tree | Mode::Terminal) {
@@ -711,7 +714,7 @@ fn cursor(
         return (Some(cell), None);
     }
     quads.push(fill(cell, color));
-    let glyph = text[snap.cursor..].chars().next().filter(|c| !c.is_whitespace()).map(|c| {
+    let glyph = text.char_at(snap.cursor).filter(|c| !c.is_whitespace()).map(|c| {
         let glyph: SharedString = c.to_string().into();
         let shaped = window.text_system().shape_line(glyph.clone(), metrics.size, &[metrics.run(glyph.len(), theme.cursor_text)], None);
         (shaped, cell.origin)
@@ -825,7 +828,7 @@ fn line_runs(
 impl Editor {
     /// Rows above each line of the active file wrapped at `cols`, and the
     /// total last: worked out once per version of the text and width, not
-    /// every frame.
+    /// every frame, and after an edit only for the lines it changed.
     fn row_offsets(&mut self, other: Option<super::DocId>, cols: usize) -> std::sync::Arc<Vec<usize>> {
         let tab = match other {
             Some(doc) => self.project.tabs.by_id(doc),
@@ -833,21 +836,34 @@ impl Editor {
         };
         let Some(doc) = tab.map(|t| &t.doc) else { return Default::default() };
         let key = (doc.id, doc.buffer.version(), cols);
-        let cache = if other.is_some() { &self.wrapped_other } else { &self.wrapped };
-        if let Some((cached, offsets)) = cache
+        let cache = if other.is_some() { &mut self.wrapped_other } else { &mut self.wrapped };
+        if let Some((cached, _, offsets)) = cache.as_ref()
             && *cached == key
         {
             return offsets.clone();
         }
-        let text = doc.text();
-        let mut offsets = Vec::with_capacity(doc.buffer.line_count() + 1);
+        // The rows of each line as they were, if they're of this file at this width:
+        // each edit's lines are taken out, and those it put in wrapped again (after them all).
+        const AGAIN: usize = usize::MAX;
+        let kept = cache.take().filter(|((id, _, width), ..)| *id == doc.id && *width == cols).and_then(|((_, version, _), mut counts, _)| {
+            let edits = doc.buffer.changes_since(version).filter(|edits| edits.len() < 1000)?;
+            for edit in edits {
+                let (first, old_last, new_last) = (edit.start_position.row, edit.old_end_position.row, edit.new_end_position.row);
+                counts.splice(first..=old_last.min(counts.len() - 1), std::iter::repeat_n(AGAIN, new_last - first + 1));
+            }
+            Some(counts)
+        });
+        let mut counts = kept.filter(|counts| counts.len() == doc.buffer.line_count()).unwrap_or_else(|| vec![AGAIN; doc.buffer.line_count()]);
+        for (line, count) in counts.iter_mut().enumerate().filter(|(_, count)| **count == AGAIN) {
+            *count = wrap_rows(&doc.buffer.line(line), cols).len();
+        }
+        let mut offsets = Vec::with_capacity(counts.len() + 1);
         offsets.push(0);
-        for line in 0..doc.buffer.line_count() {
-            let count = wrap_rows(&text[doc.buffer.line_start(line)..doc.buffer.line_end(line)], cols).len();
-            offsets.push(offsets[line] + count);
+        for count in &counts {
+            offsets.push(offsets[offsets.len() - 1] + count);
         }
         let offsets = std::sync::Arc::new(offsets);
-        *(if other.is_some() { &mut self.wrapped_other } else { &mut self.wrapped }) = Some((key, offsets.clone()));
+        *cache = Some((key, counts, offsets.clone()));
         offsets
     }
 }

@@ -13,12 +13,12 @@ impl Editor {
         let Some(lsp) = doc.lsp.as_ref() else { return };
         let version = doc.buffer.version();
         let Some(previous) = doc.semantic.ask(version) else { return };
-        let (answer, text, id) = (lsp.semantic_tokens(previous), doc.buffer.text().to_string(), doc.id);
+        let (answer, text, id) = (lsp.semantic_tokens(previous), doc.buffer.rope().clone(), doc.id);
         cx.spawn(async move |this, cx| {
             let value = answer.await.ok().and_then(Result::ok);
             this.update(cx, |this, cx| {
                 let Some(doc) = this.project.tabs.by_id_mut(id).map(|t| &mut t.doc) else { return };
-                if doc.semantic_answered(value, text) {
+                if doc.semantic_answered(value, text, version) {
                     cx.notify();
                 }
             })

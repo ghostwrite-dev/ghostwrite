@@ -2,7 +2,7 @@
 //! the char before the head (or at it, for an empty range) is the block
 //! cursor.
 
-use crate::{next_char, prev_char};
+use crate::text::Text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Range {
@@ -36,18 +36,18 @@ impl Range {
     }
 
     /// The char the block cursor sits on.
-    pub fn cursor(&self, text: &str) -> usize {
-        if self.head > self.anchor { prev_char(text, self.head) } else { self.head }
+    pub fn cursor(&self, text: &(impl Text + ?Sized)) -> usize {
+        if self.head > self.anchor { text.prev_boundary(self.head) } else { self.head }
     }
 
     /// Helix treats an empty range as covering the char under the cursor.
-    pub fn min_width_1(&self, text: &str) -> Self {
-        if self.is_empty() && self.head < text.len() { Self::new(self.anchor, next_char(text, self.head)) } else { *self }
+    pub fn min_width_1(&self, text: &(impl Text + ?Sized)) -> Self {
+        if self.is_empty() && self.head < text.byte_len() { Self::new(self.anchor, text.next_boundary(self.head)) } else { *self }
     }
 
     /// Wider than the one char under the cursor.
-    pub fn is_wide(&self, text: &str) -> bool {
-        self.to() > next_char(text, self.from().min(text.len()))
+    pub fn is_wide(&self, text: &(impl Text + ?Sized)) -> bool {
+        self.to() > text.next_boundary(self.from())
     }
 
     pub fn flip(&self) -> Self {
@@ -59,31 +59,24 @@ impl Range {
     }
 
     /// Clamped to `text`, each end on a char boundary (moved back if it was inside one).
-    pub fn within(&self, text: &str) -> Self {
-        let snap = |at: usize| {
-            let mut at = at.min(text.len());
-            while !text.is_char_boundary(at) {
-                at -= 1;
-            }
-            at
-        };
-        Self::new(snap(self.anchor), snap(self.head))
+    pub fn within(&self, text: &(impl Text + ?Sized)) -> Self {
+        Self::new(text.floor_boundary(self.anchor), text.floor_boundary(self.head))
     }
 
     /// Move the cursor to `at`, extending from the anchor when `extend` is
     /// set (`Range::put_cursor` in helix).
-    pub fn put_cursor(&self, text: &str, at: usize, extend: bool) -> Self {
+    pub fn put_cursor(&self, text: &(impl Text + ?Sized), at: usize, extend: bool) -> Self {
         if !extend {
             return Self::point(at);
         }
         let anchor = if self.head >= self.anchor && at < self.anchor {
-            next_char(text, self.anchor)
+            text.next_boundary(self.anchor)
         } else if self.head < self.anchor && at >= self.anchor {
-            prev_char(text, self.anchor)
+            text.prev_boundary(self.anchor)
         } else {
             self.anchor
         };
-        if anchor <= at { Self::new(anchor, next_char(text, at)) } else { Self::new(anchor, at) }
+        if anchor <= at { Self::new(anchor, text.next_boundary(at)) } else { Self::new(anchor, at) }
     }
 }
 

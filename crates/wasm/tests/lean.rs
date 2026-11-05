@@ -174,8 +174,9 @@ fn lean_shows_goals_and_output_and_progress() {
     let mut buffer = ghostwrite_core::Buffer::new(text);
     let at = text.find("n : Nat").unwrap();
     buffer.edit(at..at, "m ");
-    let edited = buffer.text().to_string();
-    doc.changed(&edited, buffer.take_edits());
+    let edited = buffer.to_string();
+    let edits = buffer.take_edits();
+    doc.changed(buffer.rope(), edits);
     let goal = answer(doc.ask("$/lean/plainGoal", &edited, edited.find("rfl").unwrap()));
     assert_eq!(goal["goals"][0], "m n : Nat\n⊢ n + 0 = n", "Lean has the edit");
     let all = convert::token_data(&answer(doc.semantic_tokens(None)), None).expect("tokens").1;

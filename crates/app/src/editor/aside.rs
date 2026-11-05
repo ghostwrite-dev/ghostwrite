@@ -85,7 +85,7 @@ impl Editor {
             return;
         }
         aside.asked = Some(now);
-        let text = doc.buffer.text();
+        let text = doc.buffer.rope();
         let mut methods = aside.panel.requests().iter();
         let Some(first) = methods.next() else { return };
         let (first, question) = aside.latest.ask(lsp, first, text, cursor);

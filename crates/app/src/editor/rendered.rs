@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use ghostwrite_core::{Key, Mode, Range};
+use ghostwrite_core::{Key, Mode, Range, Text as _};
 use ghostwrite_page::{OnlyPages, Pages};
 use gpui::{AppContext as _, Context, Pixels, Point, px};
 
@@ -44,7 +44,8 @@ impl Editor {
         let at_own_size = doc.language.is_some_and(|language| language.pages_at_own_size);
         let version = doc.buffer.version();
         // What's only pages is made from the file: its text is only lines to move by.
-        let text = if only_pages { String::new() } else { doc.buffer.text().to_string() };
+        // Its pages are made from all of it.
+        let text = if only_pages { String::new() } else { doc.buffer.to_string() };
         let Some(rendered) = doc.rendered.as_mut().filter(|r| r.renderer.is_some() && !r.making && r.made != Some(version)) else { return };
         // After an edit (not opening it), the pages go to it.
         let edited = rendered.made.is_some();
@@ -190,7 +191,7 @@ impl Editor {
             let file = self.pages_of(doc);
             if file.is_some() && file == self.tab().map(|tab| tab.doc.id) {
                 if let Some((byte, tab)) = byte.zip(self.project.tabs.active_mut()) {
-                    let at = tab.doc.text().floor_char_boundary(byte);
+                    let at = tab.doc.buffer.floor_boundary(byte);
                     let selection = if shift { Range::new(tab.view.selection.anchor, at) } else { Range::point(at) };
                     let line = tab.doc.buffer.line_of(at);
                     tab.select(selection, Autoscroll::Center(line..line + 1));
@@ -208,7 +209,7 @@ impl Editor {
             return;
         }
         if let Some((byte, file)) = byte.zip(self.shown_pages().and_then(|id| self.project.tabs.by_id_mut(id))) {
-            let at = file.doc.text().floor_char_boundary(byte);
+            let at = file.doc.buffer.floor_boundary(byte);
             let selection = if shift { Range::new(file.view.selection.anchor, at) } else { Range::point(at) };
             let line = file.doc.buffer.line_of(at);
             file.select(selection, Autoscroll::Center(line..line + 1));

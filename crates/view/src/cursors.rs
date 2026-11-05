@@ -173,7 +173,7 @@ impl Tab {
 
     /// `alt-minus`: every selection merged into one; `alt-_` (`touching`): only those that touch.
     pub fn merge(&mut self, touching: bool) {
-        let text = self.doc.text();
+        let text = &self.doc.buffer;
         let (all, main) = in_order(self);
         let all: Vec<Range> = all.iter().map(|selection| selection.min_width_1(text)).collect();
         if !touching {
@@ -201,7 +201,7 @@ impl Tab {
         let tab = self;
         let (all, main) = in_order(tab);
         let (buffer, tab_width) = (&tab.doc.buffer, tab.doc.indent.width);
-        let text = buffer.text();
+        let text = buffer;
         // Where each one's head is: its line, and its column on screen.
         let mut places = vec![];
         for selection in all.iter().map(|selection| selection.min_width_1(text)) {
@@ -209,7 +209,7 @@ impl Tab {
             if line != buffer.line_of(selection.anchor) {
                 return Err("selections over more than one line can't be lined up");
             }
-            places.push((line, ghostwrite_core::display_width(&text[buffer.line_start(line)..selection.head], tab_width)));
+            places.push((line, ghostwrite_core::display_width(&buffer.slice(buffer.line_start(line)..selection.head), tab_width)));
         }
         // Which column each is in, and how wide each column is (the most any
         // in it is from the one before on its line).
@@ -258,7 +258,8 @@ impl Tab {
     /// `s`: a cursor on each match of `pattern` in the selection, or in the whole
     /// file if there isn't one. How many, if there are any.
     pub fn select_matches(&mut self, pattern: &Regex) -> Option<usize> {
-        let text = self.doc.buffer.text();
+        // A pattern reads a string: the whole text, made once for this version.
+        let text = self.doc.buffer.whole_text();
         let wide = self.view.selection.is_wide(text);
         let within = if wide { self.view.selection.min_width_1(text).bytes() } else { 0..text.len() };
         let mut found: Vec<Range> =

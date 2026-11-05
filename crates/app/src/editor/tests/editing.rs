@@ -14,7 +14,7 @@ fn modal_keys_edit_and_undo(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_click_moves_the_cursor_and_shift_or_v_extends(cx: &mut TestAppContext) {
     let mut t = open("foo bar baz\n", &[], cx);
-    let selected = |t: &mut Setup| t.read(|e| (e.tab().map(|tab| tab.doc.text()[tab.view.selection.bytes()].to_string()).unwrap(), e.modal.mode));
+    let selected = |t: &mut Setup| t.read(|e| (e.tab().map(|tab| tab.doc.buffer.slice(tab.view.selection.bytes()).into_owned()).unwrap(), e.modal.mode));
     let editor = t.editor.clone();
     let click = |t: &mut Setup, at: usize, shift: bool, clicks: usize| t.cx.update(|_, cx| editor.update(cx, |e, cx| e.click(at, shift, clicks, cx)));
     click(&mut t, 4, false, 1);
@@ -90,7 +90,8 @@ fn a_quote_from_a_dead_key_closes_itself(cx: &mut TestAppContext) {
 #[gpui::test]
 fn searching_the_file(cx: &mut TestAppContext) {
     let mut t = open("one Two\ntwo three\nTWO\n", &[], cx);
-    let selected = |t: &mut Setup| t.read(|e| e.tab().map(|tab| (tab.view.selection.from(), tab.doc.text()[tab.view.selection.bytes()].to_string())).unwrap());
+    let selected =
+        |t: &mut Setup| t.read(|e| e.tab().map(|tab| (tab.view.selection.from(), tab.doc.buffer.slice(tab.view.selection.bytes()).into_owned())).unwrap());
     t.keys("/").input("two");
     assert_eq!(selected(&mut t), (4, "Two".into()), "found as typed, ignoring case without a capital");
     t.keys("enter n");
@@ -164,7 +165,10 @@ fn colors_are_worked_out_aside_and_follow_edits_meanwhile(cx: &mut TestAppContex
     std::fs::write(t.dir.join("main.rs"), "fn main() {}\n").unwrap();
     t.command("e main.rs");
     let scope_at = |t: &mut Setup, at: usize| {
-        t.read(|e| e.tab().unwrap().doc.cached_highlights().iter().find(|s| s.range.contains(&at)).map(|s| ghostwrite_core::syntax::SCOPES[s.scope]))
+        t.read(|e| {
+            let doc = &e.tab().unwrap().doc;
+            doc.highlights_in(0..doc.buffer.len()).iter().find(|s| s.range.contains(&at)).map(|s| ghostwrite_core::syntax::SCOPES[s.scope])
+        })
     };
     assert_eq!(scope_at(&mut t, 0), Some("keyword"), "fn, once worked out");
     t.keys("O").input("// hi").keys("escape");
@@ -342,7 +346,7 @@ fn a_story_isnt_given_more_than_one_cursor(cx: &mut TestAppContext) {
 fn selections(t: &mut Setup) -> (Vec<String>, String) {
     t.read(|e| {
         let tab = e.tab().unwrap();
-        let text = tab.doc.text();
+        let text = tab.doc.buffer.to_string();
         let mut all: Vec<_> = tab.view.others.iter().chain([&tab.view.selection]).copied().collect();
         all.sort_by_key(|r| r.from());
         (all.iter().map(|r| text[r.bytes()].to_string()).collect(), text[tab.view.selection.bytes()].to_string())
@@ -471,7 +475,7 @@ fn alt_keys_select_by_the_syntax_tree(cx: &mut TestAppContext) {
     let at = code.find("b: i32").unwrap();
     t.editor.update(t.cx, |e, _| e.tab_mut().unwrap().view.selection = ghostwrite_core::Range::point(at));
     t.keys("alt-o");
-    let shown = |t: &mut Setup| t.read(|e| e.tab().map(|tab| tab.doc.text()[tab.view.selection.bytes()].to_string()).unwrap());
+    let shown = |t: &mut Setup| t.read(|e| e.tab().map(|tab| tab.doc.buffer.slice(tab.view.selection.bytes()).into_owned()).unwrap());
     assert_eq!(shown(&mut t), "b: i32");
     t.keys("alt-a");
     let cursors = t.read(|e| e.tab().unwrap().view.others.len() + 1);

@@ -15,7 +15,7 @@ impl Editor {
     /// steps, accepted with Tab; `:replace!` takes them all. Neither saves.
     pub(super) fn start_replace(&mut self, typed: &str, with: String, all: bool, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         let pattern = search_pattern(typed)?;
-        let open = self.project.tabs.iter().filter_map(|t| Some((t.doc.path.clone()?, t.doc.text().to_string()))).collect();
+        let open = self.project.tabs.iter().filter_map(|t| Some((t.doc.path.clone()?, t.doc.buffer.to_string()))).collect();
         let root = self.project.root.clone();
         let search = {
             let pattern = pattern.clone();
@@ -68,7 +68,7 @@ impl Editor {
     /// then go through the matches.
     pub(super) fn start_search(&mut self, typed: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         let pattern = search_pattern(typed)?;
-        let open = self.project.tabs.iter().filter_map(|t| Some((t.doc.path.clone()?, t.doc.text().to_string()))).collect();
+        let open = self.project.tabs.iter().filter_map(|t| Some((t.doc.path.clone()?, t.doc.buffer.to_string()))).collect();
         let root = self.project.root.clone();
         let search = cx.background_spawn(async move { grep(&root, &pattern, &open) });
         let typed = typed.to_string();

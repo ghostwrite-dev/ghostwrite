@@ -273,9 +273,10 @@ impl Editor {
         let version = tab.doc.buffer.version();
         let Some(base) = tab.doc.git.base.clone().filter(|_| !tab.doc.git.making && tab.doc.git.made != Some(version)) else { return };
         tab.doc.git.making = true;
-        let text = tab.doc.buffer.text().to_string();
+        // A snapshot, made a string aside: comparing reads it whole.
+        let text = tab.doc.buffer.rope().clone();
         let work = cx.background_spawn(async move {
-            ghostwrite_project::contained("comparing with git", || ghostwrite_project::git::changes(&base, &text)).unwrap_or_default()
+            ghostwrite_project::contained("comparing with git", || ghostwrite_project::git::changes(&base, &text.to_string())).unwrap_or_default()
         });
         cx.spawn(async move |this, cx| {
             let changes = work.await;
@@ -299,20 +300,23 @@ impl Editor {
         }
     }
 
+    /// The file's colors, worked out off the UI thread from the last ones and
+    /// the edits since; meanwhile those are shown, moved past the edits.
     fn refresh_highlights_of(&mut self, doc: super::DocId, cx: &mut Context<Self>) {
         let Some(tab) = self.project.tabs.by_id_mut(doc) else { return };
         let id = tab.doc.id;
-        let Some((language, version, text)) = tab.doc.refresh_highlights() else { return };
-        let work = cx.background_spawn(async move {
-            // Without its colors the file can still be edited.
-            let spans = ghostwrite_project::contained("coloring the file", || language.highlight(&text)).unwrap_or_default();
-            (text, spans)
-        });
+        let Some(job) = tab.doc.refresh_highlights() else { return };
+        let version = job.version();
+        // Without its colors the file can still be edited.
+        let work = cx.background_spawn(async move { ghostwrite_project::contained("coloring the file", || job.run()).ok() });
         cx.spawn(async move |this, cx| {
-            let (text, spans) = work.await;
+            let colors = work.await;
             this.update(cx, |this, cx| {
                 if let Some(tab) = this.project.tabs.by_id_mut(id) {
-                    tab.doc.highlighted(language, version, text, spans);
+                    match colors {
+                        Some(colors) => tab.doc.highlighted(colors),
+                        None => tab.doc.highlighting_failed(version),
+                    }
                     cx.notify();
                 }
             })
@@ -593,8 +597,8 @@ impl Editor {
         }
         let cut = cut && !self.modal.mode.reviewing() && !self.reading();
         let Some(tab) = self.keyed_mut() else { return };
-        let range = tab.view.selection.min_width_1(tab.doc.text()).bytes();
-        cx.write_to_clipboard(ClipboardItem::new_string(tab.doc.text()[range.clone()].to_string()));
+        let range = tab.view.selection.min_width_1(&tab.doc.buffer).bytes();
+        cx.write_to_clipboard(ClipboardItem::new_string(tab.doc.buffer.slice(range.clone()).into_owned()));
         if cut {
             tab.doc.buffer.begin(tab.view.selection);
             tab.doc.buffer.edit(range.clone(), "");
@@ -619,7 +623,7 @@ impl Editor {
         let insert = self.modal.mode == Mode::Insert;
         let Some(tab) = self.tab_mut() else { return };
         let sel = tab.view.selection;
-        let range = if insert { sel.bytes() } else { sel.min_width_1(tab.doc.text()).bytes() };
+        let range = if insert { sel.bytes() } else { sel.min_width_1(&tab.doc.buffer).bytes() };
         tab.doc.buffer.begin(sel);
         tab.doc.buffer.edit(range.clone(), &text);
         let pasted = if insert { Range::point(range.start + text.len()) } else { Range::new(range.start, range.start + text.len()) };

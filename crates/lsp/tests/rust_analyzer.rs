@@ -48,7 +48,7 @@ fn colors_asked_for_as_changes_match_the_whole() {
     // Edit, ask for what changed, twice: the same as asking for all of it.
     let (mut id, mut data) = (id, data);
     for edited in [text.replace("let x", "let mut x"), text.replace("let x = 1", "let mut x = 1.0")] {
-        doc.changed(&edited, None);
+        doc.changed(&ghostwrite_core::Rope::from_str(&edited), None);
         let changed = answer(doc.semantic_tokens(id.as_deref()));
         (id, data) = convert::token_data(&changed, Some(&data)).expect("tokens");
         let all = convert::token_data(&answer(doc.semantic_tokens(None)), None).expect("tokens").1;

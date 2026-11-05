@@ -67,7 +67,7 @@ impl StoryState {
         let asked = project.tabs.by_id(self.doc)?;
         Some(Layout {
             story: self.story.as_ref()?,
-            asked: Asked { path: asked.doc.path.as_deref(), text: asked.doc.text(), lines: self.lines.clone() },
+            asked: Asked { path: asked.doc.path.as_deref(), text: asked.doc.buffer.whole_text(), lines: self.lines.clone() },
             files: project.files(),
             placer: &self.placer,
         })
@@ -184,7 +184,7 @@ impl StoryState {
     fn placeable(&self, project: &Project, id: ItemId, step: &Step) -> bool {
         let Some(located) = self.locate(project, id) else { return false };
         let text = match (located.tab.and_then(|ix| project.tabs.get(ix)), &located.path) {
-            (Some(tab), _) => Some(tab.doc.text().to_string()),
+            (Some(tab), _) => Some(tab.doc.buffer.whole_text().to_string()),
             (None, Some(path)) => std::fs::read_to_string(path).ok(),
             (None, None) => None,
         };
@@ -201,7 +201,7 @@ impl StoryState {
         let asked = project.tabs.by_id(self.doc).map(|t| &t.doc);
         let (file, text) = match &located.path {
             Some(path) => (project.display(path), project.files().text(path)),
-            None => (asked.and_then(|d| d.path.as_deref()).map_or("the file".into(), |p| project.display(p)), asked.map(|d| d.text().to_string())),
+            None => (asked.and_then(|d| d.path.as_deref()).map_or("the file".into(), |p| project.display(p)), asked.map(|d| d.buffer.whole_text().to_string())),
         };
         if let Some(story) = self.story.as_mut() {
             story.misplaced(&file, &text.unwrap_or_default(), item.quoted(), located.near);
@@ -271,7 +271,8 @@ impl StoryState {
         let missing = "that edit's file doesn't exist; ⏎ to say what you want instead";
         let located = self.open(project, id).ok_or(missing)?;
         let tab = located.tab.and_then(|ix| project.tabs.get_mut(ix)).ok_or(missing)?;
-        let edit = placement::edit(tab.doc.text(), step, located.near).ok_or("couldn't find where that edit goes; ⏎ to say what you want instead")?;
+        let edit =
+            placement::edit(tab.doc.buffer.whole_text(), step, located.near).ok_or("couldn't find where that edit goes; ⏎ to say what you want instead")?;
         tab.doc.buffer.begin(tab.view.selection);
         let start = edit.bytes.start;
         tab.doc.buffer.edit(edit.bytes, &edit.text);

@@ -18,8 +18,7 @@ pub(super) struct Pointer {
 /// selection to there instead. A double click selects the word, a triple
 /// click the line. The mode stays as it was.
 fn clicked(buffer: &ghostwrite_core::Buffer, selection: Range, mode: Mode, at: usize, extend: bool, clicks: usize) -> (Range, Mode) {
-    let text = buffer.text();
-    let to = |anchor: usize| Range::new(anchor, if mode == Mode::Insert || at < anchor { at } else { ghostwrite_core::next_char(text, at) });
+    let to = |anchor: usize| Range::new(anchor, if mode == Mode::Insert || at < anchor { at } else { buffer.next(at) });
     if clicks >= 3 {
         let line = buffer.line_of(at);
         let lines = buffer.lines_range(line..line + 1);

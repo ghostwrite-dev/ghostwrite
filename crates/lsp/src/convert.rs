@@ -1,8 +1,10 @@
 //! Between the protocol and the editor: URIs and paths, UTF-16 positions and
 //! byte offsets, and server answers as plain values.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+use ghostwrite_core::{Rope, Text as _};
 use serde_json::Value;
 
 use crate::{Completion, Diagnostic, Severity};
@@ -59,24 +61,48 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// A text's lines, indexed once, to go between byte offsets and LSP
-/// positions (line, UTF-16 column) without reading the text from the start
-/// for each: the only place UTF-16 is counted.
+/// A text's lines, to go between byte offsets and LSP positions (line, UTF-16
+/// column) without reading the text from the start for each: the only place
+/// UTF-16 is counted. A buffer's rope has them indexed already; a string's are
+/// indexed once.
 pub struct Lines<'a> {
-    text: &'a str,
-    starts: Vec<usize>,
+    text: Cow<'a, Rope>,
+}
+
+impl<'a> From<&'a str> for Lines<'a> {
+    fn from(text: &'a str) -> Self {
+        Self { text: Cow::Owned(Rope::from_str(text)) }
+    }
+}
+
+impl<'a> From<&'a String> for Lines<'a> {
+    fn from(text: &'a String) -> Self {
+        text.as_str().into()
+    }
+}
+
+impl<'a> From<&'a Rope> for Lines<'a> {
+    fn from(text: &'a Rope) -> Self {
+        Self { text: Cow::Borrowed(text) }
+    }
+}
+
+impl<'a> From<&'a ghostwrite_core::Buffer> for Lines<'a> {
+    fn from(buffer: &'a ghostwrite_core::Buffer) -> Self {
+        buffer.rope().into()
+    }
 }
 
 impl<'a> Lines<'a> {
-    pub fn new(text: &'a str) -> Self {
-        Self { text, starts: std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect() }
+    pub fn new(text: impl Into<Lines<'a>>) -> Self {
+        text.into()
     }
 
     /// Byte offset → position.
     pub fn position(&self, offset: usize) -> lsp_types::Position {
-        let offset = offset.min(self.text.len());
-        let line = self.starts.partition_point(|&start| start <= offset) - 1;
-        let character: usize = self.text[self.starts[line]..offset].chars().map(char::len_utf16).sum();
+        let offset = self.text.floor_boundary(offset);
+        let line = self.text.byte_to_line(offset);
+        let character: usize = self.text.byte_slice(self.text.line_to_byte(line)..offset).chars().map(char::len_utf16).sum();
         lsp_types::Position::new(line as u32, character as u32)
     }
 
@@ -87,14 +113,19 @@ impl<'a> Lines<'a> {
 
     /// UTF-16 column `column` of line `line`, as a byte offset.
     fn at(&self, line: usize, column: u32) -> usize {
-        let Some(&start) = self.starts.get(line) else { return self.text.len() };
-        let end = self.starts.get(line + 1).map_or(self.text.len(), |next| next - 1);
-        let mut units = 0;
-        for (i, c) in self.text[start..end].char_indices() {
+        let (text, len) = (&self.text, self.text.len_bytes());
+        if line >= text.len_lines() {
+            return len;
+        }
+        let start = text.line_to_byte(line);
+        let end = if line + 1 < text.len_lines() { text.line_to_byte(line + 1) - 1 } else { len };
+        let (mut units, mut at) = (0, start);
+        for c in text.byte_slice(start..end).chars() {
             if units >= column as usize {
-                return start + i;
+                return at;
             }
             units += c.len_utf16();
+            at += c.len_utf8();
         }
         end
     }
@@ -106,13 +137,13 @@ impl<'a> Lines<'a> {
 }
 
 /// Byte offset → LSP position, once (for many, [`Lines`]).
-pub fn position(text: &str, offset: usize) -> lsp_types::Position {
-    Lines::new(text).position(offset)
+pub fn position<'a>(text: impl Into<Lines<'a>>, offset: usize) -> lsp_types::Position {
+    text.into().position(offset)
 }
 
 /// LSP position → byte offset, clamped to the line, once (for many, [`Lines`]).
-pub fn offset(text: &str, pos: lsp_types::Position) -> usize {
-    Lines::new(text).offset(pos)
+pub fn offset<'a>(text: impl Into<Lines<'a>>, pos: lsp_types::Position) -> usize {
+    text.into().offset(pos)
 }
 
 /// The token types we ask servers for, standard and common: what each colors as is [`token_scope`].
@@ -197,9 +228,13 @@ pub fn token_data(value: &Value, previous: Option<&[u32]>) -> Option<(Option<Str
 
 /// Semantic tokens (as [`token_data`] has them), for `text`, as byte ranges
 /// and the scopes they show as (see [`token_scope`]), in order.
-pub fn semantic_tokens(data: &[u32], text: &str, (types, modifiers): &(Vec<String>, Vec<String>)) -> Vec<(std::ops::Range<usize>, &'static str)> {
+pub fn semantic_tokens<'a>(
+    data: &[u32],
+    text: impl Into<Lines<'a>>,
+    (types, modifiers): &(Vec<String>, Vec<String>),
+) -> Vec<(std::ops::Range<usize>, &'static str)> {
     let builtin = modifiers.iter().position(|m| m == "defaultLibrary").map_or(0, |i| 1u32 << i);
-    let lines = Lines::new(text);
+    let lines = text.into();
     let at = |line: usize, column: u32| lines.at(line, column);
     let (mut line, mut column) = (0, 0);
     let mut out = vec![];
@@ -218,13 +253,13 @@ pub fn semantic_tokens(data: &[u32], text: &str, (types, modifiers): &(Vec<Strin
 }
 
 /// An LSP range → bytes, once (for many, [`Lines`]).
-pub fn range(text: &str, r: lsp_types::Range) -> std::ops::Range<usize> {
-    Lines::new(text).range(r)
+pub fn range<'a>(text: impl Into<Lines<'a>>, r: lsp_types::Range) -> std::ops::Range<usize> {
+    text.into().range(r)
 }
 
-pub fn diagnostics(text: &str, diagnostics: Vec<lsp_types::Diagnostic>) -> Vec<Diagnostic> {
+pub fn diagnostics<'a>(text: impl Into<Lines<'a>>, diagnostics: Vec<lsp_types::Diagnostic>) -> Vec<Diagnostic> {
     use lsp_types::DiagnosticSeverity as S;
-    let lines = Lines::new(text);
+    let lines = text.into();
     let mut out: Vec<Diagnostic> = diagnostics
         .into_iter()
         .map(|d| Diagnostic {
@@ -277,21 +312,23 @@ pub fn first_location(value: &Value) -> Option<(PathBuf, lsp_types::Position)> {
 }
 
 /// Where the word being typed at `offset` starts.
-pub fn word_start(text: &str, offset: usize) -> usize {
-    text[..offset].char_indices().rev().take_while(|(_, c)| c.is_alphanumeric() || *c == '_').last().map_or(offset, |(i, _)| i)
+pub fn word_start(text: &Rope, offset: usize) -> usize {
+    let offset = text.floor_boundary(offset);
+    let before = text.chars_at(text.byte_to_char(offset)).reversed().take_while(|c| c.is_alphanumeric() || *c == '_');
+    offset - before.map(char::len_utf8).sum::<usize>()
 }
 
 /// A completion answer as edits on `text`, typed at `offset`: ones that
 /// start with what's typed first, then the rest that contain it.
-pub fn completions(value: Value, text: &str, offset: usize) -> Vec<Completion> {
+pub fn completions<'a>(value: Value, text: impl Into<Lines<'a>>, offset: usize) -> Vec<Completion> {
     let items: Vec<lsp_types::CompletionItem> = match serde_json::from_value::<lsp_types::CompletionResponse>(value) {
         Ok(lsp_types::CompletionResponse::Array(items)) => items,
         Ok(lsp_types::CompletionResponse::List(list)) => list.items,
         Err(_) => return vec![],
     };
-    let typed_from = word_start(text, offset);
-    let typed = text[typed_from..offset].to_lowercase();
-    let lines = Lines::new(text);
+    let lines = text.into();
+    let typed_from = word_start(&lines.text, offset);
+    let typed = lines.text.byte_slice(typed_from..lines.text.floor_boundary(offset)).to_string().to_lowercase();
     let mut out: Vec<(bool, String, Completion)> = items
         .into_iter()
         .filter_map(|item| {
@@ -325,8 +362,8 @@ pub fn text_edits(value: &Value) -> Vec<crate::TextEdit> {
 
 /// `edits` made to `text` (each in the text as it was, as the protocol has
 /// them): from the last, so each one's place is still where it was.
-pub fn apply(text: &str, edits: &[crate::TextEdit]) -> Vec<(std::ops::Range<usize>, String)> {
-    let lines = Lines::new(text);
+pub fn apply<'a>(text: impl Into<Lines<'a>>, edits: &[crate::TextEdit]) -> Vec<(std::ops::Range<usize>, String)> {
+    let lines = text.into();
     let mut placed: Vec<(std::ops::Range<usize>, String)> = edits.iter().map(|(r, t)| (lines.range(*r), t.clone())).collect();
     placed.sort_by_key(|(r, _)| std::cmp::Reverse((r.start, r.end)));
     placed

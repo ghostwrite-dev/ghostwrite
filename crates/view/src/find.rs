@@ -6,7 +6,7 @@
 
 use std::ops::Range as Bytes;
 
-use ghostwrite_core::Range;
+use ghostwrite_core::{Buffer, Range};
 use regex::{Regex, RegexBuilder};
 
 use crate::document::DocId;
@@ -58,8 +58,10 @@ impl Find {
         let (id, version) = (tab.doc.id, tab.doc.buffer.version());
         let stale = !self.matches.as_ref().is_some_and(|(d, v, _)| *d == id && *v == version);
         if stale {
-            let found =
-                self.regex.as_ref().map_or(vec![], |re| re.find_iter(tab.doc.text()).filter(|m| !m.is_empty()).take(MAX_MATCHES).map(|m| m.range()).collect());
+            let found = self
+                .regex
+                .as_ref()
+                .map_or(vec![], |re| re.find_iter(tab.doc.buffer.whole_text()).filter(|m| !m.is_empty()).take(MAX_MATCHES).map(|m| m.range()).collect());
             self.matches = Some((id, version, found));
         }
         self.matches.as_ref().map_or(&[], |(_, _, m)| m)
@@ -80,13 +82,13 @@ impl Find {
 /// `tab`, as a search (as it is, not as a pattern), as helix's
 /// `search_selection`: where it starts or ends a word, it's matched only there (`\b`).
 pub fn selection_pattern(tab: &Tab, word_bounds: bool) -> String {
-    let text = tab.doc.text();
+    let text = &tab.doc.buffer;
     let mut patterns: Vec<String> = vec![];
     for selection in [tab.view.selection].iter().chain(&tab.view.others) {
         let bytes = selection.min_width_1(text).bytes();
         let start = if word_bounds && word_starts(text, bytes.start) { "\\b" } else { "" };
         let end = if word_bounds && word_ends(text, bytes.end) { "\\b" } else { "" };
-        let pattern = format!("{start}{}{end}", regex::escape(&text[bytes]));
+        let pattern = format!("{start}{}{end}", regex::escape(&text.slice(bytes)));
         if !patterns.contains(&pattern) {
             patterns.push(pattern);
         }
@@ -99,7 +101,7 @@ pub fn selection_pattern(tab: &Tab, word_bounds: bool) -> String {
 /// facing as the selection did. With `extend` (select mode), it's another selection,
 /// the main one. Which match it is.
 pub fn select_next(tab: &mut Tab, matches: &[Bytes<usize>], backward: bool, extend: bool) -> usize {
-    let selection = tab.view.selection.min_width_1(tab.doc.text());
+    let selection = tab.view.selection.min_width_1(&tab.doc.buffer);
     let ix = if backward {
         let before = matches.partition_point(|m| m.end <= selection.from());
         before.checked_sub(1).unwrap_or(matches.len() - 1)
@@ -116,13 +118,13 @@ pub fn select_next(tab: &mut Tab, matches: &[Bytes<usize>], backward: bool, exte
 }
 
 /// Whether `at` starts a word (helix's `is_at_word_start`).
-fn word_starts(text: &str, at: usize) -> bool {
+fn word_starts(text: &Buffer, at: usize) -> bool {
     let word = |c: char| c.is_alphanumeric() || c == '_';
-    text[at..].chars().next().is_some_and(word) && !text[..at].chars().next_back().is_some_and(word)
+    text.char_at(at).is_some_and(word) && !text.chars_before(at).next().is_some_and(|(_, c)| word(c))
 }
 
 /// Whether `at` ends a word: one before, none after (and not the end of the text, as in helix).
-fn word_ends(text: &str, at: usize) -> bool {
+fn word_ends(text: &Buffer, at: usize) -> bool {
     let word = |c: char| c.is_alphanumeric() || c == '_';
-    text[..at].chars().next_back().is_some_and(word) && text[at..].chars().next().is_some_and(|c| !word(c))
+    text.chars_before(at).next().is_some_and(|(_, c)| word(c)) && text.char_at(at).is_some_and(|c| !word(c))
 }

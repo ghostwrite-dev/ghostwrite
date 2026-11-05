@@ -11,8 +11,8 @@ use crate::aside::Aside;
 use crate::rendered::Rendered;
 use ghostwrite_core::Language;
 use ghostwrite_core::indent::IndentUnit;
-use ghostwrite_core::syntax::{self, Span};
-use ghostwrite_core::{Buffer, Range};
+use ghostwrite_core::syntax::{self, Colors, InputEdit, Span};
+use ghostwrite_core::{Buffer, Range, Rope, Text as _};
 use ghostwrite_lsp::Diagnostic;
 use ghostwrite_project::fs::{Stamp, denormalize, normalize};
 
@@ -74,28 +74,50 @@ pub struct Document {
     pub output: bool,
     /// The buffer version the language server (and `dirty`) last saw.
     synced: u64,
-    /// The colors shown, for a version of the text.
-    highlights: (u64, Vec<Span>),
-    /// The grammar's colors as last worked out, and the text they're of.
-    grammar: (u64, Arc<str>, Vec<Span>),
+    /// The grammar's colors as last worked out, for the text as it was then:
+    /// they're shown moved past the edits since.
+    colors: Option<Arc<Colors>>,
     /// They're being worked out.
     highlighting: bool,
+    /// They couldn't be, for this version: not again till it's edited.
+    failed: Option<u64>,
+}
+
+/// What colors a file, as it is now, from its colors as last worked out: to [`run`](Self::run)
+/// off the UI thread, and give [`Document::highlighted`] what it makes.
+pub struct HighlightJob {
+    language: &'static Language,
+    previous: Option<Arc<Colors>>,
+    version: u64,
+    text: Rope,
+    edits: Option<Vec<InputEdit>>,
+}
+
+impl HighlightJob {
+    /// The version of the text it's for.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn run(self) -> Colors {
+        Colors::work(self.language, self.previous.as_deref(), self.version, self.text, self.edits)
+    }
 }
 
 impl Document {
     /// `text` as read from `path` (its line endings are made `\n`, and put back on save).
     pub fn new(id: DocId, path: Option<PathBuf>, text: String, lsp: Option<ghostwrite_lsp::Document>) -> Self {
         let (text, crlf) = normalize(text);
-        let buffer = Buffer::new(text);
+        let buffer = Buffer::new(&text);
         Self {
             disk: path.as_deref().and_then(Stamp::of),
-            read: Arc::from(buffer.text()),
+            read: Arc::from(text.as_str()),
             conflict: false,
             crlf,
             encoding: Default::default(),
             git: Default::default(),
             id,
-            indent: IndentUnit::detect(buffer.text()),
+            indent: IndentUnit::detect(&text),
             language: path.as_deref().and_then(Language::for_path),
             synced: buffer.version(),
             buffer,
@@ -108,9 +130,9 @@ impl Document {
             diagnostics: vec![],
             view_of: None,
             output: false,
-            highlights: (u64::MAX, vec![]),
-            grammar: (u64::MAX, Arc::from(""), vec![]),
+            colors: None,
             highlighting: false,
+            failed: None,
         }
     }
 
@@ -161,10 +183,6 @@ impl Document {
         }
     }
 
-    pub fn text(&self) -> &str {
-        self.buffer.text()
-    }
-
     /// An untitled, unedited buffer, which opening a file may take over.
     pub fn is_pristine(&self) -> bool {
         self.path.is_none() && !self.dirty && self.buffer.is_empty() && self.view_of.is_none()
@@ -191,60 +209,66 @@ impl Document {
         self.dirty = true;
         // Diagnostics are of the text the server last saw: until it sends new
         // ones, kept in the text and on char boundaries, so they can be drawn.
-        let text = self.buffer.text();
+        let text = &self.buffer;
         for d in &mut self.diagnostics {
-            let snap = |at: usize| text.floor_char_boundary(at.min(text.len()));
+            let snap = |at: usize| text.floor_boundary(at);
             d.range = snap(d.range.start)..snap(d.range.end).max(snap(d.range.start));
         }
         let edits = self.buffer.take_edits();
         if let Some(lsp) = &mut self.lsp {
-            lsp.changed(self.buffer.text(), edits);
+            lsp.changed(self.buffer.rope(), edits);
         }
     }
 
-    /// The highlights as of the last [`Document::refresh_highlights`].
-    pub fn cached_highlights(&self) -> &[Span] {
-        &self.highlights.1
+    /// The colors in `range` of the text as it is: the grammar's, and the server's
+    /// over them, each as last worked out, moved past the edits since. Only
+    /// what's in `range` is looked at, so drawing a screenful costs as much in
+    /// any file; what was edited since has none till they're worked out again.
+    pub fn highlights_in(&self, range: std::ops::Range<usize>) -> Vec<Span> {
+        let moved = |spans: &[Span], version: u64| match self.buffer.changes_since(version) {
+            Some(edits) => syntax::spans_in(spans, &edits, range.clone()),
+            None => vec![],
+        };
+        let grammar = self.colors.as_ref().map_or_else(Vec::new, |colors| moved(&colors.spans, colors.version));
+        if self.semantic.spans.is_empty() {
+            return grammar;
+        }
+        syntax::overlay(&grammar, &moved(&self.semantic.spans, self.semantic.version))
     }
 
-    /// The colors for the text as it is: the grammar's, and the server's
-    /// over them, each as last worked out, moved past any edit since. If
-    /// the grammar's are out of date, what to work them out for (off the
-    /// UI thread: a big file takes a while); [`Document::highlighted`] takes them.
-    pub fn refresh_highlights(&mut self) -> Option<(&'static Language, u64, Arc<str>)> {
+    /// If the grammar's colors are out of date, and none are being worked out,
+    /// what works them out: from the last ones, and the edits since, if it can
+    /// (off the UI thread: a big file takes a while). [`Document::highlighted`] takes them.
+    pub fn refresh_highlights(&mut self) -> Option<HighlightJob> {
         let version = self.buffer.version();
-        let job = (self.grammar.0 != version && !self.highlighting)
-            .then(|| self.language.filter(|_| !self.read_only()))
-            .flatten()
-            .map(|language| (language, version, Arc::<str>::from(self.buffer.text())));
-        self.highlighting |= job.is_some();
-        if self.highlights.0 != version {
-            let text = self.buffer.text();
-            let moved = |spans: &[Span], from: &str| if from == text { spans.to_vec() } else { syntax::follow_edit(spans, from, text) };
-            let (_, grammar_text, grammar) = &self.grammar;
-            let mut spans = moved(grammar, grammar_text);
-            if !self.semantic.spans.is_empty() {
-                spans = syntax::overlay(&spans, &moved(&self.semantic.spans, &self.semantic.text));
-            }
-            self.highlights = (version, spans);
+        if self.highlighting || self.failed == Some(version) || self.colors.as_ref().is_some_and(|colors| colors.version == version) {
+            return None;
         }
-        job
+        let language = self.language.filter(|_| !self.read_only())?;
+        let previous = self.colors.clone().filter(|colors| std::ptr::eq(colors.language, language));
+        let edits = previous.as_ref().and_then(|colors| self.buffer.changes_since(colors.version));
+        self.highlighting = true;
+        Some(HighlightJob { language, previous, version, text: self.buffer.rope().clone(), edits })
     }
 
-    /// `language`'s colors for `text`, version `version`, worked out (if
-    /// it's still that language: a file can be renamed meanwhile).
-    pub fn highlighted(&mut self, language: &'static Language, version: u64, text: Arc<str>, spans: Vec<Span>) {
-        if !self.language.is_some_and(|l| std::ptr::eq(l, language)) {
-            return;
-        }
+    /// The colors for `version` couldn't be worked out (a grammar failed): they aren't tried again till it's edited.
+    pub fn highlighting_failed(&mut self, version: u64) {
+        (self.highlighting, self.failed) = (false, Some(version));
+    }
+
+    /// Colors worked out (by a [`HighlightJob`]): taken, if they're still of its language
+    /// (a file can be renamed meanwhile), and newer than those it has, and of a version
+    /// the text can be followed on from (it wasn't replaced since).
+    pub fn highlighted(&mut self, colors: Colors) {
         self.highlighting = false;
-        self.grammar = (version, text, spans);
-        self.recolor();
-    }
-
-    /// Highlight again next time, though the text's the same.
-    pub fn recolor(&mut self) {
-        self.highlights.0 = u64::MAX;
+        let newer = self.colors.as_ref().is_none_or(|had| had.version < colors.version);
+        if self.language.is_some_and(|l| std::ptr::eq(l, colors.language)) && newer && self.buffer.changes_since(colors.version).is_some() {
+            // Selecting by the syntax tree parses on from it, rather than from nothing.
+            if let Some(tree) = colors.tree() {
+                ghostwrite_core::nodes::offer(colors.language, &self.buffer, colors.version, tree);
+            }
+            self.colors = Some(Arc::new(colors));
+        }
     }
 
     /// Whether another program changed the file since it was read or written here.
@@ -266,7 +290,7 @@ impl Document {
         if !force && !ours && path.exists() {
             return Err(format!("{} already exists (:w! writes over it)", path.display()));
         }
-        let bytes = self.encoding.encode(&denormalize(self.buffer.text(), self.crlf))?;
+        let bytes = self.encoding.encode(&denormalize(&self.buffer.to_string(), self.crlf))?;
         ghostwrite_project::fs::write_atomic(path, &bytes).map_err(|e| e.to_string())?;
         if ours {
             (self.disk, self.conflict) = (Stamp::of(path), false);
@@ -283,8 +307,7 @@ impl Document {
     /// another server (or none).
     pub fn moved(&mut self, path: PathBuf, servers: &mut ghostwrite_lsp::Registry) {
         self.language = Language::for_path(&path);
-        self.highlights.0 = u64::MAX;
-        (self.grammar, self.highlighting) = ((u64::MAX, Arc::from(""), vec![]), false);
+        (self.colors, self.highlighting) = (None, false);
         self.aside = None;
         // Made from where it was.
         if !self.pages_are_the_text() {
@@ -294,7 +317,8 @@ impl Document {
         self.lsp = None;
         self.diagnostics.clear();
         self.buffer.take_edits();
-        self.lsp = server_for(servers, &path, self.buffer.text());
+        // Opened on its server: the whole text.
+        self.lsp = server_for(servers, &path, &self.buffer.to_string());
         self.disk = Stamp::of(&path);
         self.path = Some(path);
     }
@@ -306,8 +330,7 @@ impl Document {
         self.aside = None;
         // It's opened with the text as it is: the edits before are no news.
         self.buffer.take_edits();
-        self.lsp = path.and_then(|path| server_for(servers, path, self.buffer.text()));
-        self.recolor();
+        self.lsp = path.and_then(|path| server_for(servers, path, &self.buffer.to_string()));
     }
 
     /// Become what's on disk, `text` as read, as one undo step; returns
@@ -326,7 +349,7 @@ impl Document {
         self.dirty = false;
         self.conflict = false;
         self.disk = self.path.as_deref().and_then(Stamp::of);
-        self.read = Arc::from(self.buffer.text());
+        self.read = Arc::from(self.buffer.to_string());
     }
 
     /// Another program changed the file to `text` while this had unsaved
@@ -334,9 +357,10 @@ impl Document {
     /// step, the selection moving with the text). Whether they did.
     pub fn merge_from_disk(&mut self, text: &str, selection: Range) -> Option<Range> {
         let (theirs, _) = normalize(text.to_string());
-        let merged = ghostwrite_project::merge::merge(&self.read, self.buffer.text(), &theirs)?;
+        let ours = self.buffer.to_string();
+        let merged = ghostwrite_project::merge::merge(&self.read, &ours, &theirs)?;
         // Each of their changes on its own, last first: what's between (the cursor) stays put.
-        let edits = ghostwrite_project::merge::edits(self.buffer.text(), &merged);
+        let edits = ghostwrite_project::merge::edits(&ours, &merged);
         // Where a byte is once they're in: after a change (or at lines put in above it), moved
         // by it; inside one, as far into what replaced it as there is.
         let map = |at: usize| {
@@ -369,7 +393,7 @@ impl Document {
     }
 
     pub fn set_diagnostics(&mut self, diagnostics: Vec<ghostwrite_lsp::RawDiagnostic>) {
-        self.diagnostics = ghostwrite_lsp::convert::diagnostics(self.buffer.text(), diagnostics);
+        self.diagnostics = ghostwrite_lsp::convert::diagnostics(self.buffer.rope(), diagnostics);
     }
 }
 
@@ -388,9 +412,57 @@ pub fn next_problem(diagnostics: &[ghostwrite_lsp::Diagnostic], cursor: usize) -
 
 #[cfg(test)]
 mod tests {
+    use ghostwrite_core::Language;
+    use ghostwrite_core::syntax::{Colors, Span};
     use ghostwrite_lsp::{Diagnostic, Severity};
 
-    use super::next_problem;
+    use super::{Document, next_problem};
+
+    /// Colors every `x`, as a plugin's code might color a file: all of it each time.
+    fn xs(text: &str) -> Vec<Span> {
+        text.match_indices('x').map(|(i, _)| Span { range: i..i + 1, scope: 0 }).collect()
+    }
+
+    static XS: Language = Language { name: "xs", highlighter: Some(&xs), ..Language::DEFAULT };
+
+    /// Where it's colored, start and end.
+    fn colored(doc: &Document) -> Vec<(usize, usize)> {
+        doc.highlights_in(0..doc.buffer.len()).into_iter().map(|s| (s.range.start, s.range.end)).collect()
+    }
+
+    #[test]
+    fn colors_worked_out_meanwhile_follow_the_text_and_older_ones_never_go_over_newer() {
+        let mut doc = Document::new(0, None, "a x b\n".into(), None);
+        doc.language = Some(&XS);
+        let job = doc.refresh_highlights().expect("they're worked out");
+        assert!(doc.refresh_highlights().is_none(), "one at a time");
+        // Typing goes on while they're worked out (off the UI thread).
+        doc.buffer.edit(0..0, "yy");
+        let (old_version, old_text) = (doc.buffer.version(), doc.buffer.rope().clone());
+        doc.highlighted(job.run());
+        assert_eq!(colored(&doc), [(4, 5)], "the x, moved past what was typed since");
+
+        // Newer ones come; then, late, some for the text before them: they aren't taken.
+        doc.buffer.edit(0..0, "x");
+        let job = doc.refresh_highlights().expect("out of date");
+        doc.highlighted(job.run());
+        assert_eq!(colored(&doc), [(0, 1), (5, 6)]);
+        doc.highlighted(Colors::new(&XS, old_version, old_text));
+        assert_eq!(colored(&doc), [(0, 1), (5, 6)], "older than what's shown: dropped");
+        assert!(doc.refresh_highlights().is_none(), "nothing left to do");
+
+        // The text replaced while they're worked out: they can't be followed on to it, so they aren't shown.
+        doc.buffer.edit(0..0, "z");
+        let stale = doc.refresh_highlights().expect("out of date");
+        doc.buffer.reset("b x");
+        let none: [(usize, usize); 0] = [];
+        assert_eq!(colored(&doc), none, "nothing, rather than colors in the wrong places");
+        doc.highlighted(stale.run());
+        assert_eq!(colored(&doc), none, "nor the colors of the text it replaced");
+        let job = doc.refresh_highlights().expect("out of date");
+        doc.highlighted(job.run());
+        assert_eq!(colored(&doc), [(2, 3)]);
+    }
 
     #[test]
     fn space_j_goes_to_the_next_error_round_to_the_first_then_warnings() {

@@ -1,5 +1,6 @@
-//! One open file as its language server knows it. Changes are sent whole;
-//! dropping the document closes it on the server.
+//! One open file as its language server knows it. Changes are sent as the
+//! edits made, if the server takes them, else whole; dropping the document
+//! closes it on the server.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,7 +9,8 @@ use futures::channel::oneshot;
 use serde_json::{Value, json};
 
 use crate::client::Client;
-use crate::convert::{position, uri};
+use crate::convert::{Lines, position, uri};
+use ghostwrite_core::Rope;
 
 pub struct Document {
     pub(crate) client: Arc<Client>,
@@ -52,7 +54,7 @@ impl Document {
 
     /// The text changed: by `edits` (as [`ghostwrite_core::Edit`]s record
     /// them), if there are and the server takes edits; else it's sent `text` whole.
-    pub fn changed(&mut self, text: &str, edits: Option<Vec<ghostwrite_core::Edit>>) {
+    pub fn changed(&mut self, text: &Rope, edits: Option<Vec<ghostwrite_core::Edit>>) {
         self.version += 1;
         let changes = match edits.filter(|_| self.client.incremental_sync()) {
             Some(edits) => edits
@@ -62,7 +64,7 @@ impl Document {
                     json!({ "range": range, "text": e.text })
                 })
                 .collect(),
-            None => vec![json!({ "text": text })],
+            None => vec![json!({ "text": text.to_string() })],
         };
         self.client.notify("textDocument/didChange", json!({ "textDocument": { "uri": self.uri, "version": self.version }, "contentChanges": changes }));
     }
@@ -72,12 +74,12 @@ impl Document {
     }
 
     /// Ask about `offset` in `text` (`textDocument/hover`, `…/definition`, `…/completion`).
-    pub fn ask(&self, method: &str, text: &str, offset: usize) -> Answer {
+    pub fn ask<'a>(&self, method: &str, text: impl Into<Lines<'a>>, offset: usize) -> Answer {
         self.ask_cancelable(method, text, offset).1
     }
 
     /// [`Document::ask`], and the question's id, for [`Document::cancel`].
-    pub fn ask_cancelable(&self, method: &str, text: &str, offset: usize) -> (i64, Answer) {
+    pub fn ask_cancelable<'a>(&self, method: &str, text: impl Into<Lines<'a>>, offset: usize) -> (i64, Answer) {
         self.client.request_cancelable(method, json!({ "textDocument": { "uri": self.uri }, "position": position(text, offset) }))
     }
 

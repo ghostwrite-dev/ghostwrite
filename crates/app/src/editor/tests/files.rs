@@ -342,7 +342,7 @@ fn unsaved_changes_come_back_after_a_crash(cx: &mut TestAppContext) {
     let found = t.cx.update(|_, cx| {
         let editor = after.read(cx);
         let tab = editor.project.tab().unwrap();
-        (tab.doc.buffer.text().to_string(), tab.doc.dirty, editor.project.status.clone().map(|s| s.to_string()))
+        (tab.doc.buffer.to_string(), tab.doc.dirty, editor.project.status.clone().map(|s| s.to_string()))
     });
     assert_eq!(found.0, "typed on disk\n");
     assert!(found.1, "unsaved, not written over the file");
@@ -381,7 +381,7 @@ fn a_new_file_never_saved_comes_back_too(cx: &mut TestAppContext) {
     let_it_copy(&mut t);
     let after = reopened(&mut t);
     let kept =
-        t.cx.update(|_, cx| after.read(cx).project.tabs.iter().any(|tab| tab.doc.path.is_none() && tab.doc.dirty && tab.doc.buffer.text() == "a thought"));
+        t.cx.update(|_, cx| after.read(cx).project.tabs.iter().any(|tab| tab.doc.path.is_none() && tab.doc.dirty && tab.doc.buffer.to_string() == "a thought"));
     assert!(kept);
 }
 
@@ -484,7 +484,7 @@ fn typing_goes_to_the_pane_with_the_keys_and_a_click_moves_them(cx: &mut TestApp
     t.command("vsplit");
     draw(&mut t);
     let other = t.read(|e| e.other_pane_doc()).unwrap();
-    let text_of = |t: &mut Setup, id: usize| t.read(|e| e.project.tabs.by_id(id).unwrap().doc.buffer.text().to_string());
+    let text_of = |t: &mut Setup, id: usize| t.read(|e| e.project.tabs.by_id(id).unwrap().doc.buffer.to_string());
     let before = text_of(&mut t, other);
     t.keys("i").input("typed").keys("escape");
     assert!(t.text().starts_with("typed"));

@@ -50,7 +50,7 @@ pub fn tab_of_only_pages(tab: &mut Tab, done: Result<Arc<dyn Pages>, String>) {
         Ok(pages) => {
             let text = pages.text().unwrap_or_default().to_string();
             (rendered.pages, rendered.error) = (Some(pages), None);
-            if tab.doc.buffer.text() != text {
+            if *tab.doc.buffer.rope() != text {
                 tab.reload(text);
             }
             let version = tab.doc.buffer.version();

@@ -4,6 +4,7 @@
 //! changes, the last ones it sent stay, moved past the edit, until it sends
 //! new ones. Only the active file's are asked for.
 
+use ghostwrite_core::Rope;
 use ghostwrite_core::syntax::{Span, scope_named};
 use ghostwrite_lsp::convert;
 use serde_json::Value;
@@ -12,9 +13,9 @@ use crate::document::Document;
 
 #[derive(Default)]
 pub struct Semantic {
-    /// The server's spans, and the text they're of.
+    /// The server's spans, and the buffer version they're of.
     pub spans: Vec<Span>,
-    pub text: String,
+    pub version: u64,
     /// The id of the server's last answer and its tokens, encoded, for it
     /// to send only what's changed next time.
     last: Option<(String, Vec<u32>)>,
@@ -43,9 +44,9 @@ impl Semantic {
 }
 
 impl Document {
-    /// The server's answer about `text`, if it has one: its colors, from now on.
-    /// Whether they're new.
-    pub fn semantic_answered(&mut self, value: Option<Value>, text: String) -> bool {
+    /// The server's answer about `text` (the buffer's version `version`), if it has
+    /// one: its colors, from now on. Whether they're new.
+    pub fn semantic_answered(&mut self, value: Option<Value>, text: Rope, version: u64) -> bool {
         self.semantic.asking = false;
         // Asked before the server was ready, it says only now whether it has them.
         let Some(legend) = self.lsp.as_ref().and_then(|l| l.semantic_legend()) else {
@@ -58,8 +59,7 @@ impl Document {
         let tokens = convert::semantic_tokens(&data, &text, &legend);
         self.semantic.last = result.map(|id| (id, data));
         self.semantic.spans = tokens.into_iter().filter_map(|(range, name)| Some(Span { range, scope: scope_named(name)? })).collect();
-        self.semantic.text = text;
-        self.recolor();
+        self.semantic.version = version;
         true
     }
 }

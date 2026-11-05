@@ -67,7 +67,7 @@ pub(super) fn syntax_object(ch: char) -> Option<&'static str> {
 impl Motion {
     /// Where it takes `r` (`extend`: in select mode), in a file of `language`.
     fn from(self, b: &Buffer, r: Range, extend: bool, language: Option<&'static Language>) -> Option<Range> {
-        let text = b.text();
+        let text = b;
         match self {
             Motion::Object { ch, around, .. } if let Some(name) = syntax_object(ch) => nodes::object(language?, text, r, name, around),
             Motion::Node(NodeMove::Expand) => nodes::expand(language?, text, r),
@@ -159,7 +159,7 @@ impl Modal {
         let sel = *t.selection;
         let extend = self.mode == Mode::Select;
         let b = &*t.buffer;
-        let text = b.text();
+        let text = b;
         let cursor = sel.cursor(text);
         let put = |at: usize| sel.put_cursor(text, at, extend);
         let next = matches!(
@@ -332,7 +332,7 @@ impl Modal {
         let sel = *t.selection;
         let extend = self.mode == Mode::Select;
         let b = &*t.buffer;
-        let text = b.text();
+        let text = b;
         let target = sel.min_width_1(text);
         match command {
             SelectMode if !self.mode.reviewing() => self.mode = if self.mode == Mode::Select { Mode::Normal } else { Mode::Select },
@@ -359,7 +359,7 @@ impl Modal {
                 // Lines changed: typing goes on a line of its own in their place.
                 if whole_lines {
                     let at = Range::point(target.from());
-                    self.open(t, at.min_width_1(t.buffer.text()), false, 1, false);
+                    self.open(t, at.min_width_1(&*t.buffer), false, 1, false);
                 }
             }
             Yank => {
@@ -386,7 +386,7 @@ impl Modal {
             Increment | Decrement => {
                 let cursor = sel.cursor(text);
                 let (start, end) = (b.line_start_at(cursor), b.line_end_at(cursor));
-                if let Some((at, len, n)) = number_at(&text[start..end], cursor - start) {
+                if let Some((at, len, n)) = number_at(&b.slice(start..end), cursor - start) {
                     let by = count as i128 * if command == Increment { 1 } else { -1 };
                     let new = (n + by).to_string();
                     let at = start + at;
@@ -399,7 +399,7 @@ impl Modal {
                     let first = b.line_of(sel.from());
                     let last = b.line_of(b.prev(sel.to()).max(sel.from()));
                     let (start, end) = (b.line_start(first), b.line_end(last));
-                    let toggled = toggle_comment(b.slice(start..end), token);
+                    let toggled = toggle_comment(&b.slice(start..end), token);
                     let after = Range::new(start, start + toggled.len());
                     self.edit(t, start..end, &toggled, after, self.mode);
                 }
@@ -472,7 +472,7 @@ impl Modal {
         let sel = *t.selection;
         let extend = self.mode == Mode::Select;
         let b = &*t.buffer;
-        let text = b.text();
+        let text = b;
         let target = sel.min_width_1(text);
         match command {
             FindNextChar | FindTillChar | FindPrevChar | TillPrevChar => {
@@ -555,12 +555,12 @@ impl Modal {
     /// is indented first, as a line opened after the one above would be.
     fn insert_on_line(&mut self, t: &mut Target, sel: Range, end: bool, extend: bool) {
         let b = &*t.buffer;
-        let text = b.text();
+        let text = b;
         let line = b.line_of(sel.cursor(text));
         let start = b.line_start(line);
         if b.line(line).is_empty() {
             let opens = t.language.unwrap_or(&Language::DEFAULT).indent_after;
-            let indent = line.checked_sub(1).map_or(String::new(), |above| indent::for_newline(b.line(above), opens, t.indent));
+            let indent = line.checked_sub(1).map_or(String::new(), |above| indent::for_newline(&b.line(above), opens, t.indent));
             let after = Range::point(start + indent.len());
             return self.edit(t, start..start, &indent, after, Mode::Insert);
         }
@@ -580,11 +580,12 @@ impl Modal {
         let b = &*t.buffer;
         let line = b.line_of(if below { b.prev(target.to()) } else { target.from() });
         let language = t.language.unwrap_or(&Language::DEFAULT);
-        let leader = language.comment_leader(b.line(line)).filter(|_| comments);
+        let this = b.line(line);
+        let leader = language.comment_leader(&this).filter(|_| comments);
         let indent = match (leader, below, line.checked_sub(1)) {
             (Some(_), ..) => b.indent_at(b.line_start(line)).to_string(),
-            (None, true, _) => indent::for_newline(b.line(line), language.indent_after, t.indent),
-            (None, false, Some(above)) => indent::for_newline(b.line(above), language.indent_after, t.indent),
+            (None, true, _) => indent::for_newline(&this, language.indent_after, t.indent),
+            (None, false, Some(above)) => indent::for_newline(&b.line(above), language.indent_after, t.indent),
             (None, false, None) => b.indent_at(0).to_string(),
         };
         let one = format!("{indent}{}", leader.map(|l| format!("{l} ")).unwrap_or_default());
@@ -604,25 +605,24 @@ impl Modal {
     /// joined is blank. With `select_spaces` (`alt-J`), the spaces are selected.
     fn join(&mut self, t: &mut Target, sel: Range, select_spaces: bool) {
         let b = &*t.buffer;
-        let text = b.text();
         let first = b.line_of(sel.from());
         let mut last = b.line_of(b.prev(sel.to()).max(sel.from()));
         if first == last {
             last = (last + 1).min(b.line_count() - 1);
         }
         let language = t.language.unwrap_or(&Language::DEFAULT);
-        let mut leader = language.comment_leader(b.line(first));
+        let mut leader = language.comment_leader(&b.line(first)).map(str::to_string);
         // Each join: from the line's end to what's kept of the next, and whether a space goes there.
         let mut joins = vec![];
         for line in first..last {
             let next = b.line(line + 1);
             let mut end = b.line_start(line + 1) + next.len() - next.trim_start_matches([' ', '\t']).len();
-            match language.comment_leader(next) {
-                Some(next_leader) if Some(next_leader) == leader => {
+            match language.comment_leader(&next) {
+                Some(next_leader) if Some(next_leader) == leader.as_deref() => {
                     end += next_leader.len();
-                    end += text[end..].len() - text[end..].trim_start_matches([' ', '\t']).len();
+                    end = b.chars_at(end).find(|(_, c)| !matches!(c, ' ' | '\t')).map_or(b.len(), |(at, _)| at);
                 }
-                Some(next_leader) => leader = Some(next_leader),
+                Some(next_leader) => leader = Some(next_leader.to_string()),
                 None => {}
             }
             joins.push((b.line_end(line), end, end != b.line_end(line + 1)));
@@ -631,7 +631,7 @@ impl Modal {
         let mut joined = String::new();
         let mut kept = from;
         for &(start, end, space) in &joins {
-            joined.push_str(&text[kept..start]);
+            joined.push_str(&b.slice(kept..start));
             joined.push_str(if space { " " } else { "" });
             kept = end;
         }
@@ -663,7 +663,7 @@ impl Modal {
 
     /// The selection's text with each char changed by `change`; select mode ends.
     fn change_case(&mut self, t: &mut Target, sel: Range, change: impl Fn(char) -> Vec<char>) {
-        let target = sel.min_width_1(t.buffer.text());
+        let target = sel.min_width_1(&*t.buffer);
         let changed: String = t.buffer.slice(target.bytes()).chars().flat_map(change).collect();
         let after = same_shape(sel, target.from(), changed.len());
         self.edit(t, target.bytes(), &changed, after, Mode::Normal);
@@ -701,7 +701,7 @@ impl Modal {
         }
         t.buffer.edit(range, text);
         self.mode = mode;
-        *t.selection = after.within(t.buffer.text());
+        *t.selection = after.within(&*t.buffer);
     }
 }
 
@@ -713,9 +713,8 @@ fn facing(sel: Range, from: usize, to: usize) -> Range {
 /// Whether `r` is whole lines, line breaks and all (`x`), as helix's
 /// `selection_is_linewise` asks before `c` opens a line in their place.
 fn whole_lines(b: &Buffer, r: Range) -> bool {
-    let text = b.text();
     let (from, to) = (r.from(), r.to());
-    text[from..to].contains('\n') && b.line_start_at(from) == from && (to == b.len() || text[..to].ends_with('\n'))
+    b.line_of(from) != b.line_of(to) && b.line_start_at(from) == from && (to == b.len() || b.line_start_at(to) == to)
 }
 
 /// `alt-x`: in to the whole lines in the selection, as helix's
@@ -732,10 +731,10 @@ fn shrink_to_lines(b: &Buffer, r: Range) -> Range {
 
 /// `_`: the selection without the whitespace at its ends; nothing but
 /// whitespace, and it's the cursor alone.
-fn trimmed(text: &str, r: Range) -> Range {
-    let selected = &text[r.bytes()];
+fn trimmed(b: &Buffer, r: Range) -> Range {
+    let selected = b.slice(r.bytes());
     if selected.trim().is_empty() {
-        return Range::point(r.cursor(text));
+        return Range::point(r.cursor(b));
     }
     let start = r.from() + selected.len() - selected.trim_start().len();
     facing(r, start, start + selected.trim().len())
@@ -743,13 +742,13 @@ fn trimmed(text: &str, r: Range) -> Range {
 
 /// `alt-s`: the selection split at its line breaks, as helix's
 /// `split_on_newline` (the line breaks themselves left out).
-fn split_lines(text: &str, r: Range) -> Vec<Range> {
+fn split_lines(b: &Buffer, r: Range) -> Vec<Range> {
     if r.is_empty() {
         return vec![r];
     }
     let mut lines = vec![];
     let mut start = r.from();
-    for (i, _) in text[r.bytes()].match_indices('\n') {
+    for (i, _) in b.slice(r.bytes()).match_indices('\n') {
         lines.push(Range::new(start, r.from() + i));
         start = r.from() + i + 1;
     }

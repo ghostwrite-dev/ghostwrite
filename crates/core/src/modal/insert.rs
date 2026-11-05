@@ -63,8 +63,7 @@ pub(super) fn move_head(t: &mut Target, at: usize) {
 
 /// The pair the cursor at `at` is in the middle of, empty: `(|)`.
 fn between_pair(t: &Target, at: usize) -> Option<(char, char)> {
-    let text = t.buffer.text();
-    let (prev, next) = (text[..at].chars().next_back()?, text[at..].chars().next()?);
+    let (prev, next) = (t.buffer.chars_before(at).next()?.1, t.buffer.char_at(at)?);
     t.pairs().into_iter().find(|&(o, c)| o == prev && c == next)
 }
 
@@ -78,7 +77,8 @@ impl Modal {
     /// Where the abbreviation being typed starts, if the cursor is still at its end.
     fn abbreviation_start(&self, t: &Target) -> Option<usize> {
         let (start, end) = self.abbreviating?;
-        let typed = t.buffer.text().get(start..end)?;
+        let b = &t.buffer;
+        let typed = (end <= b.len() && b.is_char_boundary(start) && b.is_char_boundary(end)).then(|| b.slice(start..end))?;
         (t.selection.head == end && typed.starts_with('\\') && !typed[1..].contains(char::is_whitespace)).then_some(start)
     }
 
@@ -90,7 +90,7 @@ impl Modal {
         let Some(table) = t.abbreviations() else { return false };
         if let Some(start) = self.abbreviation_start(t) {
             let at = t.selection.head;
-            let typed = format!("{}{c}", &t.buffer.text()[start + 1..at]);
+            let typed = format!("{}{c}", t.buffer.slice(start + 1..at));
             if table.extends(&typed) {
                 put(t, at..at, c.encode_utf8(&mut [0; 4]), at + c.len_utf8());
                 self.abbreviating = Some((start, at + c.len_utf8()));
@@ -114,7 +114,7 @@ impl Modal {
     /// one, and stop typing it. `true` if it changed.
     pub(super) fn finish_abbreviation(&mut self, t: &mut Target) -> bool {
         let table = t.abbreviations();
-        let symbol = self.abbreviation_start(t).zip(table).and_then(|(start, table)| table.finished(&t.buffer.text()[start + 1..t.selection.head]));
+        let symbol = self.abbreviation_start(t).zip(table).and_then(|(start, table)| table.finished(&t.buffer.slice(start + 1..t.selection.head)));
         match symbol {
             Some(symbol) => self.replace_abbreviation(symbol, t),
             None => self.abbreviating = None,
@@ -161,7 +161,6 @@ impl Modal {
         if t.abbreviations().is_some() && !matches!(key, Key::Backspace | Key::Char(_)) && self.finish_abbreviation(t) && key == Key::Tab {
             return Outcome::Handled;
         }
-        let text = t.buffer.text();
         let at = t.selection.head;
         match key {
             Key::Escape => self.to_normal(t),
@@ -169,13 +168,13 @@ impl Modal {
             // To the next indent stop (helix's smart Tab needs a syntax tree to do more).
             Key::Tab | Key::BackTab => {
                 let unit = t.indent.as_str();
-                let column = text[t.buffer.line_start_at(at)..at].chars().count();
+                let column = t.buffer.slice(t.buffer.line_start_at(at)..at).chars().count();
                 let tab = if t.indent.hard_tabs { unit.as_str() } else { &unit[column % t.indent.width.max(1)..] };
                 put(t, at..at, tab, at + tab.len());
             }
             Key::Backspace => {
                 let start = t.buffer.line_start_at(at);
-                let before = &text[start..at];
+                let before = t.buffer.slice(start..at);
                 // In leading spaces: back to the previous indent stop.
                 let from = if !before.is_empty() && before.bytes().all(|b| b == b' ') && !t.indent.hard_tabs {
                     let width = t.indent.width.max(1);
@@ -245,17 +244,17 @@ impl Modal {
 /// Between brackets the cursor gets a line of its own. With only indent
 /// before the cursor, the line moves down as it is.
 fn newline(t: &mut Target) {
-    let text = t.buffer.text();
     let at = t.selection.head;
     let line = t.buffer.line_of(at);
     let start = t.buffer.line_start(line);
-    if text[start..at].trim().is_empty() {
+    let before = t.buffer.slice(start..at).into_owned();
+    if before.trim().is_empty() {
         return put(t, start..start, "\n", at + 1);
     }
-    let kept = start + text[start..at].trim_end_matches([' ', '\t']).len();
-    let indent = t.buffer.indent_at(at);
+    let kept = start + before.trim_end_matches([' ', '\t']).len();
+    let indent = t.buffer.indent_at(at).into_owned();
     let language = t.language.unwrap_or(&Language::DEFAULT);
-    let new = if let Some(leader) = language.comment_leader(t.buffer.line(line)) {
+    let new = if let Some(leader) = language.comment_leader(&t.buffer.line(line)) {
         format!("\n{indent}{leader} ")
     } else if between_pair(t, at).is_some_and(|(open, _)| matches!(open, '(' | '[' | '{')) {
         // `{|}`: the cursor on a line of its own, indented, and the bracket under.
@@ -263,7 +262,7 @@ fn newline(t: &mut Target) {
         let new = format!("{inner}\n{indent}");
         return put(t, kept..at, &new, kept + inner.len());
     } else {
-        let deeper = if text[start..kept].ends_with(language.indent_after) { t.indent.as_str() } else { String::new() };
+        let deeper = if before[..kept - start].ends_with(language.indent_after) { t.indent.as_str() } else { String::new() };
         format!("\n{indent}{deeper}")
     };
     put(t, kept..at, &new, kept + new.len());

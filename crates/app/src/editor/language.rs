@@ -92,7 +92,7 @@ impl Editor {
         let tab = self.tab()?;
         let lsp = tab.doc.lsp.as_ref()?;
         // In normal mode the block sits on a char; ask about that char.
-        Some((lsp.ask(method, tab.doc.text(), tab.cursor()), lsp.server()))
+        Some((lsp.ask(method, tab.doc.buffer.rope(), tab.cursor()), lsp.server()))
     }
 
     /// `gd`: jump to the definition of what's under the cursor.
@@ -110,7 +110,7 @@ impl Editor {
                 };
                 let Some(ix) = this.project.open(&path) else { return };
                 if let Some(tab) = this.project.tabs.get_mut(ix) {
-                    let at = convert::offset(tab.doc.text(), pos);
+                    let at = convert::offset(&tab.doc.buffer, pos);
                     let line = tab.doc.buffer.line_of(at);
                     tab.select(Range::point(at), Autoscroll::Center(line..line + 1));
                 }
@@ -128,7 +128,7 @@ impl Editor {
         self.leave_insert();
         let Some(ix) = self.project.open(path) else { return cx.notify() };
         if let Some((tab, selection)) = self.project.tabs.get_mut(ix).zip(selection) {
-            let at = convert::range(tab.doc.text(), selection);
+            let at = convert::range(&tab.doc.buffer, selection);
             let lines = tab.doc.buffer.line_of(at.start)..tab.doc.buffer.line_of(at.end) + 1;
             tab.select(Range::point(at.start), Autoscroll::Center(lines));
         }
@@ -218,7 +218,7 @@ impl Editor {
             self.completion = None;
             return;
         }
-        let (text, at, doc) = (tab.doc.text().to_string(), tab.view.selection.head, tab.doc.id);
+        let (text, at, doc) = (tab.doc.buffer.rope().clone(), tab.view.selection.head, tab.doc.id);
         let (answer, asked) = self.completions_asked.ask(lsp, "textDocument/completion", &text, at);
         cx.spawn(async move |this, cx| {
             let Some(value) = answer.await.ok().and_then(Result::ok) else { return };

@@ -3,7 +3,7 @@
 # Layered like helix (and zed): pure crates at the bottom, the gpui app on
 # top. Nothing below `app` knows about the UI.
 #
-#   core     text, selections, motions, text objects, modal keys, syntax over any grammar
+#   core     text (a rope), selections, motions, text objects, modal keys, syntax over any grammar
 #   project  files, search, file operations, persisted state
 #   terminal the user's shell, emulated: its screen, to draw and to read
 #   page     what a document's pages are: their sizes, pages drawn
@@ -66,6 +66,8 @@ wasmtime-wasi = "48"
 wit-bindgen = "0.57"
 ureq = { version = "3", features = ["json"] }
 
+# Text as a rope (helix's): an edit doesn't copy what's after it. Lines are `\n` only.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
 tree-sitter = "0.27"
 tree-sitter-highlight = "0.27"
 # Only for core's own tests: the editor's grammars are plugins' (`plugins/*/grammars.txt`).

@@ -205,7 +205,7 @@ and nothing below `app` knows about the UI.
 
 | Crate | What's in it |
 | --- | --- |
-| `core` | text, selections, motions, text objects, the modal keymap, what a language can be (plain text, built in, is none), syntax over any grammar (highlights, text objects, the tree), abbreviations |
+| `core` | text (a rope), selections, motions, text objects, the modal keymap, what a language can be (plain text, built in, is none), syntax over any grammar (highlights and the tree, kept as the text is edited, text objects), abbreviations |
 | `project` | files, search, the file tree model, shell runs and their stops, watching the disk, saved state |
 | `terminal` | the user's shell on a pseudo-terminal, emulated by alacritty: its screen, to draw and to read |
 | `page` | what a document's pages are, whoever lays them out: their sizes, and pages drawn |
