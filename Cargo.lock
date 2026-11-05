@@ -2506,11 +2506,15 @@ version = "0.2.0"
 name = "ghostwrite-plugin"
 version = "0.2.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "ghostwrite-core",
  "ghostwrite-lsp",
  "ghostwrite-page",
  "ghostwrite-project",
  "serde_json",
+ "sha2 0.10.9",
+ "ureq",
 ]
 
 [[package]]

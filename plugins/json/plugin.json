@@ -1,7 +1,0 @@
-{
-  "name": "json",
-  "version": "1.0.0",
-  "api": 1,
-  "extensions": ["json"],
-  "grammar": { "name": "json", "wasm": "tree-sitter-json.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" }
-}

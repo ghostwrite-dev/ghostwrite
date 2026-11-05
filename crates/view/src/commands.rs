@@ -7,7 +7,13 @@ use ghostwrite_project::{resolve, store};
 /// What `:plugin` is asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ManagePlugins {
-    Install(String),
+    /// Fetch it and say what it can do; with `!` (`confirmed`), install it.
+    Install {
+        source: String,
+        confirmed: bool,
+    },
+    /// A folder, used where it is, and read again when it changes.
+    Link(String),
     /// One, or all that can be.
     Update(Option<String>),
     Remove(String),
@@ -207,12 +213,14 @@ pub fn parse(line: &str) -> Result<Command, String> {
         "stop" => no_args(Command::StopDebugging),
         "plugins" => no_args(Command::Plugins),
         "plugin" => match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-            ["install", source] => Ok(Command::ManagePlugins(ManagePlugins::Install(source.to_string()))),
+            ["install", source] => Ok(Command::ManagePlugins(ManagePlugins::Install { source: source.to_string(), confirmed: false })),
+            ["install!", source] => Ok(Command::ManagePlugins(ManagePlugins::Install { source: source.to_string(), confirmed: true })),
+            ["link", folder] => Ok(Command::ManagePlugins(ManagePlugins::Link(folder.to_string()))),
             ["update"] => Ok(Command::ManagePlugins(ManagePlugins::Update(None))),
             ["update", plugin] => Ok(Command::ManagePlugins(ManagePlugins::Update(Some(plugin.to_string())))),
             ["remove", plugin] => Ok(Command::ManagePlugins(ManagePlugins::Remove(plugin.to_string()))),
             ["list"] => Ok(Command::Plugins),
-            _ => Err(":plugin install ‹folder or repository›, update [name], remove ‹name›, or list".into()),
+            _ => Err(":plugin install ‹folder, owner/repo[/name][@version] or git URL›, link ‹folder›, update [name], remove ‹name›, or list".into()),
         },
         "tutor" => no_args(Command::Tutor),
         "update" => no_args(Command::Update),
@@ -290,7 +298,7 @@ pub fn complete(line: &str, root: &Path) -> (String, Vec<String>) {
 fn complete_plugin(line: &str) -> Option<(String, Vec<String>)> {
     let rest = line.strip_prefix("plugin ")?;
     let (head, typed, among): (&str, &str, Vec<String>) = match rest.split_once(' ') {
-        None => ("", rest, ["install", "update", "remove", "list"].map(String::from).to_vec()),
+        None => ("", rest, ["install", "link", "update", "remove", "list"].map(String::from).to_vec()),
         Some((word @ ("update" | "remove"), typed)) => (word, typed, ghostwrite_plugin::listed().into_iter().map(|(name, _)| name).collect()),
         Some(_) => return None,
     };

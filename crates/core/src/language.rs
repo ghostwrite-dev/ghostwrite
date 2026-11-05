@@ -139,7 +139,7 @@ pub(crate) mod testing {
     pub fn install() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let textobjects = include_str!("../../../plugins/rust/textobjects.scm");
+            let textobjects = include_str!("testdata/rust-textobjects.scm");
             let rust = grammar("rust", tree_sitter_rust::LANGUAGE.into(), tree_sitter_rust::HIGHLIGHTS_QUERY, "", textobjects);
             Language::register(Box::leak(Box::new(Language {
                 name: "rust",

@@ -32,6 +32,7 @@ scripts/build-plugins.sh
 cp target/release/ghostwrite "$APP/Contents/MacOS/ghostwrite"
 cp -R target/bundled-plugins "$APP/Contents/Resources/plugins"
 cp assets/icon/Ghostwrite.icns "$APP/Contents/Resources/Ghostwrite.icns"
+cp LICENSE "$APP/Contents/Resources/LICENSE"
 scripts/info-plist.sh "$VERSION" > "$APP/Contents/Info.plist"
 
 if $LOCAL; then

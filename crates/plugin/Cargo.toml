@@ -11,3 +11,7 @@ ghostwrite-lsp.workspace = true
 ghostwrite-page.workspace = true
 ghostwrite-project.workspace = true
 serde_json.workspace = true
+ureq.workspace = true
+flate2.workspace = true
+crc32fast.workspace = true
+sha2.workspace = true

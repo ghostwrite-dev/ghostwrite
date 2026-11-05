@@ -179,6 +179,15 @@ fn a_plugin_is_installed_and_removed_from_inside_the_editor(cx: &mut TestAppCont
 
     t.command("plugin install mine");
     settle(&mut t);
+    let asked = t.status().unwrap_or_default();
+    assert!(
+        asked.starts_with("mine-test (version 7") && asked.contains("starts `mine-server` with your permissions") && asked.contains(":plugin install! "),
+        "{asked}"
+    );
+    assert!(!plugins.join("mine-test").exists(), "what it can do is said before it's installed");
+    assert!(ghostwrite_core::Language::for_path(std::path::Path::new("a.minetest")).is_none());
+    t.command("plugin install! mine");
+    settle(&mut t);
     let said = t.status().unwrap_or_default();
     assert!(said.starts_with("installed mine-test") && said.contains("version 7") && said.contains("starts `mine-server` with your permissions"), "{said}");
     assert!(plugins.join("mine-test/plugin.json").is_file());
@@ -196,4 +205,61 @@ fn a_plugin_is_installed_and_removed_from_inside_the_editor(cx: &mut TestAppCont
     assert_eq!(t.status().as_deref(), Some("removed mine-test"));
     assert!(ghostwrite_core::Language::for_path(std::path::Path::new("a.minetest")).is_none(), "and gone at once");
     assert!(!plugins.join("mine-test").exists());
+}
+
+#[gpui::test]
+fn a_linked_plugin_is_read_again_when_it_changes_and_unlinked(cx: &mut TestAppContext) {
+    let mut t = with_plugin("x\n", cx);
+    let plugins = ghostwrite_project::scratch_dir("editor-plugins");
+    let editor = t.editor.clone();
+    t.cx.update(|_, cx| editor.update(cx, |e, _| e.plugins_at = Some(plugins.clone())));
+    let source = t.dir.join("working");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("plugin.json"), r#"{ "name": "linked-test", "version": "1", "extensions": ["linkedone"] }"#).unwrap();
+
+    t.command("plugin link working");
+    settle(&mut t);
+    assert!(t.status().is_some_and(|said| said.starts_with("linked linked-test (version 1")), "{:?}", t.status());
+    let language = |path: &str| ghostwrite_core::Language::for_path(std::path::Path::new(path)).map(|l| l.name);
+    assert_eq!(language("a.linkedone"), Some("linked-test"), "it's there at once");
+    assert!(!plugins.join("linked-test").exists(), "where it is, not a copy");
+
+    std::fs::write(source.join("plugin.json"), r#"{ "name": "linked-test", "version": "2", "extensions": ["linkedtwo"] }"#).unwrap();
+    t.cx.update(|_, cx| editor.update(cx, |e, cx| e.reload_linked_plugins(cx)));
+    assert_eq!(t.status().as_deref(), Some("linked-test changed, and was read again"));
+    assert_eq!((language("a.linkedone"), language("a.linkedtwo")), (None, Some("linked-test")));
+
+    t.command("plugin remove linked-test");
+    settle(&mut t);
+    assert_eq!(t.status().as_deref(), Some("removed linked-test"));
+    assert!(language("a.linkedtwo").is_none() && source.join("plugin.json").is_file(), "unlinked, and the folder left alone");
+}
+
+#[gpui::test]
+fn a_file_no_plugin_handles_suggests_one_from_the_catalog_once(cx: &mut TestAppContext) {
+    let mut t = with_plugin("x\n", cx);
+    let server = ghostwrite_plugin::stand_in::StandIn::start();
+    server.serve(
+        "/catalog.json",
+        r#"{ "plugins": [{ "name": "typst", "repo": "ghostwrite-dev/typst", "description": "Typst files", "extensions": ["suggestme"] }] }"#,
+    );
+    let kept = ghostwrite_project::scratch_dir("catalog").join("catalog.json");
+    let editor = t.editor.clone();
+    let catalog = (format!("{}/catalog.json", server.url), kept);
+    t.cx.update(|_, cx| editor.update(cx, |e, _| e.catalog = Some(catalog)));
+    let open = |t: &mut Setup, name: &str| {
+        let path = t.dir.join(name);
+        std::fs::write(&path, "text").unwrap();
+        t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![path], cx)));
+        settle(t);
+    };
+
+    open(&mut t, "paper.suggestme");
+    assert_eq!(t.status().as_deref(), Some("Typst files: `:plugin install ghostwrite-dev/typst`"));
+    t.cx.update(|_, cx| editor.update(cx, |e, _| e.project.status = None));
+    open(&mut t, "other.suggestme");
+    assert_eq!(t.status(), None, "not twice for one kind of file");
+    open(&mut t, "notes.notinthecatalog");
+    assert_eq!(t.status(), None, "nor for one the catalog doesn't have");
+    assert_eq!(server.asked().len(), 1, "and it's fetched once, and kept");
 }

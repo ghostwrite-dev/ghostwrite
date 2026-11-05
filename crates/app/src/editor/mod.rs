@@ -165,6 +165,12 @@ pub struct Editor {
     attention: attention::Attention,
     /// Where `:plugin` keeps plugins.
     plugins_at: Option<PathBuf>,
+    /// A plugin fetched and checked by `:plugin install`, and where from, until `:plugin install!` installs it.
+    staged_plugin: Option<(String, ghostwrite_plugin::install::Staged)>,
+    /// Where the catalog of plugins to install is, and where it's kept: what's suggested
+    /// for a file no plugin handles.
+    catalog: Option<(String, PathBuf)>,
+    _watching_links: Option<gpui::Task<()>>,
     /// Breakpoints, and what's being debugged.
     debug: debug::DebugPane,
     /// A second pane beside the one with the keys.
@@ -324,6 +330,9 @@ impl Editor {
             attention: Default::default(),
             // A test says where, not to touch what's really installed.
             plugins_at: if cfg!(test) { None } else { crate::plugins::folder() },
+            staged_plugin: None,
+            catalog: if cfg!(test) { None } else { crate::plugins::catalog() },
+            _watching_links: None,
             debug: Default::default(),
             measured: Measured::default(),
             ticking: None,
@@ -339,6 +348,7 @@ impl Editor {
         }
         editor.start_recovery(cx);
         editor.check_for_update(false, cx);
+        editor.watch_linked_plugins(cx);
         editor
     }
 
@@ -450,6 +460,7 @@ impl Editor {
         self.project.activate(ix);
         // Another file is a jump, however it was got to (`ctrl-o` comes back).
         self.note_jump(from);
+        self.suggest_plugin(cx);
         self.tab_changed(cx);
     }
 

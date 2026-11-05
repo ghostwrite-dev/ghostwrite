@@ -90,7 +90,7 @@ bracket matching the one at the cursor is marked.
 | `f` `t` `F` `T`, `alt-.` | find a char, over lines too (Enter: a line's end, Tab: a tab); `alt-.` finds again (`mi`, `]p` too) |
 | `]p` `[p`, `] space` `[ space`, `g.` | the next and previous paragraph; blank lines below and above; where the last change was |
 | `alt-o` `alt-i`, `alt-n` `alt-p`, `alt-a` `alt-I`, `alt-e` `alt-b` | by the syntax tree, as in helix: out to the node around the selection and back in; the next and previous node beside it; a cursor on each node beside it, or inside it; to the end or start of the node it's in |
-| `maf` `mif`, `]f` `[f` | a function, all of it or inside; the next and previous one. Likewise `t` a type, `a` an argument, `c` a comment, `T` a test, `e` an entry, from helix's queries (each language's `textobjects.scm`, in `plugins/`) |
+| `maf` `mif`, `]f` `[f` | a function, all of it or inside; the next and previous one. Likewise `t` a type, `a` an argument, `c` a comment, `T` a test, `e` an entry, from helix's queries (each language's `textobjects.scm`, in its plugin) |
 | `space /`, `:grep` | search the project and go through the matches |
 | `space k`, `space d` | docs for what's under the cursor; go through the file's diagnostics, one note at a time |
 | `gr`, `space r`, `space .`, `space s` | the language server: go through the references, rename everywhere, its code actions here, pick one of the file's symbols |
@@ -149,7 +149,8 @@ story's up, the one its command last ran in. To look around the project it write
 `<tool>` blocks, which Ghostwrite runs in the background.
 
 `:preview` (or `space v`) opens a Typst file's pages in a tab of their own, as a PDF has, compiled
-as you type, saved or not, and goes back to the file from there. Typst comes as a plugin:
+as you type, saved or not, and goes back to the file from there. Typst comes as a plugin,
+installed with `:plugin install ghostwrite-dev/typst`:
 the project's files and fonts are used as they are, and packages come from
 Typst's cache, downloaded the first time. The cursor and the selection show
 on the pages too, on the glyphs they're on, and clicking a glyph puts the
@@ -168,7 +169,7 @@ edit, until it sends new ones. Lean has no grammar that parses it well (its
 syntax grows with every `notation`), so its plugin colors it by its tokens until
 Lean's own colors arrive.
 
-A Lean file shows its goals beside it (`plugins/lean`), as Lean's infoview does: the proof
+With its plugin (`:plugin install ghostwrite-dev/lean`), a Lean file shows its goals beside it, as Lean's infoview does: the proof
 state at the cursor (or the type expected there), the messages on the
 cursor's line (`#eval`'s output among them), and how far Lean has got
 checking the file (`:preview` hides them too). Lean runs through `lake
@@ -179,12 +180,12 @@ extension and with its abbreviations: `\to` is `→`, `\N` is `ℕ`, `\<>` is
 longer one starts with it, or when you type a space or another char that
 can't go on to one (Tab finishes it alone); `\\` is a backslash.
 
-A PDF opens as its pages, read-only, by way of a plugin (`plugins/pdf`, drawing them with hayro):
+A PDF opens as its pages, read-only, by way of a plugin (`pdf`, drawing them with hayro):
 `j` and `k` go from page to page. There's no text to select in one. A model can read one with its usual `read`, and is shown
 the PDF itself, if it can see them (Claude can; local models are told they can't); what it says
 about it goes in the file it's made from. It's drawn again when the file changes, a rebuild say.
 
-An image opens the same way (`plugins/image`): PNG, JPEG, GIF (its first frame), WebP, BMP, TIFF or
+An image opens the same way (`image`): PNG, JPEG, GIF (its first frame), WebP, BMP, TIFF or
 ICO, the way up the file says, and shown no bigger than it is until you zoom in. It's read-only, and it's drawn again
 when the file changes. A model reads one with its usual `read`, the same as a PDF: what's too big, or in a format it doesn't
 take, is made into something it can be shown first.
@@ -236,8 +237,7 @@ and nothing below `app` knows about the UI.
 | `app` | the application (binary `ghostwrite`) |
 
 The editor knows no file type in particular: built in, a file is plain text. What's
-particular to one is a plugin, every language included: a folder in `plugins/` (see
-Plugins, below), which can add languages, language servers, a file's pages in a tab,
+particular to one is a plugin, every language included (see Plugins, below), which can add languages, language servers, a file's pages in a tab,
 a panel beside a file (from its server), key bindings (a key sequence running a `:`
 command, shown under "Plugin keys" in `space ?`), and rules for the prompt. None is
 built in: `crates/app/src/plugins.rs` finds them in their folders, and a test keeps
@@ -277,11 +277,25 @@ cursor goes there, and the calls, variables and what it printed show under the c
 
 ## Plugins
 
-`:plugin install ‹source›` installs a plugin from a folder, a git URL, or GitHub's `owner/repo`,
-says all it adds, and it's there at once. `:plugin update [name]` fetches it again (nothing
-updates by itself), `:plugin remove ‹name›` takes it out, and `:plugins` lists them and says what's
-wrong with any that couldn't be read. They live in `plugins/` in the config folder. Files open
-when a language arrives or goes keep what they had until they're opened again.
+`:plugin install ‹source›` fetches a plugin, checks it, and says all it adds and can reach;
+`:plugin install! ‹source›` then installs it, and it's there at once. A source is:
+
+- a folder: `:plugin install ../my-plugin`;
+- a GitHub release: `ghostwrite-dev/typst` (the latest), `ghostwrite-dev/typst@1.0.0` (that
+  version), or `ghostwrite-dev/default-plugins/rust` (one plugin of a release of several). The zip
+  (`<name>-<version>.zip` or `<name>.zip`) is checked against the `.sha256` beside it or the
+  release's `SHA256SUMS`, and if it has neither, installing says so. GitHub's API is asked
+  without a token, or with `GITHUB_TOKEN` if it's set;
+- a git URL, or a GitHub repository with no release, cloned with its built `.wasm` in it.
+
+`:plugin update [name]` fetches it again (a release's latest; nothing updates by itself),
+`:plugin remove ‹name›` takes it out, and `:plugins` lists them and says what's wrong with any that
+couldn't be read. `:plugin link ‹folder›` uses a folder where it is, for working on a plugin: it's
+read again when its `plugin.json` or a `.wasm` changes, and `:plugin remove` unlinks it. They live
+in `plugins/` in the config folder. Files open when a language arrives or goes keep what they had
+until they're opened again. When a file opens that no plugin handles, and one in
+[the catalog](https://github.com/ghostwrite-dev/default-plugins/blob/main/catalog.json) would, the
+status line says how to install it, once a run for each kind of file.
 
 A plugin's code can't reach files, the network or the environment unless its manifest asks: it
 sees the file it's asked about, and answers with what it would like done, which the editor does
@@ -290,9 +304,10 @@ and starts afresh next time. Installing says all it asks for. That doesn't cover
 a plugin names: that's a program that runs as you do, which is why installing says what it
 starts. Nor is a grammar stopped if it runs away: it can only hold up coloring.
 
-Every language comes with the app as such a plugin, in `plugins/`: Rust, Python, JavaScript,
-JSX, TypeScript and TSX (`plugins/javascript`), Bash, TOML, Markdown, JSON, YAML, Go, C and C++
-(`plugins/c`), CSS, Lean, and Typst; so do PDFs and images (`plugins/pdf`, `plugins/image`). Built
+The app comes with plugins for Rust, Python, JavaScript, JSX, TypeScript and TSX, Bash, TOML,
+Markdown, JSON, YAML, Go, C and C++, CSS, PDFs and images, from
+[ghostwrite-dev/default-plugins](https://github.com/ghostwrite-dev/default-plugins). Typst
+(`ghostwrite-dev/typst`) and Lean (`ghostwrite-dev/lean`) are installed when you want them. Built
 in, the editor has only plain text. Most of them are no code at all: a `plugin.json`, a tree-sitter
 grammar compiled to WebAssembly, and its queries. Python's has a little code too, which starts its
 servers in the project's virtualenv (`.venv` or `venv`, in the project, or `$VIRTUAL_ENV`) and tells
@@ -303,22 +318,25 @@ fonts, keeps Typst's packages in Typst's own folders, and downloads from package
 nowhere else. The first time, it takes some seconds to compile and to read the fonts; after that
 it starts at once.
 
-`scripts/build-plugins.sh` builds them all into `target/bundled-plugins`, which the installers
-copy: each one's code, if it has any, and the grammars its `grammars.txt` lists, as each grammar's
-project publishes them for the version listed (the versions Ghostwrite's highlighting was made
-with). They're downloaded once, into `target/grammars`, and checked against their sha256. A
+`scripts/build-plugins.sh` downloads the plugins the app comes with, as `plugins.lock` pins them
+(a line each: `<name> <tag> <url> <sha256>`), into `target/plugin-downloads`, checks them, and
+unzips them into `target/bundled-plugins`, which the installers copy. Typst and Lean, which only
+the tests use, are pinned in `test-plugins.lock` and go to `target/test-plugins`. To work on the
+plugins, `GHOSTWRITE_PLUGINS_SRC=‹a default-plugins checkout›` builds them from it instead, with
+[ghostwrite-dev/plugin-build](https://github.com/ghostwrite-dev/plugin-build)'s `build.sh`
+(`PLUGIN_BUILD` says where, if it isn't beside the checkout). A
 grammar runs in WebAssembly a little slower than compiled in: a 10,000-line Rust file parses in
 about 40 ms rather than 26, and is colored (which is redone after each change) in about 62 ms
 rather than 47.
 The highlight queries are the grammars' own, unchanged. The text-object queries (`textobjects.scm`)
 are helix's (`runtime/queries/*/textobjects.scm` at https://github.com/helix-editor/helix), with
-the files each inherits from put in it, and as such are under the Mozilla Public License 2.0
-(https://mozilla.org/MPL/2.0/), unlike the rest of Ghostwrite.
+the files each inherits from put in it.
+
 
 ### Writing one
 
 A plugin is a folder with a `plugin.json`, and it needs only the parts it uses. Without code, a
-single `.json` file in `plugins/` will do:
+single `.json` file in the plugins folder will do:
 
 ```json
 { "name": "zig", "extensions": ["zig"], "comment": "//", "server": ["zls"],
@@ -354,7 +372,9 @@ cargo build --release --target wasm32-wasip2
 cp target/wasm32-wasip2/release/word_count.wasm .
 ```
 
-Then `:plugin install` that folder. To install from git, commit the `.wasm`. A plugin can say
+Then `:plugin link` that folder while you work on it, or `:plugin install` it. To share it, release
+it on GitHub as `<name>-<version>.zip` with its `.sha256`, which plugin-build's workflow does for
+a tag, and it installs as `owner/repo`; or commit the `.wasm`, and it's cloned. A plugin can say
 something, edit the text it was shown (one undo step; not if the text has changed since), and
 open a file of the project. It can hear `opened`, `saved` and `closed`. The editor's own commands
 can't be replaced. `crates/plugin-api/wit/plugin.wit` is the whole interface, and `"api"` is its
@@ -379,17 +399,18 @@ Besides `extensions`, a language can have `files` (whole names: `Makefile`), an 
 call it, if not its name), `indent_after` (what a line ends with when the next goes in a level:
 brackets unless it says, `"{[(:"`), `pairs` and `unpaired`. Several languages can share a plugin,
 under `"languages": [...]`, each written the same way, and its servers serve them all unless one
-names its own (`"servers": ["clangd"]`); `plugins/javascript` and `plugins/c` do. A grammar's
+names its own (`"servers": ["clangd"]`); default-plugins' `javascript` and `c` do. A grammar's
 `"query"` can be several files, read in order, the last winning where two color the same thing;
 `"injections"` says what other languages are inside it, by name (a code block's), and
-`"grammars": [...]` are grammars only there to be injected (`plugins/markdown`'s inline text). A
+`"grammars": [...]` are grammars only there to be injected (`markdown`'s inline text). A
 server is started in the folder nearest the file with one of its `roots`, else the project; with
 `"configured_by_code": true`, the plugin's code says what it starts with and its settings
 (`server_env` and `server_settings`, with `"access": { "project": true, "env": ["PATH"] }` to
-look in the project and see the server's PATH), as `plugins/python` does.
+look in the project and see the server's PATH), as `python` does.
 
-To bundle it with the app, put the folder in `plugins/`, with a `grammars.txt` saying where its
-grammar is published and its sha256, instead of the `.wasm`: `scripts/build-plugins.sh` does the rest.
+To bundle it with the app, add its folder to default-plugins, with a `grammars.txt` saying where
+its grammar is published and its sha256, instead of the `.wasm`; once it's released, pin it in
+`plugins.lock`.
 
 A plugin can color files itself instead (`"highlights": true`), and make a file's pages for a tab
 of their own (`"pages": true`), as Typst's does. Pages are drawn by one call, `draw`, for any
@@ -460,4 +481,5 @@ come back after a crash.
 
 ## License
 
-MIT or Apache-2.0, at your option: see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+The Mozilla Public License 2.0: see [LICENSE](LICENSE). The word motions in
+`crates/core/src/movement.rs` are ported from helix, under the same license.

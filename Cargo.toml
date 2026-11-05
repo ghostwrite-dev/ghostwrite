@@ -16,7 +16,7 @@
 #   view     the editor's state: documents, tabs, the project, search, registers, jumps
 #   app      the gpui application (binary `ghostwrite`)
 [workspace]
-exclude = ["examples", "plugins", "crates/wasm/tests/fixture"]
+exclude = ["examples", "crates/wasm/tests/fixture"]
 resolver = "3"
 members = ["crates/core", "crates/project", "crates/terminal", "crates/page", "crates/lsp", "crates/dap", "crates/plugin", "crates/plugin-api", "crates/wasm", "crates/model", "crates/ai", "crates/view", "crates/app"]
 default-members = ["crates/app"]
@@ -25,7 +25,7 @@ default-members = ["crates/app"]
 version = "0.2.0"
 edition = "2024"
 publish = false
-license = "MIT OR Apache-2.0"
+license = "MPL-2.0"
 
 [workspace.dependencies]
 nucleo-matcher = "0.3"
@@ -65,12 +65,16 @@ wasmtime = { version = "48", default-features = false, features = ["cache", "com
 wasmtime-wasi = "48"
 wit-bindgen = "0.57"
 ureq = { version = "3", features = ["json"] }
+# Plugins' zips: unzipped, and checked.
+flate2 = "1"
+crc32fast = "1"
+sha2 = "0.10"
 
 # Text as a rope (helix's): an edit doesn't copy what's after it. Lines are `\n` only.
 ropey = { version = "1.6", default-features = false, features = ["simd"] }
 tree-sitter = "0.27"
 tree-sitter-highlight = "0.27"
-# Only for core's own tests: the editor's grammars are plugins' (`plugins/*/grammars.txt`).
+# Only for core's own tests: the editor's grammars are plugins'.
 tree-sitter-rust = "0.24"
 
 [profile.dev]

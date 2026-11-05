@@ -1,4 +1,4 @@
-//! Lean, as the plugin that comes with the editor (`plugins/lean`): its colors, its
+//! Lean, as the plugin ghostwrite-dev/lean installs: its colors, its
 //! abbreviations, its goals beside a file, and, live, Lean itself through the client,
 //! as the editor drives it. Needs `scripts/build-plugins.sh` to have run, and the live
 //! test `lake` (elan) installed (`cargo test -p ghostwrite-wasm --test lean -- --ignored`).
@@ -16,7 +16,7 @@ use ghostwrite_plugin::{Block, Plugin as _};
 use serde_json::{Value, json};
 
 fn plugin_folder() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/bundled-plugins/lean")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-plugins/lean")
 }
 
 /// Its language, the plugin installed; `None` if it hasn't been built.

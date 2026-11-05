@@ -635,7 +635,7 @@ impl Manifest {
         !self.rules.is_empty()
     }
 
-    /// The plugins in the folder, by file or folder of their own, and what's wrong
+    /// The plugins in the folder, by file or folder of their own (or a link to one), and what's wrong
     /// with those that can't be read.
     pub fn in_folder(folder: &Path) -> (Vec<Self>, Vec<String>) {
         let (mut found, mut wrong) = (vec![], vec![]);
@@ -648,6 +648,9 @@ impl Manifest {
                 continue;
             } else if path.is_dir() {
                 Self::in_own_folder(&path)
+            } else if path.extension().is_some_and(|e| e == crate::install::LINK) {
+                // Linked: read where it is.
+                std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|to| Self::in_own_folder(Path::new(to.trim())))
             } else if path.extension().is_some_and(|e| e == "json") {
                 std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|text| Self::parse(&text))
             } else {

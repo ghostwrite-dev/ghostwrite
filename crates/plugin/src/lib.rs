@@ -17,8 +17,11 @@
 //! - `:` commands ([`PluginCommand`]), and answers to what happens to files ([`Event`]);
 //! - rules for the model's prompt.
 
+pub mod catalog;
 pub mod install;
 pub mod manifest;
+#[doc(hidden)]
+pub mod stand_in;
 
 use std::ops::Range;
 use std::path::Path;

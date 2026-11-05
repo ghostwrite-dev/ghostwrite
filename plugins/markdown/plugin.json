@@ -1,8 +1,0 @@
-{
-  "name": "markdown",
-  "version": "1.0.0",
-  "api": 1,
-  "extensions": ["md", "markdown"],
-  "grammar": { "name": "markdown", "wasm": "tree-sitter-markdown.wasm", "query": "highlights.scm", "injections": "injections.scm" },
-  "grammars": [{ "name": "markdown_inline", "wasm": "tree-sitter-markdown_inline.wasm", "query": "highlights-inline.scm" }]
-}

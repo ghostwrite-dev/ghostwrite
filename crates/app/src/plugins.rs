@@ -7,6 +7,11 @@ pub fn folder() -> Option<std::path::PathBuf> {
     Some(crate::config::path()?.parent()?.join("plugins"))
 }
 
+/// Where the catalog of plugins to install is, and where what's fetched of it is kept.
+pub fn catalog() -> Option<(String, std::path::PathBuf)> {
+    Some((ghostwrite_plugin::catalog::URL.to_string(), ghostwrite_project::platform::cache_dir()?.join("plugin-catalog.json")))
+}
+
 /// Where the plugins that come with the app are: as the installers put them, or
 /// where `scripts/build-plugins.sh` does, when it's run from the source.
 fn bundled() -> Option<std::path::PathBuf> {
@@ -36,8 +41,10 @@ pub fn install() {
                 plugins.push(Box::new(manifest));
             }
         }
-        // And those that come with the app, unless they're there already.
-        if let Some(folder) = bundled() {
+        // And those that come with the app, unless they're there already; testing, those
+        // the tests use that don't come with it, which `scripts/build-plugins.sh` puts beside them.
+        let tests = cfg!(test).then(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-plugins"));
+        for folder in bundled().into_iter().chain(tests) {
             let (found, wrong) = ghostwrite_plugin::manifest::Manifest::in_folder(&folder);
             NOT_READ.lock().unwrap_or_else(|e| e.into_inner()).extend(wrong);
             for manifest in found {
@@ -57,7 +64,8 @@ static NOT_READ: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(vec![]);
 pub fn list() -> String {
     let there: Vec<String> =
         ghostwrite_plugin::listed().into_iter().map(|(name, adds)| if adds.is_empty() { name } else { format!("{name} ({adds})") }).collect();
-    let read = if there.is_empty() { "no plugins: :plugin install ‹folder or repository›".to_string() } else { format!("plugins: {}", there.join(", ")) };
+    let read =
+        if there.is_empty() { "no plugins: :plugin install ‹folder, owner/repo or git URL›".to_string() } else { format!("plugins: {}", there.join(", ")) };
     let wrong = NOT_READ.lock().unwrap_or_else(|e| e.into_inner());
     if wrong.is_empty() { read } else { format!("{read}. Not read: {}", wrong.join("; ")) }
 }

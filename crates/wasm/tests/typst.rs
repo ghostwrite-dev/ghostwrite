@@ -1,6 +1,6 @@
 //! Typst as a plugin: pages from a project's files, live as they're typed, that
 //! know where their text came from; and it reaches only what it's given.
-//! Needs `scripts/build-plugins.sh` to have run.
+//! Needs `scripts/build-plugins.sh` to have run, which puts it in target/test-plugins.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -15,7 +15,7 @@ fn plugin() -> Option<&'static Manifest> {
     PLUGIN
         .get_or_init(|| {
             ghostwrite_plugin::set_runtime(Box::new(ghostwrite_wasm::Runtime));
-            let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/bundled-plugins/typst");
+            let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-plugins/typst");
             if !folder.join("typst.wasm").is_file() {
                 return None;
             }
@@ -300,7 +300,7 @@ fn tinymist_jumps_completes_and_rechecks_while_typing() {
 
     let plugin = needs_the_plugin!();
     let servers = plugin.languages()[0].servers;
-    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/bundled-plugins/typst");
+    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-plugins/typst");
     ghostwrite_plugin::install(|| vec![Box::new(Manifest::in_own_folder(&folder).expect("its manifest is sound"))]);
     let (root, _) = project();
     let (main, other) = (root.join("main.typ"), root.join("other.typ"));

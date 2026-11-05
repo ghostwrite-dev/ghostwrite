@@ -1,9 +1,0 @@
-{
-  "name": "toml",
-  "version": "1.0.0",
-  "api": 1,
-  "extensions": ["toml"],
-  "files": ["Cargo.lock"],
-  "comment": "#",
-  "grammar": { "name": "toml", "wasm": "tree-sitter-toml.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" }
-}
