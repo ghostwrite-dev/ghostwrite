@@ -21,6 +21,12 @@ scripts/install-windows.ps1     # Windows: installs for this user, with a Start 
 
 Each script builds the app in release mode, downloads the plugins that come with it (as `plugins.lock` pins them, each checked against its sha256), and installs both. Typst and Lean aren't among them: install them from the editor with `:plugin install ghostwrite-dev/typst` and `:plugin install ghostwrite-dev/lean`.
 
+To install the app with none of the plugins, add `--no-plugins` (`-NoPlugins` on Windows). Only plain text is built in, so then pick the languages you want from the editor, one at a time from the default plugins' release:
+
+```text
+:plugin install ghostwrite-dev/default-plugins/rust
+```
+
 What else each system needs:
 
 | System | Needs |

@@ -1,5 +1,7 @@
-# Builds Ghostwrite and installs it for this user, with a Start menu entry.
+# Builds Ghostwrite and installs it for this user, with a Start menu entry, and the
+# default plugins, or none with -NoPlugins.
 # It needs Rust with the MSVC toolchain, cmake, and LLVM (for llama.cpp's bindings).
+param([switch]$NoPlugins)
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
@@ -13,7 +15,7 @@ $bundled = "target\bundled-plugins"
 $downloads = "target\plugin-downloads"
 Remove-Item -Recurse -Force $bundled -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $bundled, $downloads | Out-Null
-foreach ($line in Get-Content "plugins.lock") {
+foreach ($line in $(if ($NoPlugins) { @() } else { Get-Content "plugins.lock" })) {
     if ($line -match '^\s*(#|$)') { continue }
     $name, $tag, $url, $sum = $line -split '\s+'
     $zip = Join-Path $downloads "$name-$tag.zip"
@@ -35,7 +37,7 @@ Copy-Item "target\release\ghostwrite.exe" $dir -Force
 Copy-Item "assets\icon\ghostwrite.ico" $dir -Force
 Copy-Item "LICENSE" $dir -Force
 Remove-Item -Recurse -Force (Join-Path $dir "plugins") -ErrorAction SilentlyContinue
-Copy-Item $bundled (Join-Path $dir "plugins") -Recurse -Force
+if (-not $NoPlugins) { Copy-Item $bundled (Join-Path $dir "plugins") -Recurse -Force }
 
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Programs")) "Ghostwrite.lnk"))
