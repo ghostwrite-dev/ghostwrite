@@ -807,18 +807,10 @@ impl Manifest {
         }
         (found, wrong)
     }
-}
 
-impl Plugin for Manifest {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    /// Everything it can do, as it's told to you when it's installed: what it can
-    /// reach beyond the editor is its language server, which runs as you do.
-    fn describe(&self) -> String {
-        let mut parts: Vec<String> = vec![];
-        parts.extend(self.version.map(|version| format!("version {version}")));
+    /// What it adds, and what it can reach, one by one: what `describe` says after its version.
+    pub fn adds(&self) -> Vec<String> {
+        let mut parts = vec![];
         if !self.commands.is_empty() {
             parts.push(self.commands.iter().map(|command| format!(":{}", command.name)).collect::<Vec<_>>().join(" "));
         }
@@ -834,9 +826,7 @@ impl Plugin for Manifest {
                 language.extensions.iter().map(|e| format!(".{e}")).chain(language.file_names.iter().map(|f| f.to_string())).collect::<Vec<_>>().join(" ")
             ));
         }
-        for server in &self.servers {
-            parts.push(format!("starts `{}` with your permissions", server.command.join(" ")));
-        }
+        parts.extend(self.started());
         for view in self.views {
             let key = view.key.map_or(String::new(), |key| format!(", on {key}"));
             parts.push(format!("its view {}: {} {}{key}", view.id.name, view.title, placed(view.place)));
@@ -845,9 +835,38 @@ impl Plugin for Manifest {
         if !self.keys.is_empty() {
             parts.push(self.keys.iter().map(|key| key.keys).collect::<Vec<_>>().join(", "));
         }
-        if self.has_rules() {
-            parts.push("adds rules to the model's prompt".to_string());
-        }
+        parts.extend(self.has_rules().then(|| RULES.to_string()));
+        parts
+    }
+
+    /// What it can reach beyond the editor, one by one: the servers it starts, what its
+    /// code may read, write and download, and the model's prompt.
+    pub fn reaches(&self) -> Vec<String> {
+        let mut parts = self.started();
+        parts.extend(self.access.described());
+        parts.extend(self.has_rules().then(|| RULES.to_string()));
+        parts
+    }
+
+    /// The servers it starts, which run as you do.
+    fn started(&self) -> Vec<String> {
+        self.servers.iter().map(|server| format!("starts `{}` with your permissions", server.command.join(" "))).collect()
+    }
+}
+
+/// What's said of a plugin with rules for the model.
+const RULES: &str = "adds rules to the model's prompt";
+
+impl Plugin for Manifest {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    /// Everything it can do, as it's told to you when it's installed: its version, then
+    /// what it adds ([`Manifest::adds`]).
+    fn describe(&self) -> String {
+        let mut parts: Vec<String> = self.version.map(|version| format!("version {version}")).into_iter().collect();
+        parts.extend(self.adds());
         parts.join("; ")
     }
 
@@ -944,6 +963,15 @@ mod tests {
         Language::register(language);
         assert_eq!(Language::for_path(Path::new("a.zigtest")).map(|l| l.name), Some("zig-test"), "and its files are found");
         assert!(zig.describe().contains("starts `zls --stdio` with your permissions"), "{}", zig.describe());
+    }
+
+    #[test]
+    fn what_a_plugin_adds_is_listed_and_what_it_reaches_is_part_of_it() {
+        let zig = Manifest::parse(&ZIG.replace(r#""name": "zig-test","#, r#""name": "zig-test", "version": "2","#)).unwrap();
+        let adds = zig.adds();
+        assert_eq!(adds, [".zigtest files", "starts `zls --stdio` with your permissions", "space z", "adds rules to the model's prompt"]);
+        assert_eq!(zig.describe(), format!("version 2; {}", adds.join("; ")), "what's described, joined");
+        assert_eq!(zig.reaches(), ["starts `zls --stdio` with your permissions", "adds rules to the model's prompt"]);
     }
 
     #[test]

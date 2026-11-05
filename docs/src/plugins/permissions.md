@@ -36,13 +36,22 @@ A plugin's code is stopped if a call takes more than 5 seconds or 256 MB of memo
 
 ## What installing says
 
-`:plugin install` fetches a plugin and checks it, and says everything it adds in one line, in the status line. Nothing is installed until you type `:plugin install!` with the same source. For Typst, for example:
+`:plugin install` fetches a plugin and checks it, and asks whether to install it, saying everything it adds, a line each. Nothing is installed until you press Enter (Esc doesn't install it; `:plugin install!` installs without asking). For Typst, for example:
 
 ```text
-typst (version 1.0.0; .typ files, highlighted; starts `tinymist` with your permissions;
-reads the project; reads the system's fonts; reads {data}/typst/packages;
-writes {cache}/typst/packages; downloads from packages.typst.org;
-may use 4096 MB and 120 s at a time). :plugin install! ghostwrite-dev/typst to install it
+Install typst 1.1.0?
+  .typ files, highlighted
+  starts `tinymist` with your permissions
+  its view pages: Pages in a tab, on space v
+  reads the project
+  reads the system's fonts
+  reads {data}/typst/packages
+  writes {cache}/typst/packages
+  downloads from packages.typst.org
+  may use 4096 MB and 120 s at a time
+⏎ install · esc cancel
 ```
 
-The line names, in order: its version; its `:` commands; when it runs (`runs when a file is saved`); each language's files, and whether they're highlighted or typed with abbreviations; each server it starts; what it shows beside its files; what it may reach; its keys; and whether it adds rules to the model's prompt. A release with no checksum adds `. <zip> has no checksum beside it to check it against` before the last part.
+The question gives its version, and the lines name, in order: its `:` commands; when it runs (`runs when a file is saved`); each language's files, and whether they're highlighted or typed with abbreviations; each server it starts; what it shows beside its files; what it may reach; its keys; and whether it adds rules to the model's prompt. After them come warnings, marked `!`: a release with no checksum (`! <zip> has no checksum beside it to check it against`), and a view whose key is taken. Once it's installed, the status line says the same in one line, and `:plugins` lists it.
+
+An update asks too if it would reach more than what's installed (a server it didn't start, more it may read, write or download from, rules for the model's prompt), listing only what's new.

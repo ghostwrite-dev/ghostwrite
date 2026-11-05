@@ -35,7 +35,7 @@ named at the top of its script, and on Windows the MSVC toolchain and LLVM. See
 :plugin install ghostwrite-dev/lean
 ```
 
-Each says what the plugin adds and can reach; `:plugin install!` with the same source installs it.
+Each asks first, listing what the plugin adds and can reach; Enter installs it.
 
 ## Getting started
 

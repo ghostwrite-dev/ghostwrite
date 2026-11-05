@@ -179,32 +179,72 @@ fn a_plugin_is_installed_and_removed_from_inside_the_editor(cx: &mut TestAppCont
 
     t.command("plugin install mine");
     settle(&mut t);
-    let asked = t.status().unwrap_or_default();
-    assert!(
-        asked.starts_with("mine-test (version 7") && asked.contains("starts `mine-server` with your permissions") && asked.contains(":plugin install! "),
-        "{asked}"
-    );
+    let (asked, lines) = question(&mut t).expect("it's asked about");
+    assert_eq!(asked, "Install mine-test 7?");
+    assert_eq!(lines, [(".minetest files".to_string(), false), ("starts `mine-server` with your permissions".to_string(), false)]);
     assert!(!plugins.join("mine-test").exists(), "what it can do is said before it's installed");
     assert!(ghostwrite_core::Language::for_path(std::path::Path::new("a.minetest")).is_none());
-    t.command("plugin install! mine");
+    t.keys("i a escape");
+    assert_eq!((t.text(), t.at().1), ("x\n".to_string(), Mode::Normal), "the keys are the question's, not the code's");
+    assert!(question(&mut t).is_none() && !plugins.join("mine-test").exists(), "and esc doesn't install it");
+    assert!(incoming(&plugins).is_empty(), "what was fetched is let go");
+
+    t.command("plugin install mine");
     settle(&mut t);
+    t.keys("enter");
+    settle(&mut t);
+    assert!(question(&mut t).is_none());
     let said = t.status().unwrap_or_default();
     assert!(said.starts_with("installed mine-test") && said.contains("version 7") && said.contains("starts `mine-server` with your permissions"), "{said}");
     assert!(plugins.join("mine-test/plugin.json").is_file());
     assert_eq!(ghostwrite_core::Language::for_path(std::path::Path::new("a.minetest")).map(|l| l.name), Some("mine-test"), "it's there at once");
     t.command("plugins");
     assert!(t.status().is_some_and(|said| said.contains("mine-test (version 7")), "{:?}", t.status());
+    t.command("plugin install mine");
+    settle(&mut t);
+    assert!(question(&mut t).is_none(), "one that's installed isn't asked about");
+    assert!(t.status().is_some_and(|said| said.contains("mine-test is already installed")), "{:?}", t.status());
 
     std::fs::write(source.join("plugin.json"), r#"{ "name": "mine-test", "version": "8", "extensions": ["minetest"] }"#).unwrap();
     t.command("plugin update mine-test");
     settle(&mut t);
+    assert!(question(&mut t).is_none(), "an update that reaches no further isn't asked about");
     assert!(t.status().is_some_and(|said| said.starts_with("updated mine-test (version 8")), "{:?}", t.status());
+
+    let further = r#"{ "name": "mine-test", "version": "9", "extensions": ["minetest"], "server": ["mine-server"], "access": { "network": ["example.org"] } }"#;
+    std::fs::write(source.join("plugin.json"), further).unwrap();
+    t.command("plugin update mine-test");
+    settle(&mut t);
+    let (asked, lines) = question(&mut t).expect("an update that reaches further is asked about");
+    assert_eq!(asked, "Update mine-test to 9? It now also:");
+    let lines: Vec<String> = lines.into_iter().map(|(line, _)| line).collect();
+    assert_eq!(lines, ["starts `mine-server` with your permissions", "downloads from example.org"]);
+    assert!(std::fs::read_to_string(plugins.join("mine-test/plugin.json")).unwrap().contains(r#""8""#), "it's not updated until it's said to be");
+    t.keys("enter");
+    settle(&mut t);
+    assert!(t.status().is_some_and(|said| said.starts_with("updated mine-test (version 9")), "{:?}", t.status());
 
     t.command("plugin remove mine-test");
     settle(&mut t);
     assert_eq!(t.status().as_deref(), Some("removed mine-test"));
     assert!(ghostwrite_core::Language::for_path(std::path::Path::new("a.minetest")).is_none(), "and gone at once");
     assert!(!plugins.join("mine-test").exists());
+
+    t.command("plugin install! mine");
+    settle(&mut t);
+    assert!(question(&mut t).is_none(), "with ! it isn't asked about");
+    assert!(t.status().is_some_and(|said| said.starts_with("installed mine-test (version 9")), "{:?}", t.status());
+}
+
+/// The question that's up, if one is: what's asked, and its lines (whether each is a warning).
+fn question(t: &mut Setup) -> Option<(String, Vec<(String, bool)>)> {
+    t.read(|e| e.questions.first().map(|question| (question.asked.clone(), question.lines.clone())))
+}
+
+/// What's being fetched into the plugins folder, not yet put in place.
+fn incoming(plugins: &std::path::Path) -> Vec<String> {
+    let found = std::fs::read_dir(plugins).into_iter().flatten().flatten();
+    found.map(|entry| entry.file_name().to_string_lossy().into_owned()).filter(|name| name.starts_with(".incoming")).collect()
 }
 
 /// A plugin whose view's key is taken says so before it's installed.
@@ -226,9 +266,10 @@ fn a_views_key_thats_taken_is_said_before_its_installed(cx: &mut TestAppContext)
     std::fs::write(source.join("plugin.json"), manifest).unwrap();
     t.command("plugin install clashing");
     settle(&mut t);
-    let asked = t.status().unwrap_or_default();
-    assert!(asked.contains("its view notes: Notes beside the file, on space f"), "{asked}");
-    assert!(asked.contains("clash-test's notes view has no key: space f is the editor's (file_picker)") && asked.contains(". :plugin install! "), "{asked}");
+    let (_, lines) = question(&mut t).expect("it's asked about");
+    assert!(lines.contains(&("its view notes: Notes beside the file, on space f".to_string(), false)), "{lines:?}");
+    let clash = "clash-test's notes view has no key: space f is the editor's (file_picker)";
+    assert!(lines.iter().any(|(line, warning)| *warning && line.starts_with(clash)), "a warning: {lines:?}");
 }
 
 #[gpui::test]

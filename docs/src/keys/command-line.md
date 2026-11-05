@@ -75,10 +75,10 @@ A number on its own goes to that line: `:42`.
 
 | Command | What it does |
 | --- | --- |
-| `:plugin install source` | fetch a plugin and check it, and say all it adds and can reach: see [Plugins](../plugins/README.md) |
-| `:plugin install! source` | then install it |
+| `:plugin install source` | fetch a plugin and check it, and ask whether to install it, saying all it adds and can reach: see [Plugins](../plugins/README.md) |
+| `:plugin install! source` | install it without asking |
 | `:plugin link folder` | use a plugin from a folder where it is, reading it again when it changes |
-| `:plugin update [name]` | fetch one plugin again, or all you installed |
+| `:plugin update [name]` | fetch one plugin again, or all you installed (asking first if one would reach more) |
 | `:plugin remove name` | remove one (a linked one: only the link) |
 | `:plugin list`, `:plugins` | the plugins there are, and what's wrong with any that couldn't be read |
 | `:tutor` | learn the keys, in a scratch tab |

@@ -97,7 +97,7 @@ A plugin's views of files of its own languages, each a place that takes the keys
 
 A plugin has one view of each kind. Each kind has its own keys in the view ([pages](../keys/pages.md), [blocks](../keys/aside.md)), and the plugin's `keys` with `"in"` and its name go over them. Its view applies to its own languages' files: on any other, its key says so.
 
-A key the editor has is the editor's. Two plugins' views can share a key if they have the same name (a `pages` view of one file type and another's), and `focus_view` goes to the one for the file in front; otherwise the plugin installed first has it. A view whose key is taken has none: that's said when the plugin is installed (before `:plugin install!`), when the editor starts, and in `:plugins`, and you can give it one of yours: `"space p": "focus_view goals"`.
+A key the editor has is the editor's. Two plugins' views can share a key if they have the same name (a `pages` view of one file type and another's), and `focus_view` goes to the one for the file in front; otherwise the plugin installed first has it. A view whose key is taken has none: that's said when the plugin is installed (when you're asked whether to install it), when the editor starts, and in `:plugins`, and you can give it one of yours: `"space p": "focus_view goals"`.
 
 A plugin from before views were declared has views anyway: `"pages": true` is a view `pages` titled Pages on `space v`, and a `"panel"` is a view `aside`, titled as the panel is, on `space g`. A kind a plugin makes but declares no view of gets the same.
 

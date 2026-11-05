@@ -120,11 +120,31 @@ pub struct Staged {
 impl Staged {
     /// Put it in place, unless one by its name is there already.
     pub fn install(self, folder: &Path) -> Result<Manifest, String> {
+        self.installable(folder)?;
+        let name = self.manifest.name;
+        std::fs::rename(&self.incoming.0, folder.join(name)).map_err(|e| format!("couldn't put it in place: {e}"))?;
+        installed(name, folder)
+    }
+
+    /// Whether it can be installed, or why not: one by its name is there already.
+    pub fn installable(&self, folder: &Path) -> Result<(), String> {
         let name = self.manifest.name;
         if is_installed(name, folder) {
             return Err(format!("{name} is already installed: :plugin update {name}, or :plugin remove {name}"));
         }
-        std::fs::rename(&self.incoming.0, folder.join(name)).map_err(|e| format!("couldn't put it in place: {e}"))?;
+        Ok(())
+    }
+
+    /// Put it in place of the one installed by its name ([`fetch_update`]).
+    pub fn replace(self, folder: &Path) -> Result<Manifest, String> {
+        let name = self.manifest.name;
+        let old = Incoming::new(folder)?;
+        std::fs::rename(folder.join(name), &old.0).map_err(|e| format!("couldn't move the old one: {e}"))?;
+        if let Err(e) = std::fs::rename(&self.incoming.0, folder.join(name)) {
+            // Put back as it was.
+            let _ = std::fs::rename(&old.0, folder.join(name));
+            return Err(format!("couldn't put it in place: {e}"));
+        }
         installed(name, folder)
     }
 }
@@ -194,6 +214,17 @@ pub fn update(name: &str, folder: &Path) -> Result<Manifest, String> {
 
 /// [`update`], with GitHub where `hosts` says.
 pub fn update_from(name: &str, folder: &Path, hosts: &Hosts) -> Result<Manifest, String> {
+    fetch_update_from(name, folder, hosts)?.replace(folder)
+}
+
+/// `name` fetched again from where it came from and checked, ready to put in place of
+/// the one installed: [`Staged::replace`].
+pub fn fetch_update(name: &str, folder: &Path) -> Result<Staged, String> {
+    fetch_update_from(name, folder, &Hosts::default())
+}
+
+/// [`fetch_update`], with GitHub where `hosts` says.
+pub fn fetch_update_from(name: &str, folder: &Path, hosts: &Hosts) -> Result<Staged, String> {
     if !manifest::proper_name(name) {
         return Err(format!("no plugin {name}"));
     }
@@ -206,18 +237,10 @@ pub fn update_from(name: &str, folder: &Path, hosts: &Hosts) -> Result<Manifest,
     if let Some(why) = &staged.unchecked {
         return Err(format!("{why}, so it wasn't updated: :plugin remove {name}, then install it, to take it anyway"));
     }
-    let manifest = &staged.manifest;
-    if manifest.name != name {
-        return Err(format!("{source} is now called {}: :plugin remove {name}, then install it", manifest.name));
+    if staged.manifest.name != name {
+        return Err(format!("{source} is now called {}: :plugin remove {name}, then install it", staged.manifest.name));
     }
-    let old = Incoming::new(folder)?;
-    std::fs::rename(folder.join(name), &old.0).map_err(|e| format!("couldn't move the old one: {e}"))?;
-    if let Err(e) = std::fs::rename(&staged.incoming.0, folder.join(name)) {
-        // Put back as it was.
-        let _ = std::fs::rename(&old.0, folder.join(name));
-        return Err(format!("couldn't put it in place: {e}"));
-    }
-    installed(name, folder)
+    Ok(staged)
 }
 
 /// The plugins that [`update`] can fetch again.

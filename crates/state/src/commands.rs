@@ -7,7 +7,7 @@ use ghostwrite_project::{resolve, store};
 /// What `:plugin` is asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ManagePlugins {
-    /// Fetch it and say what it can do; with `!` (`confirmed`), install it.
+    /// Fetch it and ask whether to install it, saying what it can do; with `!` (`confirmed`), install it without asking.
     Install {
         source: String,
         confirmed: bool,

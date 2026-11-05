@@ -21,7 +21,7 @@
 //! - [`commands`]: `:` commands, in the [`prompt`]
 //! - [`input`]: text from the platform; [`pointer`]: the mouse in the code
 //! - [`views`]: which view has the keys, and going from one to the next
-//! - [`story`], [`stops`], [`terminal`], [`tree`], [`find`], [`picker`], [`jumps`], [`repeat`]: features
+//! - [`story`], [`stops`], [`terminal`], [`tree`], [`find`], [`picker`], [`confirm`], [`jumps`], [`repeat`]: features
 //! - [`language`], [`server_actions`], [`semantic`]: what language servers do
 //! - [`rendered`]: a document's pages, whatever makes them
 //! - [`aside`]: what's beside a file, from a plugin
@@ -34,6 +34,7 @@
 mod aside;
 pub(crate) mod attention;
 mod commands;
+mod confirm;
 mod cursors;
 mod debug;
 mod element;
@@ -175,8 +176,8 @@ pub struct Editor {
     attention: attention::Attention,
     /// Where `:plugin` keeps plugins.
     plugins_at: Option<PathBuf>,
-    /// A plugin fetched and checked by `:plugin install`, and where from, until `:plugin install!` installs it.
-    staged_plugin: Option<(String, ghostwrite_plugin::install::Staged)>,
+    /// What's asked before it's done (installing a plugin), first the one up.
+    questions: Vec<confirm::Question>,
     /// Where the catalog of plugins to install is, and where it's kept: what's suggested
     /// for a file no plugin handles.
     catalog: Option<(String, PathBuf)>,
@@ -344,7 +345,7 @@ impl Editor {
             attention: Default::default(),
             // A test says where, not to touch what's really installed.
             plugins_at: if cfg!(test) { None } else { crate::plugins::folder() },
-            staged_plugin: None,
+            questions: vec![],
             catalog: if cfg!(test) { None } else { crate::plugins::catalog() },
             keys_made_for: None,
             _watching_links: None,
@@ -681,6 +682,10 @@ impl Editor {
 
     /// Every key in the editor comes here first (a prompt takes its own keys).
     fn key_down(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // A question that's up has every key until it's answered.
+        if self.answer_key(keystroke, cx) {
+            return true;
+        }
         // j k scroll the cheatsheet; any other key closes it.
         if self.cheatsheet && !keystroke.modifiers.platform && self.scroll_cheatsheet(keystroke, cx) {
             return true;

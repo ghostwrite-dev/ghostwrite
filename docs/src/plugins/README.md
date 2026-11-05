@@ -4,25 +4,25 @@ Everything Ghostwrite knows about a kind of file comes from a plugin: languages,
 
 ## Installing
 
-Installing is two steps. First:
-
 ```text
 :plugin install ghostwrite-dev/typst
 ```
 
-fetches the plugin and checks it, and the status line says all it adds and can reach (the project, your fonts, the network, the servers it starts), ending with what to type next:
+fetches the plugin and checks it (the status line says `fetching ghostwrite-dev/typst…` meanwhile), then asks whether to install it, listing all it adds and can reach (the project, your fonts, the network, the servers it starts), a line each:
 
 ```text
-typst (version 1.0.0; .typ files, highlighted; …). :plugin install! ghostwrite-dev/typst to install it
+Install typst 1.1.0?
+  .typ files, highlighted
+  starts `tinymist` with your permissions
+  its view pages: Pages in a tab, on space v
+  reads the project
+  …
+⏎ install · esc cancel
 ```
 
-Nothing is installed yet. Then:
+Nothing is installed until you press Enter; Esc lets it go. While it's asking, keys go to it, not to the file. See [Permissions and the sandbox](permissions.md) for what the lines can say.
 
-```text
-:plugin install! ghostwrite-dev/typst
-```
-
-puts what was fetched in place. See [Permissions and the sandbox](permissions.md) for what the line can say.
+`:plugin install! ghostwrite-dev/typst` installs without asking, for a script or a plugin you trust.
 
 A source is any of:
 
@@ -35,7 +35,7 @@ A source is any of:
 | a folder | a copy of the plugin in that folder on this machine |
 | any git URL (`https://`, `ssh://`, `git@…`) | the repository as it is, cloned, with its built `.wasm` in it |
 
-A release's zip is `<name>-<version>.zip` or `<name>.zip`, and it's checked against the `.sha256` beside it or the release's `SHA256SUMS`. If it has neither, the line says so before you install it. A GitHub repository with no release is cloned, as a git URL is. GitHub's API is asked without a token, or with `GITHUB_TOKEN` if it's set.
+A release's zip is `<name>-<version>.zip` or `<name>.zip`, and it's checked against the `.sha256` beside it or the release's `SHA256SUMS`. If it has neither, that's said, marked `!`, before you install it. A GitHub repository with no release is cloned, as a git URL is. GitHub's API is asked without a token, or with `GITHUB_TOKEN` if it's set.
 
 A plugin is live as soon as it's installed: no restart. Files open in a language that arrives or goes keep what they had until they're opened again. Rules a plugin adds for the model apply from the next start.
 
@@ -56,7 +56,7 @@ A plugin is live as soon as it's installed: no restart. Files open in a language
 | `:plugin remove name` | remove one; for a linked one, only the link, leaving its folder alone |
 | `:plugin list` (or `:plugins`) | the plugins there are, what each adds, and what's wrong with any that couldn't be read |
 
-Nothing updates by itself, and a linked plugin isn't updated: it's read where it is. An update is fetched and checked before it replaces what's there, so a failed one leaves the plugin as it was. An update with no checksum to check it against isn't taken; remove the plugin and install it again to take it anyway. Tab completes plugin names after `update` and `remove`.
+Nothing updates by itself, and a linked plugin isn't updated: it's read where it is. An update is fetched and checked before it replaces what's there, so a failed one leaves the plugin as it was. An update that would reach more than the plugin installed does (another server, more of the disk or the network) asks first, as installing does, listing only what's new: `Update typst to 1.2.0? It now also:`. An update with no checksum to check it against isn't taken; remove the plugin and install it again to take it anyway. Tab completes plugin names after `update` and `remove`.
 
 ## Where plugins live
 

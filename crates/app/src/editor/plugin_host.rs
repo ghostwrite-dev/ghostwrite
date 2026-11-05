@@ -13,6 +13,7 @@ use ghostwrite_state::plugin_host::{Heard, shown};
 use gpui::{AppContext as _, Context};
 
 use super::commands::ManagePlugins;
+use super::confirm::Question;
 use super::{DocId, Editor};
 
 impl Editor {
@@ -98,8 +99,9 @@ impl Editor {
     }
 
     /// `:plugin install`, `link`, `update` or `remove`, off the UI thread (a download or
-    /// a clone takes a while). Installing is in two steps: what's fetched is checked and
-    /// said what it can do, and only `:plugin install!` puts it in place.
+    /// a clone takes a while). What's fetched to install is checked, and you're asked
+    /// whether to install it, told what it adds and can reach; `:plugin install!` doesn't
+    /// ask. An update that would reach further than what's installed is asked about too.
     pub(super) fn manage_plugins(&mut self, what: ManagePlugins, cx: &mut Context<Self>) -> Result<(), String> {
         let folder = self.plugins_at.clone().ok_or("there's nowhere to keep plugins here")?;
         // A folder is about where you are. Otherwise it's a repository.
@@ -112,32 +114,25 @@ impl Editor {
             ManagePlugins::Link(source) => ManagePlugins::Link(here(source)),
             other => other,
         };
-        // What was fetched for this, if it's to be installed now; anything else fetched is let go.
-        let staged = match (&what, self.staged_plugin.take()) {
-            (ManagePlugins::Install { source, confirmed: true }, Some((fetched, staged))) if *source == fetched => Some(staged),
-            _ => None,
-        };
         let doing = match &what {
-            ManagePlugins::Install { source, .. } if staged.is_none() => format!("fetching {source}…"),
+            ManagePlugins::Install { source, .. } => format!("fetching {source}…"),
             ManagePlugins::Update(_) => "updating plugins…".to_string(),
             _ => String::new(),
         };
         if !doing.is_empty() {
             self.project.say(doing);
         }
-        let work = cx.background_spawn(async move { managed(what, staged, &folder) });
+        let work = cx.background_spawn(async move { managed(what, &folder) });
         cx.spawn(async move |this, cx| {
-            let done = work.await;
+            let Managed { said, ask } = work.await;
             this.update(cx, |this, cx| {
-                match done {
-                    Managed::Said(said) => this.project.say(said),
-                    Managed::Staged(source, staged) => {
-                        let manifest = &staged.manifest;
-                        let unchecked = staged.unchecked.as_ref().map_or_else(String::new, |why| format!(". {why}"));
-                        let clashes: String = this.clashes_if_added(manifest).into_iter().map(|clash| format!(". {clash}")).collect();
-                        this.project.say(format!("{} ({}){unchecked}{clashes}. :plugin install! {source} to install it", manifest.name, manifest.describe()));
-                        this.staged_plugin = Some((source, *staged));
-                    }
+                if !said.is_empty() {
+                    this.project.say(said.join(" · "));
+                } else if !ask.is_empty() {
+                    this.project.status = None;
+                }
+                for fetched in ask {
+                    this.ask_about(fetched, cx);
                 }
                 cx.notify();
             })
@@ -145,6 +140,52 @@ impl Editor {
         })
         .detach();
         Ok(())
+    }
+
+    /// Ask whether to put in place what was fetched, saying what it adds (or, for an
+    /// update, what more it reaches) and what to look out for.
+    fn ask_about(&mut self, fetched: Fetched, cx: &mut Context<Self>) {
+        let manifest = &fetched.staged().manifest;
+        let (asked, lines, yes) = match &fetched {
+            Fetched::Install(staged) => {
+                let named = manifest.version.map_or_else(|| manifest.name.to_string(), |version| format!("{} {version}", manifest.name));
+                let mut lines: Vec<(String, bool)> = manifest.adds().into_iter().map(|line| (line, false)).collect();
+                lines.extend(staged.unchecked.clone().map(|why| (why, true)));
+                lines.extend(self.clashes_if_added(manifest).into_iter().map(|clash| (clash, true)));
+                (format!("Install {named}?"), lines, "install")
+            }
+            Fetched::Update(_, more) => {
+                let to = manifest.version.map_or_else(String::new, |version| format!(" to {version}"));
+                (format!("Update {}{to}? It now also:", manifest.name), more.iter().map(|line| (line.clone(), false)).collect(), "update")
+            }
+        };
+        self.put_question(Question::new(asked, lines, yes, move |this, cx| this.put_in_place(fetched, cx)), cx);
+    }
+
+    /// Install what was fetched, or update to it, off the UI thread.
+    fn put_in_place(&mut self, fetched: Fetched, cx: &mut Context<Self>) {
+        let Some(folder) = self.plugins_at.clone() else { return };
+        let work = cx.background_spawn(async move {
+            match fetched {
+                Fetched::Install(staged) => {
+                    let name = staged.manifest.name;
+                    added(staged.install(&folder), "installed", name)
+                }
+                Fetched::Update(staged, _) => {
+                    let name = staged.manifest.name;
+                    updated(name, staged.replace(&folder))
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let said = work.await;
+            this.update(cx, |this, cx| {
+                this.project.say(said);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The views of `manifest` whose keys would be taken, were it installed (in place of
@@ -216,10 +257,25 @@ static LINKS: std::sync::Mutex<install::Watch> = std::sync::Mutex::new(install::
 /// The kinds of file a plugin's been suggested for, this time the editor's run.
 static SUGGESTED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(Default::default);
 
-/// What came of `:plugin`: what to say, or a plugin fetched, to be said what it can do.
-enum Managed {
-    Said(String),
-    Staged(String, Box<install::Staged>),
+/// What came of `:plugin`: what to say, and what was fetched, to ask about.
+struct Managed {
+    said: Vec<String>,
+    ask: Vec<Fetched>,
+}
+
+/// A plugin fetched and checked, to ask whether to put it in place.
+enum Fetched {
+    Install(Box<install::Staged>),
+    /// An update, and what it reaches that the one installed doesn't.
+    Update(Box<install::Staged>, Vec<String>),
+}
+
+impl Fetched {
+    fn staged(&self) -> &install::Staged {
+        match self {
+            Fetched::Install(staged) | Fetched::Update(staged, _) => staged,
+        }
+    }
 }
 
 /// Ask `plugin`, so that a panic in one built in can't take the app with it.
@@ -227,13 +283,77 @@ fn asked_of(plugin: &'static dyn Plugin, ask: impl FnOnce(&dyn Plugin) -> Reply)
     ghostwrite_project::contained("the plugin", || ask(plugin)).unwrap_or_else(Err)
 }
 
-/// What's put in place goes live; what to say of it.
-fn managed(what: ManagePlugins, staged: Option<install::Staged>, folder: &Path) -> Managed {
-    let adds = |manifest: &Manifest| {
-        let later = if manifest.has_rules() { ". Its rules for the model apply from the next start" } else { "" };
-        format!("{} ({}){later}", manifest.name, manifest.describe())
-    };
-    let updated = |name: &str| match install::update(name, folder) {
+/// What's put in place goes live; what to say of it, and what's to be asked about.
+fn managed(what: ManagePlugins, folder: &Path) -> Managed {
+    let said = |said: String| Managed { said: vec![said], ask: vec![] };
+    match what {
+        ManagePlugins::Install { source, confirmed: false } => {
+            match install::fetch(&source, folder).and_then(|staged| staged.installable(folder).map(|()| staged)) {
+                Ok(staged) => Managed { said: vec![], ask: vec![Fetched::Install(Box::new(staged))] },
+                Err(why) => said(format!("couldn't install {source}: {why}")),
+            }
+        }
+        ManagePlugins::Install { source, confirmed: true } => said(added(install::install(&source, folder), "installed", &source)),
+        ManagePlugins::Link(source) => {
+            let linked = install::link(Path::new(&source), folder);
+            // Looked at now, so that a change from now on is seen.
+            LINKS.lock().unwrap_or_else(|e| e.into_inner()).changed(folder);
+            said(added(linked, "linked", &source))
+        }
+        ManagePlugins::Update(name) => {
+            let names = name.map_or_else(|| install::updatable(folder), |name| vec![name]);
+            if names.is_empty() {
+                return said("there are no installed plugins to update".to_string());
+            }
+            let mut managed = Managed { said: vec![], ask: vec![] };
+            for name in names {
+                match install::fetch_update(&name, folder) {
+                    Ok(staged) => {
+                        // What it reaches now that it didn't is asked about first.
+                        let had = Manifest::in_own_folder(&folder.join(&name)).map(|manifest| manifest.reaches()).unwrap_or_default();
+                        let more: Vec<String> = staged.manifest.reaches().into_iter().filter(|reach| !had.contains(reach)).collect();
+                        if more.is_empty() {
+                            managed.said.push(updated(&name, staged.replace(folder)));
+                        } else {
+                            managed.ask.push(Fetched::Update(Box::new(staged), more));
+                        }
+                    }
+                    Err(why) => managed.said.push(format!("{name}: {why}")),
+                }
+            }
+            managed
+        }
+        ManagePlugins::Remove(name) => said(match install::remove(&name, folder) {
+            Ok(()) => {
+                ghostwrite_plugin::remove(&name);
+                format!("removed {name}")
+            }
+            Err(why) => why,
+        }),
+    }
+}
+
+/// What a plugin adds, as it's said when it's been put in place.
+fn adds(manifest: &Manifest) -> String {
+    let later = if manifest.has_rules() { ". Its rules for the model apply from the next start" } else { "" };
+    format!("{} ({}){later}", manifest.name, manifest.describe())
+}
+
+/// A plugin installed or linked (`how`) from `source` goes live; what to say of it.
+fn added(installed: Result<Manifest, String>, how: &str, source: &str) -> String {
+    match installed {
+        Ok(manifest) => {
+            let said = format!("{how} {}", adds(&manifest));
+            ghostwrite_plugin::add(Box::new(manifest));
+            said
+        }
+        Err(why) => format!("couldn't {} {source}: {why}", if how == "linked" { "link" } else { "install" }),
+    }
+}
+
+/// `name` updated goes live in place of what it was; what to say of it.
+fn updated(name: &str, replaced: Result<Manifest, String>) -> String {
+    match replaced {
         Ok(manifest) => {
             let said = format!("updated {}", adds(&manifest));
             ghostwrite_plugin::remove(name);
@@ -241,48 +361,5 @@ fn managed(what: ManagePlugins, staged: Option<install::Staged>, folder: &Path) 
             said
         }
         Err(why) => format!("{name}: {why}"),
-    };
-    let added = |installed: Result<Manifest, String>, how: &str, source: &str| match installed {
-        Ok(manifest) => {
-            let said = format!("{how} {}", adds(&manifest));
-            ghostwrite_plugin::add(Box::new(manifest));
-            said
-        }
-        Err(why) => format!("couldn't {} {source}: {why}", if how == "linked" { "link" } else { "install" }),
-    };
-    Managed::Said(match what {
-        ManagePlugins::Install { source, confirmed: false } => match install::fetch(&source, folder) {
-            Ok(staged) => return Managed::Staged(source, Box::new(staged)),
-            Err(why) => format!("couldn't install {source}: {why}"),
-        },
-        ManagePlugins::Install { source, confirmed: true } => {
-            let installed = match staged {
-                Some(staged) => staged.install(folder),
-                None => install::install(&source, folder),
-            };
-            added(installed, "installed", &source)
-        }
-        ManagePlugins::Link(source) => {
-            let linked = install::link(Path::new(&source), folder);
-            // Looked at now, so that a change from now on is seen.
-            LINKS.lock().unwrap_or_else(|e| e.into_inner()).changed(folder);
-            added(linked, "linked", &source)
-        }
-        ManagePlugins::Update(Some(name)) => updated(&name),
-        ManagePlugins::Update(None) => {
-            let names = install::updatable(folder);
-            if names.is_empty() {
-                "there are no installed plugins to update".to_string()
-            } else {
-                names.iter().map(|name| updated(name)).collect::<Vec<_>>().join(" · ")
-            }
-        }
-        ManagePlugins::Remove(name) => match install::remove(&name, folder) {
-            Ok(()) => {
-                ghostwrite_plugin::remove(&name);
-                format!("removed {name}")
-            }
-            Err(why) => why,
-        },
-    })
+    }
 }

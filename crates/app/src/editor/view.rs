@@ -799,6 +799,7 @@ impl gpui::Render for Editor {
             .child(self.render_status(cx))
             .children(self.cheatsheet.then(|| self.render_cheatsheet(cx)))
             .children(self.render_picker(cx))
+            .children(self.render_question(cx))
             .children(self.render_completion(&theme))
             .children(self.render_signature(&theme))
             .child(self.render_jump(cx))
