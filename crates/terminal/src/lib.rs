@@ -867,7 +867,8 @@ mod tests {
         terminal.input(b"sleep 0.5; echo after-$((40 + 2))\r".as_slice());
         assert_eq!(futures::executor::block_on(done), Ok(Waited::Idle));
         let since = terminal.since_command(10_000).unwrap();
-        assert!(since.contains("sleep 0.5") && since.contains("\nafter-42\n"), "the command and what it printed: {since}");
+        // On Linux the shell can be idle before the next prompt's line is drawn.
+        assert!(since.contains("sleep 0.5") && since.lines().any(|line| line.trim() == "after-42"), "the command and what it printed: {since}");
         assert!(!since.contains("before\n"), "not what came before it: {since}");
         let done = terminal.watch().until_idle(terminal.watch().changes(), Duration::from_millis(200), Duration::from_millis(500));
         terminal.input(b"sleep 30\r".as_slice());
