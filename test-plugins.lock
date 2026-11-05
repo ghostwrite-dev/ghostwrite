@@ -1,4 +1,4 @@
 # Plugins only the tests use: Ghostwrite doesn't come with them, and the installers don't ship
 # them. scripts/build-plugins.sh puts them in target/test-plugins. As plugins.lock: <name> <tag> <url> <sha256>
-typst v1.0.0 https://github.com/ghostwrite-dev/typst/releases/download/v1.0.0/typst-1.0.0.zip e3067f3d25aa283a6a16195b7007bc2423db43c7d288d41605c19b48381ff3c3
-lean v1.0.0 https://github.com/ghostwrite-dev/lean/releases/download/v1.0.0/lean-1.0.0.zip 6e363f1f8adcdd1896c31ceffb302a22982bd4ff7af631aa9ce7f529bfc4584e
+typst v1.1.0 https://github.com/ghostwrite-dev/typst/releases/download/v1.1.0/typst-1.1.0.zip ba72c1397ef40fb86d4744e2d859a09037b2282d6c7a61f582d5a812348ffecf
+lean v1.1.0 https://github.com/ghostwrite-dev/lean/releases/download/v1.1.0/lean-1.1.0.zip 9e9118a784cf8f003ba33043e8ff85a35d06a0a6ee9c658d39e2ba2cba6477c0
