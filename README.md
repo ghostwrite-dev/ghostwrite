@@ -13,6 +13,11 @@ autocomplete.
 Ghostwrite is a fast modal editor in the helix tradition, for macOS, Windows and Linux.
 Every language is a sandboxed WebAssembly plugin.
 
+## Is it vibe coded?
+
+Hell yeah. But it's reviewed with the editor itself, and Ghostwrite is now worked on in
+Ghostwrite, a step at a time.
+
 ## Install
 
 **macOS:** download the DMG from the
@@ -51,11 +56,6 @@ Each asks first, listing what the plugin adds and can reach; Enter installs it.
   `:model` lists what can be asked, local models included, and `:model ‹name›` chooses.
 - `space a` asks about the line or selection. Tab accepts a step, Enter redirects, and
   Esc Esc stops, keeping what you accepted.
-
-## Is it vibe coded?
-
-Hell yeah. But it's reviewed with the editor itself, and Ghostwrite is now worked on in
-Ghostwrite, a step at a time.
 
 ## Documentation
 
