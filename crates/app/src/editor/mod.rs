@@ -96,7 +96,7 @@ pub struct Options {
     pub language_servers: bool,
     /// Show what's beside files.
     pub asides: bool,
-    /// What `space a` asks (the API with a key, else Claude Code), if anything.
+    /// The model `space a` asks, if one can be reached.
     pub backend: Option<Backend>,
 }
 
@@ -138,7 +138,7 @@ pub struct Editor {
     signature_asked: language::Latest,
 
     // Features.
-    /// What `space a` asks, if Claude can be reached.
+    /// What `space a` asks, if a model can be reached.
     backend: Option<Arc<Backend>>,
     story: Option<story::Live>,
     find: find::Find,
@@ -170,7 +170,7 @@ pub struct Editor {
     /// A second pane beside the one with the keys.
     split: Option<split::Split>,
     measured: Measured,
-    /// The next redraw while Claude is thinking.
+    /// The next redraw while the model is thinking.
     ticking: Option<gpui::Task<()>>,
     /// What the last story changed: each document, its steps, and its version when the story ended.
     last_story: ghostwrite_view::story::Undo,

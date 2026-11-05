@@ -1,12 +1,12 @@
-//! Claude in the editor.
+//! The model in the editor.
 //!
-//! You point at some lines and say what you want. Claude answers either with
+//! You point at some lines and say what you want. The model answers either with
 //! notes pinned to the code (a question) or with small whole-line steps and
 //! file operations (a change); nothing changes until you accept a step. The
 //! [`Story`] is that exchange as you review it, follow-ups included.
 //!
 //! - [`protocol`]: the reply format, parsed as it streams.
-//! - [`context`]: what Claude is told: the file, the project, recent
+//! - [`context`]: what the model is told: the file, the project, recent
 //!   interactions, and its own notes from earlier sessions.
 //! - [`memory`]: those notes and interactions, kept per project.
 //! - [`backend`]: the Messages API, Claude Code or a local model, streaming.

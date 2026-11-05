@@ -1,4 +1,4 @@
-//! Stories with a scripted model: asking, reviewing item by item, steps that apply across files, corrections, and what Claude is told.
+//! Stories with a scripted model: asking, reviewing item by item, steps that apply across files, corrections, and what the model is told.
 
 use super::*;
 
@@ -252,7 +252,7 @@ fn a_change_edits_other_existing_files(cx: &mut TestAppContext) {
     assert_eq!(
         shown(ahead),
         [("src/lib.rs".to_string(), "pub fn run(verbose: bool) {}\npub fn run() {}\n".to_string())],
-        "asked ahead, Claude sees the other file as if the edit there were accepted"
+        "asked ahead, the model sees the other file as if the edit there were accepted"
     );
     t.keys("tab");
     let now = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap());
@@ -363,7 +363,7 @@ fn the_tree_marks_where_the_story_is_waiting(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn claude_hears_the_whole_conversation_and_the_editor(cx: &mut TestAppContext) {
+fn the_model_hears_the_whole_conversation_and_the_editor(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), &hints(), &note("doc.txt", "", "OK."), DONE], cx);
     std::fs::write(t.dir.join("other.py"), "x = 1\n").unwrap();
     t.command("e other.py").command("e doc.txt");
@@ -775,7 +775,7 @@ fn clear_starts_over_with_nothing_remembered(cx: &mut TestAppContext) {
     t.ask("and now");
     t.command("clear");
     assert!(!t.reviewing(), "the story up ends");
-    assert_eq!(ghostwrite_ai::memory::notes(&t.dir), "", "Claude's notes are gone");
+    assert_eq!(ghostwrite_ai::memory::notes(&t.dir), "", "the model's notes are gone");
     assert!(ghostwrite_ai::memory::recent(&t.dir, 5).is_empty(), "and the earlier requests");
     assert!(t.status().is_some_and(|s| s.starts_with("starting over")), "{:?}", t.status());
     t.ask("again");

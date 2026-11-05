@@ -1,4 +1,4 @@
-//! The editor's stops (`space /`, `space d`), and the terminal: what Claude is told of it.
+//! The editor's stops (`space /`, `space d`), and the terminal: what the model is told of it.
 
 use super::*;
 
@@ -36,7 +36,7 @@ fn asking_about_a_stop_hands_over_to_the_model(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn claude_reads_the_terminal_but_only_the_user_types_in_it(cx: &mut TestAppContext) {
+fn the_model_reads_the_terminal_but_only_the_user_types_in_it(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[&note("doc.txt", "x", "It printed ok."), DONE], cx);
     t.keys("space t");
@@ -65,7 +65,7 @@ fn claude_reads_the_terminal_but_only_the_user_types_in_it(cx: &mut TestAppConte
     assert_eq!(t.read(|e| (e.terminal.shown, e.modal.mode)), (false, Mode::Normal), "and from there hides it");
     t.ask("what did it print?");
     let told = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap().surroundings.terminal);
-    assert!(told.is_some_and(|text| text.lines().any(|l| l.trim() == "ok")), "Claude is shown the terminal");
+    assert!(told.is_some_and(|text| text.lines().any(|l| l.trim() == "ok")), "the model is shown the terminal");
 }
 
 #[gpui::test]
@@ -251,7 +251,7 @@ fn the_terminal_has_tabs_and_the_tab_keys_are_theirs_in_terminal_mode(cx: &mut T
     let printed = |e: &Editor| e.terminal_context().is_some_and(|text| text.lines().any(|l| l.trim() == "only-here"));
     wait_for(&mut t, printed);
     t.keys("cmd-shift-]");
-    assert!(!t.read(printed), "each is a shell of its own, and Claude reads the one in front");
+    assert!(!t.read(printed), "each is a shell of its own, and the model reads the one in front");
 
     t.keys("cmd-w");
     assert_eq!(shells(&mut t), (vec![3, 2], 1), "⌘W closes the shell in front");

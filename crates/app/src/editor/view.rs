@@ -117,7 +117,7 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
             (":api-key ‹key›", "keep a Claude API key safe on this machine"),
             (":undo-story", "take back all of the last story's steps"),
             (":timings", "how long the model has kept you waiting, lately"),
-            (":clear", "start over: end the story, and forget Claude's notes and recent requests"),
+            (":clear", "start over: end the story, and forget the model's notes and recent requests"),
             (":replace old new", "go through the project's matches as steps (! takes all)"),
             (":tutor  :update", "learn the keys; is there a newer version?"),
             (":vsplit  :only", "a second pane beside this one; only this one"),

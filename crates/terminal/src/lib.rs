@@ -2,7 +2,7 @@
 //! and scrollback kept by alacritty's emulator. Only the user's keys are
 //! written to it (and the emulator's own answers to the programs in it).
 //! What's on it is read back as a [`Screen`] of cells to draw, in this
-//! crate's own terms, or as plain text, which is how Claude sees it.
+//! crate's own terms, or as plain text, which is how the model sees it.
 
 use std::borrow::Cow;
 use std::collections::HashMap;

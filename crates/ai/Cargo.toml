@@ -1,6 +1,6 @@
 [package]
 name = "ghostwrite-ai"
-description = "Claude in the editor: prompts and context, reply parsing, backends, and the review story."
+description = "The model in the editor: prompts and context, reply parsing, backends, and the review story."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

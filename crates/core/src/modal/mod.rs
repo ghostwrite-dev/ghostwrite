@@ -13,7 +13,7 @@
 //! and it's entered and left like the review modes, so a story under
 //! review is still there to go back to.
 //!
-//! AI mode is for reviewing a story: Claude's, or one of the editor's
+//! AI mode is for reviewing a story: the model's, or one of the editor's
 //! stops (`:output` errors, diagnostics, search matches). Tab, Enter and Esc
 //! become [`Review`] keys; you can move around to look, but not edit. It's
 //! entered over another mode with [`Modal::enter`], and [`Modal::leave`]
@@ -118,7 +118,7 @@ pub enum Effect {
     FocusTree,
     /// `:`
     CommandLine,
-    /// `space a`: ask Claude about the selection or current line, or to change it.
+    /// `space a`: ask the model about the selection or current line, or to change it.
     Assist,
     /// `space ?`: every key.
     Cheatsheet,

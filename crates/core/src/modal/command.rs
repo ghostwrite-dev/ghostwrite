@@ -182,7 +182,7 @@ commands! {
     Vsplit "vsplit" "two panes: this file's pages, or the next tab",
     RotateView "rotate_view" "the keys to the other pane",
     Wonly "wonly" "only this pane",
-    Ask "ask" "ask Claude about the line or selection, or to change it",
+    Ask "ask" "ask the model about the line or selection, or to change it",
     FileExplorer "file_explorer" "the file tree",
     Terminal "terminal" "the terminal: type in it",
     FilePicker "file_picker" "pick a file (fuzzy)",

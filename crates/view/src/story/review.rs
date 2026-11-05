@@ -1,6 +1,6 @@
 //! The story in the code: where each item is (opening its file when it's
 //! shown), what's wrong with one that can't be shown as it is (it goes back
-//! to Claude to rewrite), carrying out what's accepted, and moving on to
+//! to the model to rewrite), carrying out what's accepted, and moving on to
 //! what to show next ([`Show`], for the app to bring into view).
 
 use std::ops::Range as Lines;
@@ -28,7 +28,7 @@ pub struct Located {
 /// How a file in the tree is waiting on the story.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Waiting {
-    /// The current item is here (or Claude's answer is coming here).
+    /// The current item is here (or the model's answer is coming here).
     Here,
     /// Later items are here.
     Later,
@@ -38,7 +38,7 @@ pub enum Waiting {
 enum Problem {
     /// Its file isn't in the project: the path, and what to say about it.
     NoFile(String),
-    /// Its file is only pages, which Claude doesn't comment on.
+    /// Its file is only pages, which the model doesn't comment on.
     OnlyPages(String),
     /// Its `<at>` lines aren't in its file.
     NotFound,
@@ -51,7 +51,7 @@ pub enum Show {
     Nothing,
     /// A step's ready, and the user is looking elsewhere: it waits for Tab.
     Ready,
-    /// Claude has been asked to correct its reply: send the request.
+    /// The model has been asked to correct its reply: send the request.
     Revise,
     /// This tab, where the current item is (its selection already set).
     Tab(usize),
@@ -83,7 +83,7 @@ impl StoryState {
         Some(self.in_tab(project, self.layout(project)?.lines(id)?))
     }
 
-    /// Where Claude's answer is coming while there's nothing to review:
+    /// Where the model's answer is coming while there's nothing to review:
     /// under what was asked about, or the marked lines.
     pub fn waiting_spot(&self, project: &Project) -> Option<Place> {
         match self.layout(project) {
@@ -113,7 +113,7 @@ impl StoryState {
     }
 
     /// The files the story is waiting in: where the current item is (or
-    /// where Claude's answer is coming), and where later items are.
+    /// where the model's answer is coming), and where later items are.
     pub fn files(&self, project: &Project) -> Vec<(PathBuf, Waiting)> {
         let asked = || project.tabs.by_id(self.doc)?.doc.path.clone();
         let file_of = |located: Located| located.path.or_else(asked);
@@ -124,7 +124,7 @@ impl StoryState {
             .flat_map(|story| story.items().into_iter().filter(|(id, _)| story.verdict(*id) == Verdict::Pending))
             .filter_map(|(id, _)| Some((file_of(self.locate(project, id)?)?, if Some(id) == current { Waiting::Here } else { Waiting::Later })))
             .collect();
-        // Nothing to review yet: Claude is answering where it was asked.
+        // Nothing to review yet: the model is answering where it was asked.
         if current.is_none()
             && self.story.as_ref().is_none_or(Story::is_writing)
             && let Some(place) = self.waiting_spot(project)
@@ -194,7 +194,7 @@ impl StoryState {
         }
     }
 
-    /// Item `id`'s lines aren't in its file: ask Claude to rewrite it, shown
+    /// Item `id`'s lines aren't in its file: ask the model to rewrite it, shown
     /// the file around where they should be.
     fn revise_lines(&mut self, project: &Project, id: ItemId, item: &Item) {
         let Some(located) = self.locate(project, id) else { return };
@@ -415,7 +415,7 @@ impl StoryState {
         project.tree.set_active(project.active_path());
     }
 
-    /// The story is over: say what came of it, keep Claude's notes, and log it.
+    /// The story is over: say what came of it, keep the model's notes, and log it.
     pub fn finish(&self, project: &mut Project) {
         let Some(story) = self.story.as_ref() else { return };
         let (kept, total) = story.summary();

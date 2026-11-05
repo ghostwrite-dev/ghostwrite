@@ -1,4 +1,4 @@
-# Ghostwrite: a helix-style editor with stepwise Claude stories.
+# Ghostwrite: a helix-style editor with stepwise AI stories.
 #
 # Layered like helix (and zed): pure crates at the bottom, the gpui app on
 # top. Nothing below `app` knows about the UI.

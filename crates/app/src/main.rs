@@ -1,4 +1,4 @@
-//! Ghostwrite: a helix-style editor with stepwise Claude stories.
+//! Ghostwrite: a helix-style editor with stepwise AI stories.
 //!
 //! - [`workspace`]: the window: the projects page, or a project's editor
 //! - [`editor`]: the modal editor (tabs, file tree, prompts, stories)

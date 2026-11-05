@@ -157,7 +157,7 @@ fn enter_asks_with_what_is_typed() {
     assert!(t.state().ask("with type hints".into()));
     assert_eq!(t.state().said.as_deref(), Some("with type hints"), "shown while waiting");
     let req = t.state.as_ref().unwrap().request(&t.project).unwrap();
-    assert_eq!(req.followups.last().map(|f| f.said.as_str()), Some("with type hints"), "Claude is told");
+    assert_eq!(req.followups.last().map(|f| f.said.as_str()), Some("with type hints"), "the model is told");
     assert_eq!(t.current(), None, "and the step it was about waits for the reply");
     assert_eq!(t.text(), ADD);
 }
@@ -245,7 +245,7 @@ fn clear_forgets_what_the_stories_before_left() {
     assert!(!ghostwrite_ai::memory::notes(&t.dir).is_empty() && !ghostwrite_ai::memory::recent(&t.dir, 5).is_empty());
     super::forget(&mut t.project);
     assert!(t.status().starts_with("starting over"), "{}", t.status());
-    assert_eq!(ghostwrite_ai::memory::notes(&t.dir), "", "Claude's notes are gone");
+    assert_eq!(ghostwrite_ai::memory::notes(&t.dir), "", "the model's notes are gone");
     assert!(ghostwrite_ai::memory::recent(&t.dir, 5).is_empty(), "and the earlier requests");
     t.ask("again");
     let prompt = t.state.as_ref().unwrap().request(&t.project).unwrap().prompt();

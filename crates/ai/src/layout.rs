@@ -61,7 +61,7 @@ impl<F: Files> Layout<'_, F> {
         Some(Place { near, ..place })
     }
 
-    /// Where Claude's answer is coming, while a reply is on its way and
+    /// Where the model's answer is coming, while a reply is on its way and
     /// there's nothing to review: under what it was asked about, or under
     /// the marked lines before the first reply.
     pub fn waiting_spot(&self) -> Option<Place> {

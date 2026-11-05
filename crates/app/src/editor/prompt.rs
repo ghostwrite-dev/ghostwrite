@@ -1,4 +1,4 @@
-//! The one prompt under the code: the `:` line, asking Claude, and naming
+//! The one prompt under the code: the `:` line, asking the model, and naming
 //! a file in the tree. While it's open it has the keyboard.
 
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use crate::ui::text_field::{TextField, TextFieldEvent};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PromptKind {
     Command,
-    /// Asking Claude, or saying something about the item under review.
+    /// Asking the model, or saying something about the item under review.
     Ask,
     /// Naming a new file or folder in this folder.
     TreeAdd(PathBuf),
@@ -39,7 +39,7 @@ pub(super) struct Prompt {
 impl Editor {
     pub(super) fn open_prompt(&mut self, kind: PromptKind, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match kind {
-            PromptKind::Ask => format!("Ask {}, or tell it what to change…", self.backend.as_ref().map_or("Claude", |b| b.name())),
+            PromptKind::Ask => format!("Ask {}, or tell it what to change…", self.backend.as_ref().map_or("the model", |b| b.name())),
             PromptKind::Command => String::new(),
             PromptKind::TreeAdd(_) => "name, or name/ for a folder".into(),
             PromptKind::TreeRename(_) => "new name".into(),
@@ -79,7 +79,7 @@ impl Editor {
         self.prompt.as_ref().is_some_and(|p| p.kind == PromptKind::Ask)
     }
 
-    /// The prompt's field while asking Claude.
+    /// The prompt's field while asking the model.
     pub(super) fn ask_field(&self) -> Option<Entity<TextField>> {
         self.prompt.as_ref().filter(|p| p.kind == PromptKind::Ask).map(|p| p.field.clone())
     }

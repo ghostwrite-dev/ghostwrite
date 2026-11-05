@@ -218,7 +218,7 @@ impl Story {
         Some(story)
     }
 
-    /// Whether Claude is in it (asked, or handed over to), not only items
+    /// Whether the model is in it (asked, or handed over to), not only items
     /// the editor gave.
     pub fn involves_model(&self) -> bool {
         self.replies.iter().any(|turn| turn.given.is_none())

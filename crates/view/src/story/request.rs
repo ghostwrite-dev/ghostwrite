@@ -1,4 +1,4 @@
-//! What Claude is asked, and what it says back. A request is the story so
+//! What the model is asked, and what it says back. A request is the story so
 //! far, the file asked about and the others it's in, and what's around it in
 //! the editor; the terminal is told as it was when the story started, and
 //! again in a follow-up when it's changed. While an item is reviewed, the
@@ -20,12 +20,12 @@ use ghostwrite_ai::{Item, Request, Story, Surroundings, lines};
 use super::StoryState;
 use crate::Project;
 
-/// How the story talks with Claude: its session, and the requests asked ahead.
+/// How the story talks with the model: its session, and the requests asked ahead.
 #[derive(Default)]
 pub(super) struct Conversation {
     /// The Claude Code session the story is in, resumed for each follow-up.
     session: Option<String>,
-    /// The terminal, as Claude is told it.
+    /// The terminal, as the model is told it.
     terminal: Told,
     /// The request sent ahead of time that's on its way.
     prefetching: Option<u64>,
@@ -38,19 +38,19 @@ pub(super) struct Conversation {
     session_from: Option<u64>,
 }
 
-/// Something about the editor Claude is told as it was when the story
+/// Something about the editor the model is told as it was when the story
 /// started, and again in the newest turn whenever it's changed since.
 #[derive(Default)]
 struct Told {
     /// What the first request said: `None` until it's sent. Kept, so the
     /// conversation's start stays the same.
     first: Option<Option<String>>,
-    /// What Claude was last told.
+    /// What the model was last told.
     last: Option<String>,
 }
 
 impl Told {
-    /// It's `now` as a request goes out: what's changed since Claude was
+    /// It's `now` as a request goes out: what's changed since the model was
     /// last told, if anything (the first request is told it as it starts).
     fn tell(&mut self, now: Option<String>) -> Option<String> {
         let changed = self.first.is_some() && now != self.last;

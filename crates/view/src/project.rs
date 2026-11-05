@@ -26,7 +26,7 @@ pub struct Project {
     pub aside_shown: bool,
 }
 
-/// The project's files as Claude's steps see them: open ones as they are on screen.
+/// The project's files as the model's steps see them: open ones as they are on screen.
 pub struct ProjectFiles<'a> {
     root: &'a Path,
     tabs: &'a Tabs,
@@ -160,7 +160,7 @@ impl Project {
         }
     }
 
-    /// Switch tabs. Leaving a file writes it, so disk (what Claude, the terminal
+    /// Switch tabs. Leaving a file writes it, so disk (what the model, the terminal
     /// and the language servers read) matches what you see; never over
     /// changes another program made (the status says so instead).
     pub fn activate(&mut self, ix: usize) {

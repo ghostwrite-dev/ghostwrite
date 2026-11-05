@@ -52,7 +52,7 @@ pub enum Command {
         with: String,
         all: bool,
     },
-    /// `:api-key ‹key›`: keep it where the system keeps secrets and ask Claude with it; `clear` takes it out.
+    /// `:api-key ‹key›`: keep it where the system keeps secrets and ask the model with it; `clear` takes it out.
     ApiKey(Option<String>),
     /// `:model opus-5.5`: ask that from now on; alone, say what's asked and what could be.
     Model(Option<String>),

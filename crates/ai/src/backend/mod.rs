@@ -100,7 +100,7 @@ impl Backend {
     }
 
     /// What's asked at first: the one chosen before, else the configured local
-    /// model, else Claude.
+    /// model, else Claude through the API or Claude Code.
     pub fn available() -> Option<Self> {
         models::remembered()
             .or_else(|| settings().local_model.clone().map(|model| Backend::Local { label: models::local_label(&model), model }))

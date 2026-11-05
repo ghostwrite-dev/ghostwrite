@@ -57,7 +57,7 @@ impl Replier for Chat {
             .header("anthropic-version", "2026-10-21")
             .header("anthropic-beta", "server-side-fallback-2026-07-01")
             .send_json(&body)
-            .map_err(|e| format!("couldn't reach Claude: {e}"))?;
+            .map_err(|e| format!("couldn't reach the Claude API: {e}"))?;
         let status = response.status();
         let mut reader = BufReader::new(response.into_body().into_reader());
         if !status.is_success() {
@@ -83,7 +83,7 @@ impl Replier for Chat {
             }
             match event["type"].as_str() {
                 Some("content_block_delta") if event["delta"]["type"] == "text_delta" => listener.text(event["delta"]["text"].as_str().unwrap_or_default()),
-                Some("message_delta") if event["delta"]["stop_reason"] == "refusal" => return Err("Claude declined this request".into()),
+                Some("message_delta") if event["delta"]["stop_reason"] == "refusal" => return Err("the model declined this request".into()),
                 Some("error") => return Err(event["error"]["message"].as_str().unwrap_or("Claude API error").to_string()),
                 _ => {}
             }
@@ -104,7 +104,7 @@ mod tests {
     use crate::protocol::SYSTEM;
 
     #[test]
-    fn claude_sees_images_and_pdfs_it_reads_before_the_words_about_them() {
+    fn the_model_sees_images_and_pdfs_it_reads_before_the_words_about_them() {
         let (_root, req) = with_files();
         let (url, served) = stand_in(vec![
             &[
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_through_the_api_uses_the_same_block() {
+    fn the_api_uses_the_same_block() {
         let root = util_project("api-tools");
         let (url, served) = stand_in(vec![
             &[

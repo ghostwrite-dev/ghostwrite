@@ -1,5 +1,5 @@
 //! The file tree as a model: which folders are open, the rows that makes,
-//! where the cursor is, and what Claude proposes doing to a file. The app
+//! where the cursor is, and what the model proposes doing to a file. The app
 //! drives it from tree mode and draws it; nothing here knows about keys or
 //! pixels.
 
@@ -18,7 +18,7 @@ pub struct Row {
     pub ignored: bool,
 }
 
-/// A change to a file or folder that's proposed (by Claude), shown in the
+/// A change to a file or folder that's proposed (by the model), shown in the
 /// tree where it applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Proposal {

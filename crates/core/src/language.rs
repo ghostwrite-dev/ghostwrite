@@ -14,7 +14,7 @@ use crate::syntax::{Grammar, Span};
 pub type Highlighter = dyn Fn(&str) -> Vec<Span> + Send + Sync;
 
 pub struct Language {
-    /// What the status line and Claude call it.
+    /// What the status line and the model call it.
     pub name: &'static str,
     /// Its LSP language id, when that isn't `name`.
     pub id: &'static str,

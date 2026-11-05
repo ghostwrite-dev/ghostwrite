@@ -174,7 +174,7 @@ impl Document {
         self.path.as_deref().and_then(Path::file_name).map_or("untitled".into(), |n| n.to_string_lossy().into())
     }
 
-    /// What the language is called, for Claude and the status line.
+    /// What the language is called, for the model and the status line.
     pub fn language_name(&self) -> String {
         match (self.language, self.path.as_deref().and_then(Path::extension)) {
             (Some(language), _) => language.name.to_string(),

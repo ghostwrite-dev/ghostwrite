@@ -1,13 +1,13 @@
-//! What Claude is told. A story is a conversation: the first message carries
-//! the context (Claude's own notes from earlier sessions, the user's recent
-//! interactions and what Claude said in them, the project's files, the
+//! What the model is told. A story is a conversation: the first message carries
+//! the context (the model's own notes from earlier sessions, the user's recent
+//! interactions and what the model said in them, the project's files, the
 //! editor around the request, the user's terminal, uncommitted changes),
 //! then the file with the lines marked and the request. Each reply is one item; each turn after it says what the user
 //! did with it and what they said, if anything (or, when Ghostwrite couldn't
 //! use the reply, why), and asks for the next item. The newest turn also
 //! shows the file asked about and the other files the story is in, as they
 //! are now. Every file is shown the same way, its lines numbered
-//! ([`contents`]), so the lines Claude quotes say where they are.
+//! ([`contents`]), so the lines the model quotes say where they are.
 //!
 //! [`Request::messages`] gives the turns for a backend that holds a
 //! conversation; [`Request::prompt`] flattens them into one message; and
@@ -27,7 +27,7 @@ use crate::story::FollowUp;
 /// Files listed in the prompt.
 const MAX_LISTED: usize = 400;
 /// Earlier interactions shown in the prompt, and how many of the newest
-/// come with what Claude said in them.
+/// come with what the model said in them.
 const RECENT: usize = 12;
 const RECAPPED: usize = 4;
 
@@ -84,7 +84,7 @@ pub struct Request {
     /// The lines pointed at, in bytes, whole lines.
     pub range: Range<usize>,
     pub instruction: String,
-    /// The conversation since: each of Claude's replies and what the user did and said next.
+    /// The conversation since: each of the model's replies and what the user did and said next.
     pub followups: Vec<FollowUp>,
     /// The other files the story is in, as the editor has them (or as a
     /// request sent ahead assumes they'll be).
@@ -101,7 +101,7 @@ pub struct Request {
     pub small: usize,
 }
 
-/// A file shown to Claude besides the one asked about.
+/// A file shown to the model besides the one asked about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shown {
     /// Relative to the project.
@@ -118,7 +118,7 @@ pub enum Role {
     Assistant,
 }
 
-/// How the terminal is introduced: Claude can read it, not type in it.
+/// How the terminal is introduced: the model can read it, not type in it.
 const TERMINAL: &str = "The user's terminal in the editor (you can read it; nothing you say is typed into it), as it is";
 
 /// A reminder with each turn (the system prompt has the rules).
@@ -127,7 +127,7 @@ files on disk may not have it yet, so go by what's shown, and quote lines with t
 next item, in the format (in whichever file needs it next), or <done> if there's nothing more.";
 
 impl Request {
-    /// The file's name as Claude sees it: relative to the project.
+    /// The file's name as the model sees it: relative to the project.
     pub fn file_name(&self) -> String {
         self.path.as_ref().map_or("untitled".into(), |p| self.root.as_ref().and_then(|r| p.strip_prefix(r).ok()).unwrap_or(p).display().to_string())
     }
@@ -167,7 +167,7 @@ impl Request {
         out
     }
 
-    /// Only the newest turn: what's new since Claude's last reply.
+    /// Only the newest turn: what's new since the model's last reply.
     pub fn latest(&self) -> String {
         self.messages().pop().map(|(_, text)| text).unwrap_or_default()
     }
@@ -274,7 +274,7 @@ impl Request {
     }
 }
 
-/// A file as Claude is shown it: its lines numbered, around the lines
+/// A file as the model is shown it: its lines numbered, around the lines
 /// `focus` if it's more than `bytes` long, and those lines marked with
 /// `<cursor>` if `marked`.
 pub fn contents(path: &str, text: &str, focus: Range<usize>, bytes: usize, marked: bool) -> String {
@@ -302,7 +302,7 @@ pub struct Interaction {
     pub followups: Vec<String>,
     /// What came of it: "answered", "applied 2 of 3 steps", "stopped".
     pub outcome: String,
-    /// What Claude said, in brief.
+    /// What the model said, in brief.
     pub recap: String,
 }
 
@@ -332,7 +332,7 @@ impl Interaction {
         })
     }
 
-    /// A line for the prompt, with the follow-ups, and (if `recapped`) what Claude said.
+    /// A line for the prompt, with the follow-ups, and (if `recapped`) what the model said.
     fn describe(&self, recapped: bool) -> String {
         let mut line = format!("- {} in {}: \"{}\" ({})", ago(self.at), self.file, self.request.trim(), self.outcome);
         for said in &self.followups {

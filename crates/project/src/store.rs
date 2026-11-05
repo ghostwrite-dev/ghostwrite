@@ -2,7 +2,7 @@
 //! folder. Here are the recent projects and each project's open files; the
 //! rest is kept by what it belongs to, through [`read`] and [`write`] (a
 //! project's own under [`project_dir`]): the editor's `:` history and pane
-//! sizes, Claude's notes and log.
+//! sizes, the model's notes and log.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

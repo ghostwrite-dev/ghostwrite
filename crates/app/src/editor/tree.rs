@@ -1,5 +1,5 @@
 //! Tree mode: the file tree takes the keys (`space e`), and the panel that
-//! draws it, with whatever Claude proposes doing to a file shown in place.
+//! draws it, with whatever the model proposes doing to a file shown in place.
 
 use std::path::{Path, PathBuf};
 
@@ -49,7 +49,7 @@ enum Line {
         depth: usize,
         name: String,
     },
-    /// Under a proposal: what Claude said about it, the keys, or the prompt to ask.
+    /// Under a proposal: what the model said about it, the keys, or the prompt to ask.
     Note {
         depth: usize,
         text: String,

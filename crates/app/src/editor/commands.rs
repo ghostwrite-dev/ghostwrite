@@ -9,7 +9,7 @@ pub use ghostwrite_view::commands::*;
 use super::{Editor, EditorEvent};
 
 impl Editor {
-    /// `:api-key`: keep the key safe and ask Claude with it from now on.
+    /// `:api-key`: keep the key safe and ask the model with it from now on.
     fn api_key(&mut self, key: Option<String>) -> Result<(), String> {
         use ghostwrite_ai::credentials;
         match key.as_deref() {

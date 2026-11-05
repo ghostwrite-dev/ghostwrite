@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_is_never_sent_more_than_a_request_can_hold() {
+    fn the_model_is_never_sent_more_than_a_request_can_hold() {
         struct Sees(Vec<usize>);
         impl Replier for Sees {
             fn reply(&mut self, next: Option<Turn<'_>>, listener: &mut dyn Listener, _cancel: &AtomicBool) -> Result<(), String> {

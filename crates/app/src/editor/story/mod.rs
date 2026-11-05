@@ -1,8 +1,8 @@
-//! `space a`: ask Claude about the lines at the cursor (or the selection),
+//! `space a`: ask the model about the lines at the cursor (or the selection),
 //! then review its reply one item at a time where it applies, across the
 //! project's files, and the terminal. What the story is and what it decides
 //! (the review keys, where its items are, carrying out what's accepted, what
-//! Claude is asked) is [`ghostwrite_view::story`], with no gpui. Here is
+//! the model is asked) is [`ghostwrite_view::story`], with no gpui. Here is
 //! what the app does for it:
 //!
 //! - here: starting a story from the keys and commands, doing what a review
@@ -91,7 +91,7 @@ impl Editor {
     /// review), from the file in view: each is shown in turn, and asking about
     /// one hands over to the model.
     pub(super) fn open_given(&mut self, instruction: String, items: Vec<Item>, cx: &mut Context<Self>) {
-        if self.reviewing_claude() {
+        if self.story_involves_model() {
             self.project.say("the story is still under review: esc esc ends it first");
             return;
         }
@@ -114,7 +114,7 @@ impl Editor {
     }
 
     /// Show `text` as a note under the cursor's line, reviewed like an
-    /// answer (`space k` docs); Enter asks Claude about it.
+    /// answer (`space k` docs); Enter asks the model about it.
     pub(super) fn show_note(&mut self, text: &str, cx: &mut Context<Self>) {
         // Docs that arrive after a story began (`space k` then `space a`) don't replace it.
         if self.story.is_some() {
@@ -309,7 +309,7 @@ impl Editor {
 
     /// Ask `chosen` from now on (`:model`), and give back what the last one held.
     pub(in crate::editor) fn choose_model(&mut self, chosen: Backend) -> Result<(), String> {
-        if self.reviewing_claude() {
+        if self.story_involves_model() {
             return Err("the story is still under review: esc esc ends it first".into());
         }
         if let Some(previous) = self.backend.as_ref().filter(|previous| previous.id() != chosen.id()) {
@@ -322,8 +322,8 @@ impl Editor {
         Ok(())
     }
 
-    /// Whether a story with Claude in it is up (being asked, or under review).
-    fn reviewing_claude(&self) -> bool {
+    /// Whether a story with the model in it is up (being asked, or under review).
+    fn story_involves_model(&self) -> bool {
         self.story.as_ref().is_some_and(|live| live.involves_model())
     }
 

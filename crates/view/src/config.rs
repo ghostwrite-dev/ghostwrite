@@ -17,14 +17,14 @@ pub struct Config {
     pub wrap_column: usize,
     /// Lines kept between the cursor and the edge when scrolling to it.
     pub margin_lines: f32,
-    /// The Claude model asked.
+    /// The Claude model asked through the API or Claude Code.
     pub model: String,
     /// A local model to offer, asked at first unless another's been chosen with
     /// `:model`: Hugging Face's `user/repo:quantization` or a `.gguf` file.
     pub local_model: Option<String>,
-    /// Bytes of the file around the marked lines sent to Claude.
+    /// Bytes of the file around the marked lines sent to the model.
     pub context_bytes: usize,
-    /// Bytes of uncommitted changes sent to Claude.
+    /// Bytes of uncommitted changes sent to the model.
     pub max_diff: usize,
     pub max_recent_projects: usize,
     /// Format a file with its language server when it's saved (`:w`, ⌘S).

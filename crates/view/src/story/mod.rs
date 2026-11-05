@@ -1,6 +1,6 @@
-//! `space a`: ask Claude about the lines at the cursor (or the selection),
+//! `space a`: ask the model about the lines at the cursor (or the selection),
 //! then review its reply one item at a time where it applies, across the
-//! project's files, and the terminal: a command Claude proposes runs there
+//! project's files, and the terminal: a command the model proposes runs there
 //! when it's accepted, and the story goes on without waiting for it. Tab
 //! accepts (or reads on); there's no skipping: Enter
 //! says what you want instead, and the next item follows it. Esc stops. A
@@ -9,16 +9,16 @@
 //! a reply that breaks the format.
 //!
 //! [`StoryState`] is the feature: a [`Story`] (the bookkeeping) laid out in
-//! the [`Project`], and the conversation with Claude it's from. It decides,
+//! the [`Project`], and the conversation with the model it's from. It decides,
 //! and the app carries it out: the review keys, what the model says
 //! ([`Event`]s) and the user looking elsewhere come in, and what the app is
 //! to do goes out ([`Do`], [`Show`], [`AskAhead`]). Its parts:
 //!
 //! - here: starting a story, the review keys, and ending it (logged for
-//!   the next ones, Claude's rewritten notes kept), `:undo-story` and `:clear`;
+//!   the next ones, the model's rewritten notes kept), `:undo-story` and `:clear`;
 //! - [`review`]: where its items are, carrying out what's accepted, and
 //!   what to show next;
-//! - [`request`]: what Claude is asked and told, and what it says back;
+//! - [`request`]: what the model is asked and told, and what it says back;
 //! - [`stops`]: the items of the stories the editor gives.
 //!
 //! The app (`editor/story`) runs the requests on the backend in the
@@ -162,7 +162,7 @@ impl StoryState {
     }
 
     /// `text` as a note under the cursor's line, reviewed like an answer
-    /// (`space k` docs); Enter asks Claude about it.
+    /// (`space k` docs); Enter asks the model about it.
     pub fn docs(project: &Project, text: &str) -> Option<Self> {
         let mut state = Self::at_cursor(project, Story::answered("Explain what's under the cursor; its documentation was shown.", text))?;
         state.docs_note = true;
@@ -174,12 +174,12 @@ impl StoryState {
         self.story.is_some()
     }
 
-    /// Whether Claude is in it (being asked, or under review).
+    /// Whether the model is in it (being asked, or under review).
     pub fn involves_model(&self) -> bool {
         self.story.as_ref().is_none_or(Story::involves_model)
     }
 
-    /// Whether Claude is working and nothing is shown yet, so the dots animate.
+    /// Whether the model is working and nothing is shown yet, so the dots animate.
     pub fn thinking(&self) -> bool {
         self.story.as_ref().is_some_and(|s| s.error.is_none() && s.current().is_none())
     }
@@ -335,5 +335,5 @@ pub fn undo(project: &mut Project, last: &mut Undo) -> Result<(), String> {
 /// recent requests) is forgotten: the next one is told nothing of them.
 pub fn forget(project: &mut Project) {
     let logged = ghostwrite_ai::memory::forget(&project.root);
-    project.say(format!("starting over: Claude's notes and {logged} earlier request{} are forgotten", if logged == 1 { "" } else { "s" }));
+    project.say(format!("starting over: the model's notes and {logged} earlier request{} are forgotten", if logged == 1 { "" } else { "s" }));
 }

@@ -1,4 +1,4 @@
-//! Running what Claude is asked. What a request is, and what's done with
+//! Running what the model is asked. What a request is, and what's done with
 //! what comes back, is the story's state's
 //! ([`ghostwrite_view::story::request`]); here it's sent to the backend
 //! and the reply streams in on a background thread, each thing it reports
@@ -172,7 +172,7 @@ impl Live {
 impl Editor {
     /// Send the story's request on a background thread; the reply streams in.
     pub(super) fn send_request(&mut self, cx: &mut Context<Self>) {
-        // Claude reads the project from disk: let it see what's on screen.
+        // The model reads the project from disk: let it see what's on screen.
         self.project.write_all();
         let Some(backend) = self.backend.clone() else { return };
         let terminal = self.terminal_context();

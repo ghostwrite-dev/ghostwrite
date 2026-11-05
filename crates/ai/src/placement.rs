@@ -3,7 +3,7 @@
 //! An item is placed in a file (the one asked about, or another one in the
 //! project) near some lines: where its quoted line numbers point, if they
 //! do. A step names its file with `<file>`; one that doesn't is in the file
-//! asked about, unless its lines are only in one other project file (Claude
+//! asked about, unless its lines are only in one other project file (the model
 //! read it, then forgot to say). Placing never touches the editor: file
 //! contents come from a [`Files`] the editor provides, with open buffers as
 //! they are on screen.
@@ -82,7 +82,7 @@ impl Placer {
                 if Some(path.as_path()) == asked.path { here } else { Place { path: Some(path), near: 0..1 } }
             }
             // Not named: the file asked about, unless the lines are only in
-            // one other project file (Claude read it, then forgot <file>).
+            // one other project file (the model read it, then forgot <file>).
             Item::Step(Step { file: None, old: quoted, .. }) | Item::Note(Note { file: None, at: quoted, .. }) if !quoted.is_empty() => {
                 if lines::find(asked.text, quoted, asked.lines.clone(), false).is_some() {
                     return here;

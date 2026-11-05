@@ -1,7 +1,7 @@
 # Ghostwrite
 
 A helix-style modal editor for macOS, Windows and Linux, built on [gpui](https://www.gpui.rs),
-with Claude in it. Point at some lines (`space a`) and say what you want:
+with a language model in it. Point at some lines (`space a`) and say what you want:
 a question is answered with notes pinned to the code, across files; a change
 comes as small whole-line steps you accept with Tab, one at a time, like
 autocomplete, and commands to run in your terminal (a build, the tests); one
@@ -34,14 +34,18 @@ have only been type-checked and tested in CI so far, so expect rough edges. They
 - settings are in `%APPDATA%\Ghostwrite` on Windows and `~/.config/ghostwrite` elsewhere, which
   is what `~/.config/ghostwrite` below means.
 
-Claude is reached with an API key, kept where the system keeps secrets with `:api-key ‹key›`
-(or `ANTHROPIC_API_KEY`, if it's set), else through Claude Code if it's installed,
-under your login.
+## Backends
 
-A local model can be asked instead of Claude. llama.cpp is built in (building
-Ghostwrite needs `cmake`), so there's nothing else to install or start: name a
-model on Hugging Face and its quantization, or a `.gguf` file. It's downloaded
-the first time, and loaded as you start typing a request.
+The model is reached through one of:
+
+- **Claude, through the Anthropic API**, with an API key, kept where the system keeps secrets
+  with `:api-key ‹key›` (or `ANTHROPIC_API_KEY`, if it's set);
+- **Claude Code** (`claude`), if it's installed, under your login;
+- **a local model**, through llama.cpp.
+
+llama.cpp is built in (building Ghostwrite needs `cmake`), so a local model needs nothing
+else installed or started: name a model on Hugging Face and its quantization, or a `.gguf`
+file. It's downloaded the first time, and loaded as you start typing a request.
 
 ```json
 { "local_model": "bartowski/Qwen2.5-Coder-14B-Instruct-GGUF:Q3_K_M" }
@@ -49,7 +53,7 @@ the first time, and loaded as you start typing a request.
 
 It runs in a process of its own, on the GPU, with an 8-bit KV cache and a small
 context: every reply is one small step, so it's sent only what that step needs
-(`context_bytes` and `max_diff` are Claude's), and earlier steps shrink to a line each. That process ends with the app, when `:model`
+(`context_bytes` and `max_diff` are for the other backends), and earlier steps shrink to a line each. That process ends with the app, when `:model`
 switches away, and after 5 idle minutes, so its memory is only held while it's used.
 
 That memory can't be paged out, so a model only loads if it fits, there's only
@@ -59,7 +63,7 @@ other GPU-heavy work, say) the model stops, before the Mac panics.
 `:model opus-5.5` or `:model qwen3:4b` chooses what's asked, with suggestions as
 you type and Tab to complete, among Claude's models and every local one on this
 Mac, whether Ghostwrite, Hugging Face's tools or Ollama downloaded it. The choice is remembered. Before there is one, a `local_model` in
-the config is asked first, and otherwise Claude. Every model works the same way, however small: the same prompt, and
+the config is asked first, and otherwise Claude, through the API or Claude Code. Every model works the same way, however small: the same prompt, and
 looking around with `<tool>` blocks that Ghostwrite runs (`read`, `list`,
 `search`, `git`), so that needs no accepting. A local model also has a grammar:
 it can't write anything but a well-formed small item or block, nor name a file
@@ -75,7 +79,7 @@ bracket matching the one at the cursor is marked.
 | Keys | What it does |
 | --- | --- |
 | `space a` | ask about the line or selection; Tab accepts, Enter (or `space a`) says what you want instead, Esc stops |
-| `space e`, `⌘B` | the file tree (`a` `r` `d`: add, rename, trash); Claude's file operations are proposed there |
+| `space e`, `⌘B` | the file tree (`a` `r` `d`: add, rename, trash); the model's file operations are proposed there |
 | `space t`, `⌘J` | terminal mode: your shell, under the code, has the keys; Esc Esc reads it instead (below), `⌘J` hides it |
 | `/`, `?`, `n`, `N`, `*` | search the file (as you type, every match marked); the next and previous match, whichever way the search went (`3n`: three on; in select mode, as another selection); `*` makes the selection the search, as a whole word (`alt-*`: anywhere), and `n` finds it |
 | `space f`, `space b` | pick a file of the project, or an open one, by typing a few of its letters |
@@ -97,11 +101,11 @@ bracket matching the one at the cursor is marked.
 | `⌘N` `⌘W`, `⌘⇧[` `⌘⇧]` | new and close tab, previous and next tab |
 | `gN` `gP` (`4gN`: four places), drag a tab, `⌘⌥→` `⌘⌥←`, `:tab-right` `:tab-left` | move a tab along the tab bar |
 | `⌘O`, `⌘⇧O`, `⌘⇧N` | open a file, a folder; a new window (each project is open in one window); File › Open Recent has the projects opened lately |
-| `:clear` | start over: the story up ends, and Claude forgets its notes on the project and your recent requests, so the next story begins with nothing remembered |
+| `:clear` | start over: the story up ends, and the model forgets its notes on the project and your recent requests, so the next story begins with nothing remembered |
 | `:timings` | how long the model has kept you waiting lately: until the first of its reply, and until there was something to look at |
 | `⌘=`, `⌘-`, `⌘0` | zoom the window in, out, and back to 100% |
 
-Claude reads the terminal: what's on it (and some scrollback) goes with
+The model reads the terminal: what's on it (and some scrollback) goes with
 each request, and again in a follow-up when it's changed. It types into it
 only what you accept: a command it proposes (to build, test, install) waits in
 the terminal as a step does in a file, grey at the prompt with its note above and
@@ -196,7 +200,7 @@ changed on disk, and saving won't write over theirs until `:w!`.
 }
 ```
 
-`GHOSTWRITE_AI_EFFORT` (`low` by default, up to `max`) sets how hard Claude thinks.
+`GHOSTWRITE_AI_EFFORT` (`low` by default, up to `max`) sets how hard the model thinks, through the API or Claude Code.
 
 ## Code
 

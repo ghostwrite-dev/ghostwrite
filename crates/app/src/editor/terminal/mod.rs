@@ -4,7 +4,7 @@
 //! while a full-screen program like vim has it: Esc is its; a click on the code leaves then),
 //! and `cmd-j` hides it. Dragging the mouse selects (a double click a word,
 //! a triple click a line), and `cmd-c` copies it.
-//! Claude is shown what's on it with every request (and, in a follow-up,
+//! The model is shown what's on it with every request (and, in a follow-up,
 //! again when it's changed); what it types there is only a command the
 //! user accepted ([`Editor::run_in_terminal`]). A command waiting to be accepted
 //! shows here as a step does in a file: its note above the prompt, the command in
@@ -16,7 +16,7 @@
 //!
 //! It has tabs of its own, each a shell of its own: in terminal mode, where
 //! only ⌘ keys are the app's, the keys for tabs mean these. The tabs show once
-//! there are two. Claude reads the one in front; a story's Ctrl-C goes to the one
+//! there are two. The model reads the one in front; a story's Ctrl-C goes to the one
 //! its command ran in, wherever you've been since.
 //! [`super::terminal_view`] draws it.
 
@@ -39,7 +39,7 @@ mod keys;
 
 use keys::{button, held, key_bytes};
 
-/// Bytes of the terminal Claude is told: the end.
+/// Bytes of the terminal the model is told: the end.
 const MAX_CONTEXT: usize = 8_000;
 /// The pane's height to start with, and how small and how close to the
 /// top of the window it can be dragged (in points at 100%, like [`pt`]).
@@ -242,7 +242,7 @@ impl Editor {
     }
 
     /// The story's command is done: the shell it ran in comes to the front,
-    /// so what it printed is what Claude reads.
+    /// so what it printed is what the model reads.
     pub(super) fn back_to_the_command(&mut self) {
         let ran = self.terminal.shells.iter().position(|shell| Some(shell.number) == self.terminal.ran_in);
         if let Some(ix) = ran.filter(|ix| *ix != self.terminal.active) {
@@ -331,7 +331,7 @@ impl Editor {
     /// There's something new on shell `number`, or it exited (then its tab
     /// closes, and `false`: there's nothing more to come).
     fn shell_changed(&mut self, number: usize, cx: &mut Context<Self>) -> bool {
-        // Hidden, there's nothing to draw (Claude reads it when it asks).
+        // Hidden, there's nothing to draw (the model reads it when it asks).
         if self.terminal.shown {
             cx.notify();
         }
@@ -347,7 +347,7 @@ impl Editor {
         false
     }
 
-    /// What Claude is told: the end of what's on the terminal, if there's a shell.
+    /// What the model is told: the end of what's on the terminal, if there's a shell.
     pub(super) fn terminal_context(&self) -> Option<String> {
         self.terminal.current().map(|t| t.text(MAX_CONTEXT)).filter(|text| !text.trim().is_empty())
     }

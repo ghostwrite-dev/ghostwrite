@@ -1,4 +1,4 @@
-//! A one-paragraph text field, for prompts: the `:` line, asking Claude, and
+//! A one-paragraph text field, for prompts: the `:` line, asking the model, and
 //! naming files. It takes the font of where it's placed, wraps at its width
 //! (growing a line at a time, or scrolling to the cursor where its height is
 //! fixed), and tells its owner about Enter, Esc, ↑/↓ and Tab through

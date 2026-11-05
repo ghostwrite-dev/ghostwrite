@@ -1,4 +1,4 @@
-//! Every model that can be asked: Claude's, if Claude can be reached, and the
+//! Every model that can be asked: Claude's, if the Claude API or Claude Code can be reached, and the
 //! local ones on this Mac (Ghostwrite's, and those Hugging Face's tools or Ollama
 //! downloaded). The one chosen is remembered.
 
@@ -30,7 +30,7 @@ pub struct Available {
 /// What `:model` calls a model.
 fn short(backend: &Backend) -> String {
     let id = backend.id();
-    CLAUDE.iter().find(|(claude, ..)| *claude == id).map_or_else(|| backend.name().to_string(), |(.., short)| short.to_string())
+    CLAUDE.iter().find(|(known, ..)| *known == id).map_or_else(|| backend.name().to_string(), |(.., short)| short.to_string())
 }
 
 /// `names` that `typed` could mean, ignoring case and punctuation (`opus55`,

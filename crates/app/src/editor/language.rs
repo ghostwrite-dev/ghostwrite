@@ -137,7 +137,7 @@ impl Editor {
     }
 
     /// `space k`: the docs of what's under the cursor, as a note under the
-    /// line; Enter asks Claude about them.
+    /// line; Enter asks the model about them.
     pub(super) fn show_hover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((answer, server)) = self.ask_server("textDocument/hover") else {
             return self.project.say("no language server for this file");
