@@ -547,19 +547,25 @@ impl Watch {
 
     /// Once something has been printed since the count of [`changes`](Self::changes) was
     /// `after`, the shell has the terminal back (where that can be told: otherwise only
-    /// the quiet counts), and nothing more has come for `quiet`; or once `timeout` has gone
-    /// by. Watched on a thread of its own, which stops when what it gives back is dropped.
+    /// the quiet counts), and nothing more has come for `quiet` (four times that until a
+    /// program's been seen running); or once `timeout` has gone by. Watched on a thread of its own, which stops when what it gives back is dropped.
     pub fn until_idle(&self, after: u64, quiet: Duration, timeout: Duration) -> futures::channel::oneshot::Receiver<Waited> {
         const EVERY: Duration = Duration::from_millis(20);
         let (tx, rx) = futures::channel::oneshot::channel();
         let (watch, start) = (self.clone(), Instant::now());
         std::thread::spawn(move || {
+            // Until a program's been seen with the terminal, the shell may only not have
+            // started it yet (a loaded machine takes a while): it's let be quiet for longer.
+            let mut seen_running = false;
             loop {
                 let printed = watch.changes() != after;
                 let quiet_for = watch.changed_at.lock().unwrap().elapsed();
+                let busy = watch.busy();
+                seen_running |= busy == Some(true);
+                let quiet = if seen_running { quiet } else { quiet * 4 };
                 let waited = if watch.exited.load(Ordering::SeqCst) {
                     Waited::Exited
-                } else if printed && watch.busy() != Some(true) && quiet_for >= quiet {
+                } else if printed && busy != Some(true) && quiet_for >= quiet {
                     Waited::Idle
                 } else if start.elapsed() >= timeout {
                     Waited::StillRunning
