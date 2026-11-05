@@ -6,6 +6,8 @@ Ghostwrite is a modal editor for macOS, Windows and Linux. Its keys are helix's,
 
 ![Ghostwrite: a story being reviewed step by step](demo.gif)
 
+With most AI coding tools you either let the agent write it all and review a large diff afterwards, or you spell out every detail yourself. In Ghostwrite you review as you go: each change comes as one small step, and you decide it before the next one comes.
+
 ## How it works
 
 Point at some lines with `space a` and say what you want. A question is answered with notes pinned to the code, across files. A change comes as small, whole-line steps, the next one shown as ghost text where it goes. Press Tab to accept it, like autocomplete, and the next step comes. If it's not what you want, press Enter and say so: the model takes that into account for what comes next. A step can also be a command to run in your terminal (a build, the tests), and the model sees what it printed. Nothing changes until you accept it.

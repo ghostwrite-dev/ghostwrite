@@ -4,10 +4,14 @@
 
 ![Ghostwrite: ask, review each step, run it](docs/src/demo.gif)
 
+With most AI coding tools you either let the agent write it all and review a large diff
+afterwards, or you spell out every detail yourself. Ghostwrite lets you review as you go:
+the model proposes one step at a time, right where it goes, and you accept it with Tab or
+redirect it with Enter. You understand every change as it's made, and it's as quick as
+autocomplete.
+
 Ghostwrite is a fast modal editor in the helix tradition, for macOS, Windows and Linux.
-Its model proposes one step at a time, which you accept with Tab or redirect with Enter,
-so the model stays inside your editor and you decide every change. Every language is a
-sandboxed WebAssembly plugin.
+Every language is a sandboxed WebAssembly plugin.
 
 ## Install
 
