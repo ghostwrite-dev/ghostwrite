@@ -4,8 +4,8 @@
 
 ![Ghostwrite: ask, review each step, run it](docs/src/demo.gif)
 
-With most AI coding tools you either let the agent write it all and review a large diff
-afterwards, or you spell out every detail yourself. Ghostwrite lets you review as you go:
+With an AI agent, you review its work afterwards, as one large diff. In a plain editor,
+you write every detail yourself. Ghostwrite lets you review as you go:
 the model proposes one step at a time, right where it goes, and you accept it with Tab or
 redirect it with Enter. You understand every change as it's made, and it's as quick as
 autocomplete.

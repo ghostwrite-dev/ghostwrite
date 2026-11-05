@@ -6,7 +6,7 @@ Ghostwrite is a modal editor for macOS, Windows and Linux. Its keys are helix's,
 
 ![Ghostwrite: a story being reviewed step by step](demo.gif)
 
-With most AI coding tools you either let the agent write it all and review a large diff afterwards, or you spell out every detail yourself. In Ghostwrite you review as you go: each change comes as one small step, and you decide it before the next one comes.
+With an AI agent, you review its work afterwards, as one large diff. In a plain editor, you write every detail yourself. In Ghostwrite you review as you go: each change comes as one small step, and you decide it before the next one comes.
 
 ## How it works
 
