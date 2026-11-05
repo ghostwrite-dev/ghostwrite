@@ -16,7 +16,7 @@
 #   state    the editor's state: documents, tabs, the project, search, registers, jumps
 #   app      the gpui application (binary `ghostwrite`)
 [workspace]
-exclude = ["examples", "crates/wasm/tests/fixture"]
+exclude = ["examples", "crates/wasm/tests/fixture", "vendor"]
 resolver = "3"
 members = ["crates/core", "crates/project", "crates/terminal", "crates/page", "crates/lsp", "crates/dap", "crates/plugin", "crates/plugin-api", "crates/wasm", "crates/model", "crates/ai", "crates/state", "crates/app"]
 default-members = ["crates/app"]
@@ -93,3 +93,7 @@ opt-level = 3
 
 [profile.dev.package.wasmparser]
 opt-level = 3
+
+# xattr 0.2, which gpui brings in, names a constant libc no longer has on Linux.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }

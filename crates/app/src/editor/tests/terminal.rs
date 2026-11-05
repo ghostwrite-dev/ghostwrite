@@ -571,12 +571,12 @@ fn control_keys_reach_a_program_in_the_terminal(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[], cx);
     t.keys("space t");
     idle_after(&mut t, 0);
-    let changes = t.read(|e| e.terminal.current().unwrap().watch().changes());
-    t.keys("s t t y space - i x o n space r a w space - e c h o enter");
-    idle_after(&mut t, changes);
-    t.keys("o d space - c enter");
-    wait_for(&mut t, |e| e.terminal.current().unwrap().busy() == Some(true));
-    t.keys("ctrl-x ctrl-s ctrl-d ctrl-d");
+    // One line, so the shell's own handling of the terminal between commands (bash's
+    // differs from zsh's) can't undo the raw mode before `od` reads.
+    t.input("stty -ixon raw -echo; echo raw-$((40 + 2)); od -c").keys("enter");
+    wait_for(&mut t, |e| e.terminal_context().is_some_and(|text| text.contains("raw-42")));
+    // Raw, Ctrl-D isn't the end of input: `od` shows a line once it has 16 bytes.
+    t.keys("ctrl-x ctrl-s a a a a a a a a a a a a a a");
     wait_for(&mut t, |e| e.terminal_context().is_some_and(|text| text.contains("030") && text.contains("023")));
 }
 

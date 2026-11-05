@@ -7,7 +7,11 @@ use std::path::{Path, PathBuf};
 
 const SITE: &str = "https://huggingface.co";
 /// Disk left free after a download.
+#[cfg(not(test))]
 const SPARE_DISK: u64 = 2 << 30;
+/// In tests, only what's downloaded: they shouldn't hang on how full the disk is.
+#[cfg(test)]
+const SPARE_DISK: u64 = 0;
 const BUFFER: usize = 1 << 20;
 
 pub fn path_of(model: &str, status: &mut dyn FnMut(String)) -> Result<PathBuf, String> {

@@ -515,7 +515,9 @@ pub enum Waited {
 #[derive(Clone)]
 pub struct Watch {
     /// The terminal's device and the shell's process, to tell whether the shell has
-    /// the terminal (at its prompt) or a program it started does.
+    /// the terminal (at its prompt) or a program it started does. Unused on Windows,
+    /// which can't tell.
+    #[cfg_attr(windows, allow(dead_code))]
     foreground: Option<Arc<(std::fs::File, i32)>>,
     changes: Arc<AtomicU64>,
     changed_at: Arc<Mutex<Instant>>,
