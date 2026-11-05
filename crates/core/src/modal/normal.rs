@@ -311,6 +311,8 @@ impl Modal {
             Ask if self.mode.reviewing() => return Some(Outcome::Review(Review::Ask)),
             Ask => Effect::Assist,
             Terminal => Effect::Terminal,
+            TogglePages => Effect::Pages,
+            ToggleAside => Effect::Aside,
             GotoNextProblem => Effect::NextProblem,
             FileExplorer => Effect::Files,
             Hover => Effect::Hover,

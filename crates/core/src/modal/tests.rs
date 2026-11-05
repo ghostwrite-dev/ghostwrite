@@ -273,8 +273,12 @@ fn in_files_the_trees_keys_are_a_layer_of_their_own() {
     assert_eq!(m.view_key(Key::Char('a')), Outcome::Effect(Effect::Assist), "space a asks, as everywhere");
     assert_eq!(m.view_key(Key::Char(' ')), Outcome::Handled);
     assert_eq!(m.view_key(Key::Char('e')), Outcome::Effect(Effect::Files), "space e goes back too");
-    m.view_key(Key::Ctrl('w'));
-    assert_eq!(m.view_key(Key::Char('l')), Outcome::Effect(Effect::Focus(Direction::Right)), "ctrl-w l: the view on the right");
+    m.view_key(Key::Char(' '));
+    assert_eq!(m.view_key(Key::Char('v')), Outcome::Effect(Effect::Pages), "space v: the pages");
+    m.view_key(Key::Char(' '));
+    assert_eq!(m.view_key(Key::Char('g')), Outcome::Effect(Effect::Aside), "space g: the side view");
+    assert_eq!(m.view_key(Key::Ctrl('w')), Outcome::Ignored, "ctrl-w goes nowhere");
+    assert_eq!(m.pending_keys(), "", "and waits for nothing after it");
     m.enter(Mode::Ai);
     assert_eq!(m.view_key(Key::Tab), Outcome::Review(Review::Next), "Tab accepts a story's step from here too");
     assert_eq!(m.view_key(Key::Enter), Outcome::Tree(TreeCommand::Open), "Enter is the tree's");
@@ -371,6 +375,8 @@ fn effects_come_back() {
     };
     assert_eq!(space('a', &mut t), Outcome::Effect(Effect::Assist));
     assert_eq!(space('t', &mut t), Outcome::Effect(Effect::Terminal));
+    assert_eq!(space('v', &mut t), Outcome::Effect(Effect::Pages));
+    assert_eq!(space('g', &mut t), Outcome::Effect(Effect::Aside));
     assert_eq!(space('j', &mut t), Outcome::Effect(Effect::NextProblem));
     assert_eq!(s.modal.key(Key::Char(':'), &mut s.regs, &mut t), Outcome::Effect(Effect::CommandLine));
 }
@@ -622,7 +628,10 @@ fn counts_go_where_helix_takes_them() {
     assert_eq!(s.outcome("N"), Outcome::Effect(Effect::FindNext { backward: true, count: 1 }));
     assert_eq!(s.outcome("*"), Outcome::Effect(Effect::FindSelection { word_bounds: true }));
     assert_eq!(s.outcome("2 ctrl-o"), Outcome::Effect(Effect::JumpBack(2)));
-    assert_eq!(s.outcome("ctrl-w ctrl-v"), Outcome::Effect(Effect::SplitRight), "ctrl-w takes its keys with ctrl too");
+    assert_eq!(s.outcome("space w v"), Outcome::Effect(Effect::SplitRight));
+    assert_eq!(s.outcome("space w w"), Outcome::Effect(Effect::OtherPane));
+    assert_eq!(s.outcome("space w q"), Outcome::Effect(Effect::CloseSplit));
+    assert_eq!(s.outcome("space w o"), Outcome::Effect(Effect::CloseSplit));
 }
 
 #[test]

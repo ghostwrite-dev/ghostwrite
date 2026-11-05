@@ -118,15 +118,6 @@ impl ViewKind {
     }
 }
 
-/// A way across the screen, from one view to the next (`ctrl-w h j k l`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Left,
-    Down,
-    Up,
-    Right,
-}
-
 /// A key, as modal editing sees it (the UI translates its keystrokes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -153,11 +144,11 @@ pub enum Key {
 /// What the editor around the buffer should do after a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
-    /// `ctrl-w v`: a second pane beside this one.
+    /// `space w v`: a second pane beside this one.
     SplitRight,
-    /// `ctrl-w w`: the keys go to the other pane.
+    /// `space w w`: the keys go to the other pane.
     OtherPane,
-    /// `ctrl-w q`: only this pane.
+    /// `space w q`, `space w o`: only this pane.
     CloseSplit,
     /// `gn` / `gp`
     /// `gn`, `gp`: so many tabs along, round the ends (`4gn`).
@@ -170,8 +161,6 @@ pub enum Effect {
     Files,
     /// Esc in a view that isn't the code: back to it.
     FocusCode,
-    /// `ctrl-w h j k l`: the view that way.
-    Focus(Direction),
     /// `i`, `a` and the other keys that type, on the terminal: type in its shell.
     TypeInTerminal,
     /// `j`, `k`, `ctrl-d`, `ctrl-u` on pages or beside a file: scroll so many lines
@@ -237,6 +226,11 @@ pub enum Effect {
     Search,
     /// `space t`: the terminal, typing in it; or from there, back to the code.
     Terminal,
+    /// `space v`: the file's pages, opened if they aren't shown yet; or from there, back to the code.
+    Pages,
+    /// `space g`: the side view (a plugin's panel, the debugger), opened if it isn't
+    /// shown yet; or from there, back to the code.
+    Aside,
     /// `gf`: the file named under the cursor (or selected), at the line and column after it.
     GotoFile,
     /// `space j`: go to the next error in the file (or warning, if it has
@@ -365,7 +359,7 @@ pub trait Registers {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
-    /// Keys toward a binding (`g`, `space`, `ctrl-w`), which lead on to more.
+    /// Keys toward a binding (`g`, `space`, `space w`), which lead on to more.
     Keys(Vec<Key>),
     /// A command that waits for a char (`f`, `r`, `mi`, `"`), and the keys
     /// it was run with. `mr` waits for two: the first is `first`.

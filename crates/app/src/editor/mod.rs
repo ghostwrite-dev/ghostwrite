@@ -871,7 +871,8 @@ impl Editor {
                 | Effect::Terminal
                 | Effect::Files
                 | Effect::FocusCode
-                | Effect::Focus(_)
+                | Effect::Pages
+                | Effect::Aside
                 | Effect::TypeInTerminal => {}
                 _ => self.focus_on(ViewKind::Code, cx),
             }
@@ -885,7 +886,8 @@ impl Editor {
             Effect::Files if self.modal.view == ViewKind::Files => self.focus_on(ViewKind::Code, cx),
             Effect::Files => self.enter_files(cx),
             Effect::FocusCode => self.focus_on(ViewKind::Code, cx),
-            Effect::Focus(towards) => self.focus_towards(towards, cx),
+            Effect::Pages => self.toggle_pages(cx),
+            Effect::Aside => self.toggle_aside(cx),
             Effect::TypeInTerminal => self.type_in_terminal(cx),
             Effect::Scroll { by, pages } => self.scroll_view(by, pages, cx),
             Effect::Zoom(by) => {

@@ -1,7 +1,9 @@
 //! Debugging a program from the editor: `:break` on the cursor's line, `:debug
 //! program`, then `:over`, `:step`, `:finish`, `:continue` and `:stop`. Those are
 //! commands, so that they can be given keys of your own. When it stops, the cursor goes
-//! there, and what's called what and the variables show under the code, with what it printed.
+//! there, and what's called what and the variables show in the side view, beside the
+//! code (on top of a plugin's panel, if there's one), with what it printed: `space g`
+//! goes there.
 //! The debugger is whatever the config's `debugger` says, Xcode's by default.
 
 use std::collections::{BTreeSet, HashMap};
@@ -18,7 +20,8 @@ use crate::theme::{pt, theme};
 
 /// How much of what it printed is kept.
 const MAX_OUTPUT: usize = 20_000;
-const HEIGHT: f32 = 170.;
+/// Its height in the side view, over a panel.
+const HEIGHT: f32 = 260.;
 
 #[derive(Default)]
 pub(super) struct DebugPane {
@@ -202,17 +205,18 @@ impl Editor {
         self.debug.breakpoints.get(&real(path))
     }
 
-    /// Under the code, while something's being debugged.
-    pub(super) fn render_debug(&self, cx: &Context<Self>) -> Option<AnyElement> {
+    /// In the side view, while something's being debugged: where it's stopped, the
+    /// variables, and what it printed, one under another. `alone`, it has the whole
+    /// height; over a plugin's panel, some of it.
+    pub(super) fn render_debug(&self, alone: bool, cx: &Context<Self>) -> Option<AnyElement> {
         let session = self.debug.session.as_ref()?;
         let theme = theme(cx);
-        let column = |title: String| {
-            div().flex_1().min_w_0().h_full().overflow_hidden().px_2().flex().flex_col().child(div().text_xs().text_color(theme.muted_foreground).child(title))
-        };
+        let section =
+            |title: String| div().min_w_0().overflow_hidden().px_3().flex().flex_col().child(div().text_xs().text_color(theme.muted_foreground).child(title));
         let row = |text: String| div().whitespace_nowrap().overflow_hidden().child(text);
         let (place, values) = match &session.stopped {
             Some(stopped) => (
-                column(format!("stopped: {}", stopped.reason)).children(stopped.frames.iter().map(|frame| {
+                section(format!("stopped: {}", stopped.reason)).children(stopped.frames.iter().map(|frame| {
                     let name = frame
                         .path
                         .as_ref()
@@ -220,28 +224,40 @@ impl Editor {
                         .map_or(String::new(), |file| format!("  {}:{}", file.to_string_lossy(), frame.line.map_or(0, |line| line + 1)));
                     row(format!("{}{name}", frame.name))
                 })),
-                column("variables".to_string()).children(stopped.locals.iter().map(|variable| row(format!("{} = {}", variable.name, variable.value)))),
+                section("variables".to_string()).children(stopped.locals.iter().map(|variable| row(format!("{} = {}", variable.name, variable.value)))),
             ),
-            None => (column("running…".to_string()), column("variables".to_string())),
+            None => (section("running…".to_string()), section("variables".to_string())),
         };
         let printed = session.output.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().map(|line| row(line.to_string()));
         Some(
             div()
-                .flex_none()
-                .h(pt(HEIGHT))
+                .map(|d| if alone { d.flex_1().min_h_0() } else { d.flex_none().h(pt(HEIGHT)).border_b_1().border_color(theme.border) })
+                .overflow_hidden()
                 .flex()
-                .py_1()
-                .border_t_1()
-                .border_color(theme.border)
-                .bg(theme.background)
+                .flex_col()
+                .gap_2()
+                .py_2()
                 .text_color(theme.foreground)
                 .font_family(theme.mono_font.clone())
                 .text_size(theme.mono_size * 0.9)
                 .debug_selector(|| "debug-pane".to_string())
                 .child(place)
                 .child(values)
-                .child(column("it printed".to_string()).children(printed))
+                .child(section("it printed".to_string()).children(printed))
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+impl Editor {
+    /// Something being debugged by `adapter` (which need only answer `initialize`),
+    /// stopped where `frames` say, with `locals`: what the side view shows of it, for the tests.
+    pub(super) fn pretend_debugging(&mut self, adapter: &[String], frames: Vec<Frame>, locals: Vec<Variable>, cx: &mut Context<Self>) -> Result<(), String> {
+        let debugger = Arc::new(Debugger::start(adapter, |_| {})?);
+        let stopped = Some(Stopped { thread: 1, reason: "breakpoint".into(), frames, locals });
+        self.debug.session = Some(Session { debugger, stopped, output: "it ran\n".into(), _task: Task::ready(()) });
+        cx.notify();
+        Ok(())
     }
 }

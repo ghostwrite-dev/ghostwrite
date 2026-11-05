@@ -24,7 +24,7 @@ impl Editor {
         (self.project.tabs.by_id(other).is_some() && self.tab().is_some_and(|tab| tab.doc.id != other)).then_some(other)
     }
 
-    /// `ctrl-w v`, `:vsplit`: a second pane, with this file's pages if they're open, else the next tab.
+    /// `space w v`, `:vsplit`: a second pane, with this file's pages if they're open, else the next tab.
     pub(super) fn split_right(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let here = self.tab().ok_or("no file open")?.doc.id;
         let pages = self.project.tabs.iter().find(|tab| tab.doc.is_view_of(here)).map(|tab| tab.doc.id);
@@ -36,14 +36,14 @@ impl Editor {
         Ok(())
     }
 
-    /// `ctrl-w w`: the keys go to the other pane.
+    /// `space w w`: the keys go to the other pane.
     pub(super) fn other_pane(&mut self, cx: &mut Context<Self>) {
         if let Some(doc) = self.other_pane_doc() {
             self.go_to_doc(doc, cx);
         }
     }
 
-    /// `ctrl-w q`, `:only`: only the pane with the keys.
+    /// `space w q`, `space w o`, `:only`: only the pane with the keys.
     pub(super) fn close_split(&mut self, cx: &mut Context<Self>) {
         self.split = None;
         cx.notify();

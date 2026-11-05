@@ -5,13 +5,14 @@
 //! [`Modal::view`](ghostwrite_core::Modal::view), and its layer of the keymap comes
 //! first.
 //!
-//! `ctrl-w h j k l` go from view to view by where they are on screen; `space e` and
-//! `space t` go to Files and the terminal, and again, back to the code; a click
-//! puts the keys where it is. Whatever was going on in a view ends as the keys
+//! `space` and a letter is the one way from view to view: `space e` goes to Files,
+//! `space t` to the terminal, `space v` to the file's pages (opening them), `space g`
+//! to the side view (a plugin's panel, the debugger), and each again, from its view,
+//! back to the code. A click puts the keys where it is. Whatever was going on in a view ends as the keys
 //! leave it: typing (insert mode) and selecting (select mode) in the code, typing
 //! in the shell, naming a file. A story's AI mode goes with the keys.
 
-use ghostwrite_core::{Direction, Mode, ViewKind};
+use ghostwrite_core::{Mode, ViewKind};
 use gpui::{Context, ScrollStrategy};
 
 use super::Editor;
@@ -31,15 +32,22 @@ impl Editor {
         self.modal.view == ViewKind::Terminal && self.modal.mode == Mode::Insert
     }
 
-    /// Whether a plugin shows something beside the file in front.
-    pub(super) fn aside_showing(&self) -> bool {
+    /// Whether a plugin shows its panel beside the file in front.
+    pub(super) fn panel_showing(&self) -> bool {
         self.project.aside_shown && self.tab().is_some_and(|tab| tab.doc.aside.is_some())
     }
 
+    /// Whether there's a side view: a plugin's panel beside the file in front, or the
+    /// debugger, while something's being debugged.
+    pub(super) fn aside_showing(&self) -> bool {
+        self.panel_showing() || self.tab().is_some() && self.debug.session.is_some()
+    }
+
     /// What the view with the keys is called in the mode line, if it isn't its kind:
-    /// a plugin's view, by its title.
+    /// the side view, by what's on top in it.
     pub(super) fn view_title(&self) -> Option<&'static str> {
         match self.modal.view {
+            ViewKind::Aside if self.debug.session.is_some() => Some("Debugger"),
             ViewKind::Aside => Some(self.tab()?.doc.aside.as_ref()?.panel.title()),
             _ => None,
         }
@@ -122,44 +130,49 @@ impl Editor {
         cx.notify();
     }
 
-    /// `ctrl-w h j k l`: the keys to the view that way on screen, if there's one there.
-    /// Files is left of the code, the terminal under it (and what's beside it), and
-    /// what a plugin shows beside the file right of it; the panes of a split are side by side.
-    pub(super) fn focus_towards(&mut self, towards: Direction, cx: &mut Context<Self>) {
-        enum To {
-            View(ViewKind),
-            OtherPane,
+    /// `space v`: the keys to the file's pages, which open in a tab of their own if
+    /// they aren't shown yet; from the pages, back to the file. Whatever plugin makes
+    /// them: a file with none says so.
+    pub(super) fn toggle_pages(&mut self, cx: &mut Context<Self>) {
+        let elsewhere = !self.in_code();
+        self.focus_on(ViewKind::Code, cx);
+        // From another view to a tab of pages that's in front already: there.
+        if elsewhere && self.view_now() == ViewKind::Pages {
+            return;
         }
-        let split = self.other_pane_doc().and(self.split.as_ref());
-        // Which side the pane with the keys is on, if there are two.
-        let (keys_left, keys_right) = (split.is_some_and(|s| s.other_on_right), split.is_some_and(|s| !s.other_on_right));
-        let (files, aside) = (self.tree_pane.shown, self.aside_showing());
-        let terminal = self.terminal.shown && !self.terminal.shells.is_empty();
-        let to = match (self.in_code(), self.modal.view, towards) {
-            (true, _, Direction::Left) if keys_right => To::OtherPane,
-            (true, _, Direction::Left) if files => To::View(ViewKind::Files),
-            (true, _, Direction::Right) if keys_left => To::OtherPane,
-            (true, _, Direction::Right) if aside => To::View(ViewKind::Aside),
-            (true, _, Direction::Down) if terminal => To::View(ViewKind::Terminal),
-            // From Files, the pane next to it; from beside the file, the one next to that.
-            (_, ViewKind::Files, Direction::Right) if keys_right => To::OtherPane,
-            (_, ViewKind::Files, Direction::Right) => To::View(ViewKind::Code),
-            (_, ViewKind::Aside, Direction::Left) if keys_left => To::OtherPane,
-            (_, ViewKind::Aside, Direction::Left) => To::View(ViewKind::Code),
-            (_, ViewKind::Aside, Direction::Down) if terminal => To::View(ViewKind::Terminal),
-            (_, ViewKind::Terminal, Direction::Up) => To::View(ViewKind::Code),
-            (_, ViewKind::Terminal, Direction::Left) if files => To::View(ViewKind::Files),
-            _ => return,
-        };
-        match to {
-            To::OtherPane => {
-                self.focus_on(ViewKind::Code, cx);
-                self.other_pane(cx);
-            }
-            To::View(ViewKind::Terminal) => self.start_reading(false, cx),
-            To::View(view) => self.focus_on(view, cx),
+        if self.tab().is_some_and(|tab| tab.doc.pages_are_the_text()) {
+            return self.project.say("this file is its pages");
         }
+        match self.preview_pages(cx) {
+            Ok(true) => {}
+            Ok(false) => self.project.say("this file has no pages: no plugin makes any of it"),
+            Err(why) => self.project.say(why),
+        }
+        self.modal.view = self.view_now();
         cx.notify();
+    }
+
+    /// `space g`: the keys to the side view, which opens if the file's plugin has a
+    /// panel for it or something's being debugged; from there, back to the code.
+    pub(super) fn toggle_aside(&mut self, cx: &mut Context<Self>) {
+        if self.modal.view == ViewKind::Aside {
+            return self.focus_on(ViewKind::Code, cx);
+        }
+        if let Some(tab) = self.project.tabs.active_mut() {
+            if tab.doc.aside.is_none()
+                && let Some(panel) = tab.doc.language.and_then(ghostwrite_plugin::panel)
+            {
+                tab.doc.aside = Some(super::aside::Aside::new(panel));
+            }
+            if tab.doc.aside.is_some() {
+                self.project.aside_shown = true;
+                self.refresh_aside(cx);
+            }
+        }
+        if !self.aside_showing() {
+            return self.project.say("this file has nothing beside it: no plugin shows a panel for it, and nothing's being debugged");
+        }
+        self.focus_on(ViewKind::Aside, cx);
     }
 
     /// `j`, `k`, `ctrl-d`, `ctrl-u` on pages or beside the file: `by` lines (or with

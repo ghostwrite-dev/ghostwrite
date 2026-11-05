@@ -506,7 +506,12 @@ fn a_program_is_debugged_from_the_editor(cx: &mut TestAppContext) {
     assert_eq!(t.read(|e| e.tab().unwrap().cursor_position().0), 2, "the cursor went there");
     t.cx.update(|window, _| window.refresh());
     t.cx.run_until_parked();
-    assert!(t.cx.debug_bounds("debug-pane").is_some(), "and the pane is drawn");
+    let pane = t.cx.debug_bounds("debug-pane").expect("and the debugger is drawn");
+    let aside = t.cx.debug_bounds("aside").expect("in the side view");
+    assert!(aside.contains(&pane.center()), "{pane:?} in {aside:?}");
+    t.keys("space g");
+    assert_eq!(t.at().0, ViewKind::Aside, "space g goes there");
+    t.keys("space g");
 
     t.command("over");
     wait_for(&mut t, |e| stopped_on(e) == Some(3));

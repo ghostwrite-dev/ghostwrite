@@ -57,18 +57,24 @@ Claude Code works too if it's installed, under its own login.
 ## Getting around
 
 space f    pick a file
-space e    Files, the file tree (again: back to the code)
-space t    the terminal, typing in it (again: back to the code)
 space /    search the project
 :replace old new   change it across the project, step by step
 
-Files and the terminal are views, as the code is, and the keys work the same way
-in each: the mode line says where they are (NOR · files, INS · terminal).
+space and a letter goes to a view, and the same again goes back to the code:
 
-ctrl-w h j k l   the view left, below, above, right
+space e    Files, the file tree
+space t    the terminal, typing in it
+space v    the file's pages, if a plugin makes them (a Typst file's, say)
+space g    the side view: a plugin's panel (Lean's goals), or the debugger
+
+Each is a view, as the code is, and the keys work the same way in each: the
+mode line says where they are (NOR · files, INS · terminal). A click puts them
+where it is.
+
+space w v        two panes; space w w the other one; space w q only this one
 esc esc          typing in the terminal: back to normal mode, to move through
                  what it printed (in vim and the like, ctrl-\ ctrl-n)
 i                type in the terminal again
-esc              from Files or the terminal, back to the code
+esc              from Files, the side view or the terminal, back to the code
 
 That's the start. space ? has the rest.

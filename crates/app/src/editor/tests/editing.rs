@@ -511,11 +511,22 @@ fn your_keys(keys: &[(&str, &str)]) -> (&'static ghostwrite_core::Keymap, Vec<St
 #[gpui::test]
 fn your_keys_run_commands_by_name_or_a_colon_command_and_no_op_unbinds(cx: &mut TestAppContext) {
     let mut t = open("one two\nthree\n", &[], cx);
-    let (keymap, wrong) =
-        your_keys(&[("Z", "extend_line_below"), ("x", "no_op"), ("ctrl-s", ":w"), ("space w", ":wa"), ("Y Y", ":w"), ("q", "extend_lin_below")]);
+    let (keymap, wrong) = your_keys(&[
+        ("Z", "extend_line_below"),
+        ("x", "no_op"),
+        ("ctrl-s", ":w"),
+        ("space W", ":wa"),
+        ("space w", ":wa"),
+        ("Y Y", ":w"),
+        ("q", "extend_lin_below"),
+    ]);
     t.editor.update(t.cx, |e, _| e.use_keys(keymap, &wrong));
     let status = t.status().unwrap_or_default();
     assert!(status.contains("no command \"extend_lin_below\""), "a name that isn't a command is said: {status}");
+    assert!(
+        status.contains("\"space w\": those keys lead on to others (space w v, space w w, space w q, space w o)"),
+        "and keys that lead on to the panes': {status}"
+    );
     t.keys("Z d");
     assert_eq!(t.text(), "three\n", "Z selects the line, as x did");
     t.keys("x d");
@@ -524,7 +535,9 @@ fn your_keys_run_commands_by_name_or_a_colon_command_and_no_op_unbinds(cx: &mut 
     t.keys("ctrl-s");
     assert_eq!(t.file("doc.txt"), "hree\n", "ctrl-s is :w");
     t.keys("i").input("t").keys("escape space w");
-    assert_eq!(t.file("doc.txt"), "three\n", "space w is :wa");
+    assert_eq!(t.file("doc.txt"), "hree\n", "space w is as it was: it waits for the panes' keys");
+    t.keys("escape space W");
+    assert_eq!(t.file("doc.txt"), "three\n", "space W is :wa");
     t.keys("d Y Y");
     assert_eq!(t.file("doc.txt"), "tree\n", "Y leads on to a binding of your own");
     t.keys("u q");
@@ -533,7 +546,7 @@ fn your_keys_run_commands_by_name_or_a_colon_command_and_no_op_unbinds(cx: &mut 
     let sheet = crate::editor::view::cheatsheet(keymap);
     let row = |what: &str| sheet.iter().flat_map(|(_, rows)| rows).find(|row| row.what.starts_with(what)).map(|row| row.keys.clone());
     assert_eq!(row("select line").as_deref(), Some("X alt-x % Z"));
-    assert_eq!(row(":wa").as_deref(), Some("space w"));
+    assert_eq!(row(":wa").as_deref(), Some("space W"));
     t.keys("space ?");
     t.cx.update(|window, _| window.refresh());
     t.cx.run_until_parked();
@@ -545,7 +558,7 @@ fn your_keys_run_commands_by_name_or_a_colon_command_and_no_op_unbinds(cx: &mut 
 #[test]
 fn the_cheatsheet_and_the_keymap_agree() {
     use std::collections::HashSet;
-    let (yours, _) = your_keys(&[("Z", "extend_line_below"), ("x", "no_op"), ("ctrl-s", ":w"), ("g", "goto_file_start")]);
+    let (yours, _) = your_keys(&[("Z", "extend_line_below"), ("x", "no_op"), ("ctrl-s", ":w"), ("g x", "goto_file_start"), ("space w x", "wonly")]);
     let yours = {
         let keys = [("R", "rename_file"), ("r", "no_op"), ("Y", ":w")].map(|(keys, to)| (keys.to_string(), to.to_string()));
         &*Box::leak(Box::new(yours.clone().with_yours_in(ghostwrite_core::ViewKind::Files, &keys).0))

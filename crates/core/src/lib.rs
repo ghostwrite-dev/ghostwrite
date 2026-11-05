@@ -21,7 +21,7 @@ pub mod textobject;
 
 pub use buffer::{Buffer, Edit};
 pub use language::Language;
-pub use modal::{Command, Direction, Effect, Key, Keymap, MenuKey, Modal, Mode, Outcome, Place, Registers, Review, Target, TreeCommand, ViewKind};
+pub use modal::{Command, Effect, Key, Keymap, MenuKey, Modal, Mode, Outcome, Place, Registers, Review, Target, TreeCommand, ViewKind};
 pub use ropey::{Rope, RopeSlice};
 pub use selection::Range;
 pub use text::Text;

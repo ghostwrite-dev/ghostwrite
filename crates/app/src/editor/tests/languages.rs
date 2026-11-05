@@ -387,9 +387,10 @@ fn a_preview_beside_its_file_keeps_up_and_clicking_it_keeps_the_keys(cx: &mut Te
     );
 }
 
-/// A plugin's keys go with its files, in the file and in the view of it.
+/// `space v` is the editor's own: to the pages of a file whose plugin makes them,
+/// opening them, and back. A file with none says so.
 #[gpui::test]
-fn a_plugin_binds_keys_for_its_files(cx: &mut TestAppContext) {
+fn space_v_goes_to_a_files_pages_and_back(cx: &mut TestAppContext) {
     let mut t = open("", &[], cx);
     let path = t.dir.join("paper.typ");
     std::fs::write(&path, "= Intro\n").unwrap();
@@ -397,20 +398,29 @@ fn a_plugin_binds_keys_for_its_files(cx: &mut TestAppContext) {
     let name = |t: &mut Setup| t.read(|e| e.tab().map(|tab| tab.doc.name().to_string()));
     let tabs = t.read(|e| e.project.tabs.len());
     t.keys("space v");
-    assert_eq!(t.read(|e| e.project.tabs.len()), tabs, "nothing bound here: it's not its file");
-    assert_eq!(t.read(|e| e.modal.pending_keys()), "", "and the keys are done with");
+    assert_eq!(t.read(|e| e.project.tabs.len()), tabs, "doc.txt has no pages");
+    assert_eq!(t.status().as_deref(), Some("this file has no pages: no plugin makes any of it"));
+    assert_eq!((t.at(), t.read(|e| e.modal.pending_keys())), ((ViewKind::Code, Mode::Normal), String::new()), "and the keys are done with");
     t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![path.clone()], cx)));
     t.keys("space v");
-    assert_eq!(name(&mut t).as_deref(), Some("paper.typ · pages"));
+    assert_eq!(name(&mut t).as_deref(), Some("paper.typ · pages"), "opened, in a tab of their own");
+    assert_eq!(t.at(), (ViewKind::Pages, Mode::Normal), "the keys on them");
+    assert_eq!(t.read(|e| e.project.tabs.len()), tabs + 2);
     t.keys("space v");
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ"), "and back, from the view");
-    assert_eq!(t.read(|e| e.modal.pending_keys()), "");
-    t.keys("i");
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal));
+    t.keys("space v");
+    assert_eq!(name(&mut t).as_deref(), Some("paper.typ · pages"), "again, to the same tab");
+    assert_eq!(t.read(|e| e.project.tabs.len()), tabs + 2);
+    t.keys("space v space e space v");
+    assert_eq!(t.at(), (ViewKind::Pages, Mode::Normal), "from Files, to the pages");
+    assert_eq!(name(&mut t).as_deref(), Some("paper.typ · pages"));
+    t.keys("space v i");
     t.keys("space");
     t.input("v");
     t.keys("escape");
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ"), "typing isn't a key binding");
-    // The help lists them, drawn and all.
+    // The help lists the plugin's keys, drawn and all.
     t.keys("space ?");
     t.cx.update(|window, _| window.refresh());
     t.cx.run_until_parked();
@@ -433,6 +443,11 @@ fn plugins_keys_are_free(cx: &mut TestAppContext) {
             // The help writes `space v`, but `gv`.
             let joined = binding.keys.replace(' ', "");
             let taken = |keys: &&str| keys.contains(binding.keys) || keys.split_whitespace().any(|key| key == joined);
+            // `space v` to `:preview` was a plugin's own before it was the editor's (for any
+            // file with pages): the editor's comes first, and does what it did.
+            if binding.keys == "space v" && binding.command == "preview" {
+                continue;
+            }
             // In its view, the code's keys are under that view's own, and both come first.
             let there = builtin.iter().filter(|(view, _)| *view == binding.view || *view == ghostwrite_core::ViewKind::Code).map(|(_, keys)| keys);
             assert!(!there.into_iter().any(taken), "{} is built in", binding.keys);

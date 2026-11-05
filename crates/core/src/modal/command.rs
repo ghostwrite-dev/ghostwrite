@@ -182,14 +182,12 @@ commands! {
     Vsplit "vsplit" "two panes: this file's pages, or the next tab",
     RotateView "rotate_view" "the keys to the other pane",
     Wonly "wonly" "only this pane",
-    JumpViewLeft "jump_view_left" "the keys to the view on the left",
-    JumpViewDown "jump_view_down" "the keys to the view below",
-    JumpViewUp "jump_view_up" "the keys to the view above",
-    JumpViewRight "jump_view_right" "the keys to the view on the right",
     FocusCode "focus_code" "back to the code (from select mode, normal mode first)",
     Ask "ask" "ask the model about the line or selection, or to change it",
     FileExplorer "file_explorer" "the file tree",
     Terminal "terminal" "the terminal: type in it",
+    TogglePages "toggle_pages" "this file's pages, opened if they aren't shown yet; from there, back to the code",
+    ToggleAside "toggle_aside" "the side view: a plugin's panel, or the debugger; from there, back to the code",
     FilePicker "file_picker" "pick a file (fuzzy)",
     BufferPicker "buffer_picker" "pick an open file",
     GlobalSearch "global_search" "search the project",
@@ -290,19 +288,7 @@ impl Command {
         use Command::*;
         matches!(
             self,
-            CommandMode
-                | Ask
-                | Terminal
-                | FileExplorer
-                | GlobalSearch
-                | FilePicker
-                | BufferPicker
-                | Cheatsheet
-                | JumpViewLeft
-                | JumpViewDown
-                | JumpViewUp
-                | JumpViewRight
-                | FocusCode
+            CommandMode | Ask | Terminal | FileExplorer | GlobalSearch | FilePicker | BufferPicker | Cheatsheet | TogglePages | ToggleAside | FocusCode
         )
     }
 

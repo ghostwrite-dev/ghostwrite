@@ -84,7 +84,7 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
     ("Match  m", &[]),
     ("Search", &[]),
     ("Space", &[]),
-    ("Views  ctrl-w", &[("click", "the keys go to the view clicked"), ("mode line", "the mode, and the view: NOR · terminal")]),
+    ("Views and panes", &[("click", "the keys go to the view clicked"), ("mode line", "the mode, and the view: NOR · terminal")]),
     ("Files  space e", &[]),
     (
         "Terminal  space t",
@@ -101,8 +101,8 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
             ("⌘⌥←  ⌘⌥→", "move the tab, or drag it"),
         ],
     ),
-    ("Pages  :preview", &[]),
-    ("Beside the file", &[]),
+    ("Pages  space v", &[]),
+    ("Beside the file  space g", &[]),
     (
         "Reviewing",
         &[
@@ -708,7 +708,6 @@ impl gpui::Render for Editor {
         });
         let tabs = (!self.project.tabs.is_empty()).then(|| self.render_tabs(cx));
         let terminal = self.render_terminal(cx);
-        let debug = self.render_debug(cx);
         div()
             .key_context("Editor")
             .track_focus(&self.focus)
@@ -782,9 +781,14 @@ impl gpui::Render for Editor {
             .bg(theme.background)
             .text_color(theme.foreground)
             .font_family(theme.ui_font.clone())
-            .child(div().flex_1().min_h_0().flex().children(tree).child(
-                div().flex_1().min_w_0().flex().flex_col().children(tabs).child(body).children(debug).children(terminal).children(self.render_command_line(cx)),
-            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .children(tree)
+                    .child(div().flex_1().min_w_0().flex().flex_col().children(tabs).child(body).children(terminal).children(self.render_command_line(cx))),
+            )
             .child(self.render_status(cx))
             .children(self.cheatsheet.then(|| self.render_cheatsheet(cx)))
             .children(self.render_picker(cx))

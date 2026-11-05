@@ -1,6 +1,8 @@
 //! The keymap: which keys run which [`Command`] in normal and select mode
 //! (and AI mode, looking around), as helix keeps it: a trie, where `g`,
-//! `space`, `z`, `m`, `]`, `[` and `ctrl-w` lead on to more keys.
+//! `space`, `space w`, `z`, `m`, `]`, `[` lead on to more keys. `space` and a
+//! letter is the one way from view to view (`space e`, `t`, `v`, `g`), and the
+//! panes are under `space w`, as helix's window mode is.
 //!
 //! [`DEFAULT`] is the keymap as data, in the cheatsheet's sections and
 //! lines, so [`Keymap::cheatsheet`] comes from what's bound. Each view that
@@ -135,8 +137,6 @@ pub const DEFAULT: &[(&str, &[Line])] = &[
         "Space",
         &[
             (&[("space a", Ask)], "ask about the line or selection"),
-            (&[("space e", FileExplorer)], "Files, the file tree (⌘B too); again: back to the code"),
-            (&[("space t", Terminal)], "the terminal, typing in it (⌘J too); again: back to the code"),
             (&[("space f", FilePicker), ("space b", BufferPicker)], "pick a file, an open file (fuzzy)"),
             (&[("space /", GlobalSearch)], "search the project"),
             (&[("space k", Hover), ("space d", FileDiagnostics)], "docs here; this file's diagnostics"),
@@ -148,15 +148,15 @@ pub const DEFAULT: &[(&str, &[Line])] = &[
         ],
     ),
     (
-        "Views  ctrl-w",
+        "Views and panes",
         &[
-            (
-                &[("ctrl-w h", JumpViewLeft), ("ctrl-w j", JumpViewDown), ("ctrl-w k", JumpViewUp), ("ctrl-w l", JumpViewRight)],
-                "the view left, below, above, right (Files, panes, terminal, beside)",
-            ),
-            (&[("ctrl-w v", Vsplit)], "two panes: this file's pages, or the next tab"),
-            (&[("ctrl-w w", RotateView)], "the other pane"),
-            (&[("ctrl-w q", Wonly), ("ctrl-w o", Wonly)], "only this one"),
+            (&[("space e", FileExplorer)], "Files, the file tree (⌘B too); again: back to the code"),
+            (&[("space t", Terminal)], "the terminal, typing in it (⌘J too); again: back to the code"),
+            (&[("space v", TogglePages)], "this file's pages, opened if they aren't shown yet; again: back to the code"),
+            (&[("space g", ToggleAside)], "the side view: a plugin's panel, or the debugger; again: back to the code"),
+            (&[("space w v", Vsplit)], "two panes: this file's pages, or the next tab"),
+            (&[("space w w", RotateView)], "the other pane"),
+            (&[("space w q", Wonly), ("space w o", Wonly)], "only this one"),
         ],
     ),
     ("Command line  :", &[(&[(":", CommandMode)], "the command line")]),
@@ -189,7 +189,7 @@ pub const VIEWS: &[(ViewKind, &str, &[Line])] = &[
     ),
     (
         ViewKind::Pages,
-        "Pages  :preview",
+        "Pages  space v",
         &[
             (&[("j", ScrollDown), ("down", ScrollDown), ("k", ScrollUp), ("up", ScrollUp)], "scroll down, up"),
             (&[("ctrl-d", ScrollPageDown), ("ctrl-u", ScrollPageUp)], "a screen down, up"),
@@ -198,7 +198,7 @@ pub const VIEWS: &[(ViewKind, &str, &[Line])] = &[
     ),
     (
         ViewKind::Aside,
-        "Beside the file",
+        "Beside the file  space g",
         &[
             (&[("j", ScrollDown), ("down", ScrollDown), ("k", ScrollUp), ("up", ScrollUp)], "scroll down, up"),
             (&[("ctrl-d", ScrollPageDown), ("ctrl-u", ScrollPageUp)], "a screen down, up"),
@@ -340,6 +340,21 @@ impl Keymap {
     /// The same, in `view`'s layer: there `no_op` hides the code's binding too.
     pub fn bind_yours_in(&mut self, view: ViewKind, keys: &str, to: &str) -> Result<(), String> {
         let Some(sequence) = parse_keys(keys) else { return Err(format!("\"{keys}\" isn't keys (as in \"space w\", \"ctrl-s\")")) };
+        // Keys that lead on to more (`space w`, to `space w v`) can't be bound themselves:
+        // that would take those after them away. `no_op` takes them all away, as it says.
+        let unbinding = !to.starts_with(':') && Command::named(to.trim()) == Some(NoOp);
+        if !unbinding && let Found::Keys = self.find_in(view, &sequence) {
+            let after: Vec<String> = self
+                .bindings()
+                .into_iter()
+                .filter(|(of, more, _)| (*of == view || *of == ViewKind::Code) && more.starts_with(&sequence))
+                .map(|(_, more, _)| self::sequence(&more))
+                .collect();
+            let shown = if after.len() > 4 { format!("{}, …", after[..4].join(", ")) } else { after.join(", ") };
+            return Err(format!(
+                "\"{keys}\": those keys lead on to others ({shown}), so they can't be bound themselves: bind keys after them, as \"{keys} x\""
+            ));
+        }
         if let Some(line) = to.strip_prefix(':') {
             self.bind(view, &sequence, Bound::Typed(line.trim().to_string()), Shown::Yours);
             return Ok(());
@@ -483,8 +498,8 @@ impl Keymap {
     }
 }
 
-/// What `keys` come to in one layer. After a ctrl key (`ctrl-w`), the next keys can be
-/// had with ctrl held too: `ctrl-w ctrl-v` is `ctrl-w v`, as in helix.
+/// What `keys` come to in one layer. After a ctrl key of yours (`ctrl-k`), the next keys
+/// can be had with ctrl held too: `ctrl-k ctrl-v` is `ctrl-k v`, as in helix.
 fn find<'a>(layer: &'a Trie, keys: &[Key]) -> Found<'a> {
     let held = matches!(keys.first(), Some(Key::Ctrl(_)));
     let mut nodes = layer;
@@ -591,7 +606,7 @@ pub fn parse_keys(keys: &str) -> Option<Vec<Key>> {
 }
 
 /// Keys one after another, as helix writes them: run together if each is
-/// a char (`gg`, `]d`), else apart (`space f`, `ctrl-w v`).
+/// a char (`gg`, `]d`), else apart (`space f`, `space w v`).
 pub fn sequence(keys: &[Key]) -> String {
     let names: Vec<String> = keys.iter().map(|key| key.name()).collect();
     if names.iter().all(|name| name.chars().count() == 1) { names.concat() } else { names.join(" ") }
@@ -642,7 +657,12 @@ mod tests {
         let keymap = Keymap::standard();
         assert!(matches!(keymap.find(&keys("g")), Found::Keys));
         assert_eq!(command(keymap, "g g"), Some(GotoFileStart));
-        assert_eq!(command(keymap, "ctrl-w ctrl-v"), Some(Vsplit), "as ctrl-w v");
+        assert_eq!(command(keymap, "space w v"), Some(Vsplit));
+        assert_eq!(command(keymap, "ctrl-w"), None, "ctrl-w leads nowhere in normal mode: it's typing's");
+        assert!(matches!(keymap.find(&keys("ctrl-w")), Found::Nothing));
+        let mut yours = Keymap::default();
+        yours.bind_yours("ctrl-k v", "vsplit").unwrap();
+        assert_eq!(command(&yours, "ctrl-k ctrl-v"), Some(Vsplit), "as ctrl-k v");
         assert_eq!(command(keymap, "g ctrl-g"), None, "only after a ctrl key");
         assert!(matches!(keymap.find(&keys("g z")), Found::Nothing));
     }
@@ -654,6 +674,7 @@ mod tests {
             ("Z", "extend_line_below"),
             ("x", "no_op"),
             ("ctrl-s", ":w"),
+            ("space W", ":wa"),
             ("space w", ":wa"),
             ("g", "goto_file_start"),
             ("Z Z", ":x"),
@@ -664,13 +685,17 @@ mod tests {
         assert!(matches!(keymap.find(&keys("Z Z")), Found::Bound(Bound::Typed(line)) if line == "x"));
         assert_eq!(command(&keymap, "x"), None, "unbound");
         assert!(matches!(keymap.find(&keys("ctrl-s")), Found::Bound(Bound::Typed(line)) if line == "w"));
-        assert!(matches!(keymap.find(&keys("space w")), Found::Bound(Bound::Typed(line)) if line == "wa"));
+        assert!(matches!(keymap.find(&keys("space W")), Found::Bound(Bound::Typed(line)) if line == "wa"));
         assert_eq!(command(&keymap, "space f"), Some(FilePicker), "the rest of space is still there");
-        assert_eq!(command(&keymap, "g"), Some(GotoFileStart), "and g isn't a prefix any more");
+        assert!(matches!(keymap.find(&keys("space w")), Found::Keys), "space w leads on to the panes' keys, so it isn't bound");
+        assert_eq!(command(&keymap, "space w v"), Some(Vsplit), "and they're as they were");
+        assert!(matches!(keymap.find(&keys("g")), Found::Keys), "nor is g");
         assert_eq!(command(&keymap, "q"), Some(ReplayMacro), "a wrong name leaves the key as it was");
-        assert_eq!(wrong.len(), 2);
-        assert!(wrong[0].contains("no command \"extend_lin_below\""), "{}", wrong[0]);
-        assert!(wrong[1].contains("isn't keys"), "{}", wrong[1]);
+        assert_eq!(wrong.len(), 4, "{wrong:?}");
+        assert!(wrong[0].starts_with("\"space w\": those keys lead on to others (space w v, space w w, space w q, space w o)"), "{}", wrong[0]);
+        assert!(wrong[1].contains("\"g\": those keys lead on to others"), "{}", wrong[1]);
+        assert!(wrong[2].contains("no command \"extend_lin_below\""), "{}", wrong[2]);
+        assert!(wrong[3].contains("isn't keys"), "{}", wrong[3]);
     }
 
     #[test]

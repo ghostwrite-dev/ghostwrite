@@ -449,11 +449,11 @@ fn draw(t: &mut Setup) {
 #[gpui::test]
 fn two_panes_show_two_tabs_and_the_keys_move_between_them(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[], cx);
-    t.keys("ctrl-w v");
+    t.keys("space w v");
     assert!(t.status().is_some_and(|s| s.contains("open another file")), "one tab: nothing to show beside it");
     let names = three_tabs(&mut t);
     let start = t.active();
-    t.keys("ctrl-w v");
+    t.keys("space w v");
     draw(&mut t);
     let other = t.read(|e| e.other_pane_doc()).expect("a second pane");
     assert!(t.cx.debug_bounds("other-pane").is_some(), "and it's drawn");
@@ -461,15 +461,15 @@ fn two_panes_show_two_tabs_and_the_keys_move_between_them(cx: &mut TestAppContex
     let here = id(&mut t);
     assert_ne!(here, other);
 
-    t.keys("ctrl-w w");
+    t.keys("space w w");
     assert_eq!(id(&mut t), other, "the keys went over");
     assert_eq!(t.read(|e| e.other_pane_doc()), Some(here), "and what they left stays in its pane");
     assert!(!t.read(|e| e.split.as_ref().unwrap().other_on_right), "on the left now");
-    t.keys("ctrl-w w");
+    t.keys("space w w");
     assert_eq!(id(&mut t), here);
     assert!(t.read(|e| e.split.as_ref().unwrap().other_on_right), "back where it was");
 
-    t.keys("ctrl-w q");
+    t.keys("space w q");
     draw(&mut t);
     assert_eq!(t.read(|e| e.other_pane_doc()), None);
     assert_eq!(t.active(), start);

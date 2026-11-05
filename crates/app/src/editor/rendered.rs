@@ -3,7 +3,7 @@
 //! ([`ghostwrite_page::Renderer`]), or if the file is only pages, from the file.
 //!
 //! A document whose pages are made from its text shows them in a tab of its own,
-//! which `:preview` opens: a view of that document, with no text of its own
+//! which `space v` (or `:preview`) opens: a view of that document, with no text of its own
 //! ([`Document::view_of`]). The cursor and the selection show on them too, and a
 //! click puts the file's cursor on what's clicked, for going back to it. They stay where they are while the
 //! cursor moves around; an edit that leaves it on another line, or `space j` (to

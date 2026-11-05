@@ -4,11 +4,11 @@
 //!
 //! A view with no text (Files, what's beside a file) has nothing for the code's
 //! keys to move through: there, only its own keys and those that work anywhere
-//! (`:`, most under `space`, `ctrl-w`) do something, and the rest are swallowed.
+//! (`:`, and most under `space`) do something, and the rest are swallowed.
 
 use super::command::Command;
 use super::keymap::{Bound, Found};
-use super::{Direction, Effect, Key, Modal, Mode, Outcome, Pending, Review, TreeCommand, ViewKind};
+use super::{Effect, Key, Modal, Mode, Outcome, Pending, Review, TreeCommand, ViewKind};
 
 impl Modal {
     /// A key in a view with no text. Tab during a review accepts, as it does
@@ -69,10 +69,6 @@ impl Modal {
         let tree = |command: TreeCommand| Some(Outcome::Tree(command));
         let count = self.count.unwrap_or(1);
         let outcome = match command {
-            JumpViewLeft => Some(Outcome::Effect(Effect::Focus(Direction::Left))),
-            JumpViewDown => Some(Outcome::Effect(Effect::Focus(Direction::Down))),
-            JumpViewUp => Some(Outcome::Effect(Effect::Focus(Direction::Up))),
-            JumpViewRight => Some(Outcome::Effect(Effect::Focus(Direction::Right))),
             // From select mode, Esc is first back to normal mode, as it is in the code.
             FocusCode if self.mode == Mode::Select => {
                 self.mode = Mode::Normal;

@@ -1,0 +1,24 @@
+[book]
+title = "Ghostwrite"
+description = "A fast helix-style modal editor where the model proposes and you accept each step. Take back control of your code, without sacrificing speed."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+site-url = "/ghostwrite/"
+git-repository-url = "https://github.com/ghostwrite-dev/ghostwrite"
+edit-url-template = "https://github.com/ghostwrite-dev/ghostwrite/edit/main/docs/{path}"
+default-theme = "light"
+preferred-dark-theme = "ayu"
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true

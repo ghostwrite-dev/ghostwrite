@@ -1,10 +1,12 @@
-//! What's beside a file, if a plugin has something for its language: a
-//! [`ghostwrite_plugin::Panel`], which says what to ask the file's language server
-//! about the cursor and what to show of the answers. It's kept on the document, kept
-//! up to date as the cursor moves and the file is edited, and drawn in a pane beside
-//! the code, whose left edge drags to resize it. `:preview` shows or hides it. It's a
-//! view: `ctrl-w l` or a click puts the keys there, where `j` and `k` scroll it, and
-//! the mode line calls it by its title.
+//! The side view, beside the code: what a plugin has for a file's language, and the
+//! debugger. A plugin's is a [`ghostwrite_plugin::Panel`], which says what to ask the
+//! file's language server about the cursor and what to show of the answers. It's kept
+//! on the document, kept up to date as the cursor moves and the file is edited. While
+//! something's being debugged, the debugger is in the side view too, on top of the
+//! panel if there's one (see [`super::debug`]). The pane's left edge drags to resize
+//! it. `space g` opens it and puts the keys there (again, back to the code), and
+//! `:preview` shows or hides a panel. It's a view: there `j` and `k` scroll it, a
+//! click puts the keys there too, and the mode line calls it by what's on top.
 
 use ghostwrite_lsp::{Diagnostic, Severity};
 use ghostwrite_plugin::{Block, Panel};
@@ -111,12 +113,15 @@ impl Editor {
         .detach();
     }
 
-    /// The pane beside `tab`'s code, if there's something to show in it.
+    /// The side view beside `tab`'s code, if there's something to show in it: the
+    /// debugger, while something's being debugged, over the file's panel, if it's shown.
     pub(super) fn render_aside(&self, tab: &Tab, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.project.aside_shown {
+        let panel = tab.doc.aside.as_ref().filter(|_| self.project.aside_shown).map(|aside| self.render_panel(aside.panel.as_ref(), cx));
+        // The debugger on top, while it's running; alone, it has the whole height.
+        let debug = self.render_debug(panel.is_none(), cx);
+        if panel.is_none() && debug.is_none() {
             return None;
         }
-        let content = self.render_panel(tab.doc.aside.as_ref()?.panel.as_ref(), cx);
         let theme = theme(cx);
         Some(
             div()
@@ -133,7 +138,8 @@ impl Editor {
                 .bg(theme.tab_bar)
                 .debug_selector(|| "aside".to_string())
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| this.focus_on(ghostwrite_core::ViewKind::Aside, cx)))
-                .child(div().flex_1().min_h_0().child(content))
+                .children(debug)
+                .children(panel.map(|panel| div().flex_1().min_h_0().child(panel)))
                 .child(self.aside_width.handle("aside-edge").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, window, cx| {

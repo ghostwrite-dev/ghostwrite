@@ -185,6 +185,22 @@ mod tests {
     }
 
     #[test]
+    fn keys_that_lead_on_to_others_cant_be_bound_and_that_is_said() {
+        let json = serde_json::json!({ "keys": { "space w": ":wa", "space W": ":wa", "files": { "space w": "undo" } } });
+        let config: &'static super::Config = Box::leak(Box::new(super::from_json(&json)));
+        let mut modal = Modal::default();
+        modal.set_keymap(&config.keymap);
+        assert_eq!(config.problems.len(), 2, "{:?}", config.problems);
+        assert!(
+            config.problems[0].starts_with("\"space w\": those keys lead on to others (space w v, space w w, space w q, space w o), so they can't be bound"),
+            "{:?}",
+            config.problems
+        );
+        assert!(config.problems[1].starts_with("files: \"space w\": those keys lead on to others"), "{:?}", config.problems);
+        assert!(modal.binds(Key::Char(' ')), "space is as it was");
+    }
+
+    #[test]
     fn your_keys_can_be_a_views_own() {
         use ghostwrite_core::ViewKind;
         let json = serde_json::json!({ "keys": {
