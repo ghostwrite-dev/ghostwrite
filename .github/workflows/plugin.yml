@@ -1,0 +1,96 @@
+name: plugin
+# Builds a Ghostwrite plugin with scripts/plugin-build.sh, and on a v* tag releases it:
+# the folder zipped as <name>-<version>.zip, with its sha256 beside it. The tag has to be
+# the version in plugin.json. Called from a plugin's own workflow, which gives it
+# permission to write its releases:
+#
+#     uses: ghostwrite-dev/ghostwrite/.github/workflows/plugin.yml@plugin-api-v1.0.1
+#
+# The script comes from the same commit as this workflow, so the tag a plugin calls it
+# at pins both the build and, through its ghostwrite-plugin-api dependency, the interface.
+on:
+  workflow_call:
+jobs:
+  plugin:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      # job.workflow_* name this file, not the caller's: its repository, and the commit
+      # the caller's ref resolved to.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: ghostwrite
+          sparse-checkout: scripts
+          persist-credentials: false
+      - name: Read plugin.json
+        id: plugin
+        run: |
+          echo "name=$(jq -r .name plugin/plugin.json)" >> "$GITHUB_OUTPUT"
+          echo "version=$(jq -r .version plugin/plugin.json)" >> "$GITHUB_OUTPUT"
+          if [ -f plugin/Cargo.toml ]; then echo "code=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Check the tag is the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.plugin.outputs.version }}
+        run: |
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::The tag is $TAG, but plugin.json's version is $VERSION"
+            exit 1
+          fi
+      - name: Install Rust
+        if: steps.plugin.outputs.code
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --target wasm32-wasip2
+          rustup default 1.97.0
+      - uses: actions/cache@v4
+        if: steps.plugin.outputs.code
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('plugin/Cargo.lock') }}
+          restore-keys: cargo-
+      - name: Build
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          GRAMMARS_DIR: ${{ runner.temp }}/grammars
+        run: sh ghostwrite/scripts/plugin-build.sh plugin "out/${{ steps.plugin.outputs.name }}"
+      - name: List what it's made of
+        run: cd out && find . -type f -exec ls -l {} + | sort -k 9
+      - name: Zip
+        id: zip
+        env:
+          NAME: ${{ steps.plugin.outputs.name }}
+          VERSION: ${{ steps.plugin.outputs.version }}
+        run: |
+          zip="$NAME-$VERSION.zip"
+          (cd out && find "$NAME" -exec touch -t 200001010000 {} + && find "$NAME" | sort | zip -X -q "../$zip" -@)
+          sha256sum "$zip" > "$zip.sha256"
+          cat "$zip.sha256"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.zip.outputs.zip }}
+          path: |
+            ${{ steps.zip.outputs.zip }}
+            ${{ steps.zip.outputs.zip }}.sha256
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          NAME: ${{ steps.plugin.outputs.name }}
+          VERSION: ${{ steps.plugin.outputs.version }}
+          ZIP: ${{ steps.zip.outputs.zip }}
+        run: |
+          sha=$(cut -d' ' -f1 "$ZIP.sha256")
+          notes=$(printf 'The %s plugin for Ghostwrite, version %s: unzip it into the plugins folder.\n\nsha256 of %s: `%s`\n' "$NAME" "$VERSION" "$ZIP" "$sha")
+          gh release create "$TAG" "$ZIP" "$ZIP.sha256" --repo "$GITHUB_REPOSITORY" --title "$NAME $VERSION" --notes "$notes"

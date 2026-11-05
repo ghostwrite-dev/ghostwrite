@@ -323,8 +323,7 @@ it starts at once.
 unzips them into `target/bundled-plugins`, which the installers copy. Typst and Lean, which only
 the tests use, are pinned in `test-plugins.lock` and go to `target/test-plugins`. To work on the
 plugins, `GHOSTWRITE_PLUGINS_SRC=‹a default-plugins checkout›` builds them from it instead, with
-[ghostwrite-dev/plugin-build](https://github.com/ghostwrite-dev/plugin-build)'s `build.sh`
-(`PLUGIN_BUILD` says where, if it isn't beside the checkout). A
+`scripts/plugin-build.sh`, which builds any plugin's folder. A
 grammar runs in WebAssembly a little slower than compiled in: a 10,000-line Rust file parses in
 about 40 ms rather than 26, and is colored (which is redone after each change) in about 62 ms
 rather than 47.
@@ -373,12 +372,14 @@ cp target/wasm32-wasip2/release/word_count.wasm .
 ```
 
 Then `:plugin link` that folder while you work on it, or `:plugin install` it. To share it, release
-it on GitHub as `<name>-<version>.zip` with its `.sha256`, which plugin-build's workflow does for
-a tag, and it installs as `owner/repo`; or commit the `.wasm`, and it's cloned. A plugin can say
-something, edit the text it was shown (one undo step; not if the text has changed since), and
-open a file of the project. It can hear `opened`, `saved` and `closed`. The editor's own commands
-can't be replaced. `crates/plugin-api/wit/plugin.wit` is the whole interface, and `"api"` is its
-version: a plugin built for another version is refused, and says so.
+it on GitHub as `<name>-<version>.zip` with its `.sha256`, which `.github/workflows/plugin.yml` does
+for a tag when a plugin's repository calls it
+(`ghostwrite-dev/ghostwrite/.github/workflows/plugin.yml@plugin-api-v1.0.1`), and it installs as
+`owner/repo`; or commit the `.wasm`, and it's cloned. A plugin can say something, edit the text it
+was shown (one undo step; not if the text has changed since), and open a file of the project. It can
+hear `opened`, `saved` and `closed`. The editor's own commands can't be replaced.
+`crates/plugin-api/wit/plugin.wit` is the whole interface, and `"api"` is its version: a plugin
+built for another version is refused, and says so.
 
 ### Adding a language
 

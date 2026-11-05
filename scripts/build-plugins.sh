@@ -7,8 +7,7 @@
 # go to target/test-plugins, which nothing ships.
 #
 # To work on them: GHOSTWRITE_PLUGINS_SRC=<a default-plugins checkout> builds those in
-# plugins.lock from it instead, with ghostwrite-dev/plugin-build's build.sh (where
-# PLUGIN_BUILD says, or plugin-build/build.sh beside the checkout).
+# plugins.lock from it instead, with scripts/plugin-build.sh.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -41,13 +40,11 @@ fetch() {
 
 if [ -n "${GHOSTWRITE_PLUGINS_SRC:-}" ]; then
     src=$(cd "$GHOSTWRITE_PLUGINS_SRC" && pwd)
-    build=${PLUGIN_BUILD:-$src/../plugin-build/build.sh}
-    [ -f "$build" ] || { echo "no plugin-build at $build: set PLUGIN_BUILD" >&2; exit 1; }
     rm -rf target/bundled-plugins
     grep -v '^#' plugins.lock | while read -r name _; do
         [ -n "$name" ] || continue
         CARGO_TARGET_DIR="$PWD/target/plugin-builds" GRAMMARS_DIR="$PWD/target/grammars" \
-            sh "$build" "$src/$name" "target/bundled-plugins/$name" >/dev/null
+            sh scripts/plugin-build.sh "$src/$name" "target/bundled-plugins/$name" >/dev/null
     done
 else
     fetch plugins.lock target/bundled-plugins
