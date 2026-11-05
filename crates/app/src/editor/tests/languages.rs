@@ -387,8 +387,8 @@ fn a_preview_beside_its_file_keeps_up_and_clicking_it_keeps_the_keys(cx: &mut Te
     );
 }
 
-/// `space v` is the editor's own: to the pages of a file whose plugin makes them,
-/// opening them, and back. A file with none says so.
+/// `space v` is the key of the plugin's view of pages: to the pages of a file whose plugin
+/// makes them, opening them, and back. A file with none says so.
 #[gpui::test]
 fn space_v_goes_to_a_files_pages_and_back(cx: &mut TestAppContext) {
     let mut t = open("", &[], cx);
@@ -399,12 +399,13 @@ fn space_v_goes_to_a_files_pages_and_back(cx: &mut TestAppContext) {
     let tabs = t.read(|e| e.project.tabs.len());
     t.keys("space v");
     assert_eq!(t.read(|e| e.project.tabs.len()), tabs, "doc.txt has no pages");
-    assert_eq!(t.status().as_deref(), Some("this file has no pages: no plugin makes any of it"));
+    assert!(t.status().is_some_and(|said| said.starts_with("this file has no pages view: ") && said.contains("typst")), "{:?}", t.status());
     assert_eq!((t.at(), t.read(|e| e.modal.pending_keys())), ((ViewKind::Code, Mode::Normal), String::new()), "and the keys are done with");
     t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![path.clone()], cx)));
     t.keys("space v");
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ · pages"), "opened, in a tab of their own");
-    assert_eq!(t.at(), (ViewKind::Pages, Mode::Normal), "the keys on them");
+    let pages = |t: &mut Setup| matches!(t.at(), (ViewKind::Plugin(id), Mode::Normal) if id.plugin == "typst" && id.name == "pages");
+    assert!(pages(&mut t), "the keys on them, its plugin's view: {:?}", t.at());
     assert_eq!(t.read(|e| e.project.tabs.len()), tabs + 2);
     t.keys("space v");
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ"), "and back, from the view");
@@ -413,27 +414,27 @@ fn space_v_goes_to_a_files_pages_and_back(cx: &mut TestAppContext) {
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ · pages"), "again, to the same tab");
     assert_eq!(t.read(|e| e.project.tabs.len()), tabs + 2);
     t.keys("space v space e space v");
-    assert_eq!(t.at(), (ViewKind::Pages, Mode::Normal), "from Files, to the pages");
+    assert!(pages(&mut t), "from Files, to the pages");
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ · pages"));
     t.keys("space v i");
     t.keys("space");
     t.input("v");
     t.keys("escape");
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ"), "typing isn't a key binding");
-    // The help lists the plugin's keys, drawn and all.
+    // The help lists the view's keys, drawn and all.
     t.keys("space ?");
     t.cx.update(|window, _| window.refresh());
     t.cx.run_until_parked();
     assert!(t.read(|e| e.cheatsheet));
-    assert_eq!(t.read(|e| ghostwrite_plugin::keys(e.active_language()).len()), 1);
+    assert!(t.read(|e| crate::editor::view::cheatsheet(e.modal.keymap()).iter().any(|(title, _)| title == "Pages  space v")));
     t.keys("escape");
 }
 
 /// No plugin takes a key that's built in, in any language.
 #[gpui::test]
 fn plugins_keys_are_free(cx: &mut TestAppContext) {
-    let _t = open("", &[], cx);
-    let cheatsheet = crate::editor::view::cheatsheet(ghostwrite_core::Keymap::standard());
+    let mut t = open("", &[], cx);
+    let cheatsheet = crate::editor::view::cheatsheet(t.read(|e| e.modal.keymap()));
     let builtin: Vec<(ghostwrite_core::ViewKind, &str)> =
         cheatsheet.iter().flat_map(|(_, rows)| rows.iter().map(|row| (row.view, row.keys.as_str()))).collect();
     let mut seen = 0;
@@ -443,16 +444,28 @@ fn plugins_keys_are_free(cx: &mut TestAppContext) {
             // The help writes `space v`, but `gv`.
             let joined = binding.keys.replace(' ', "");
             let taken = |keys: &&str| keys.contains(binding.keys) || keys.split_whitespace().any(|key| key == joined);
-            // `space v` to `:preview` was a plugin's own before it was the editor's (for any
-            // file with pages): the editor's comes first, and does what it did.
+            // `space v` to `:preview` was a plugin's own before its views had keys: the
+            // view's comes first, and does what it did.
             if binding.keys == "space v" && binding.command == "preview" {
                 continue;
             }
             // In its view, the code's keys are under that view's own, and both come first.
-            let there = builtin.iter().filter(|(view, _)| *view == binding.view || *view == ghostwrite_core::ViewKind::Code).map(|(_, keys)| keys);
+            // A plugin's views of a name share their keys.
+            let there = builtin.iter().filter(|(view, _)| view.name() == binding.view.name() || *view == ghostwrite_core::ViewKind::Code).map(|(_, keys)| keys);
             assert!(!there.into_iter().any(taken), "{} is built in", binding.keys);
         }
     }
+    // Nor do their views' keys: the editor's would come first.
+    for view in ghostwrite_plugin::views() {
+        let Some(key) = view.key else { continue };
+        seen += 1;
+        let editors = crate::editor::view::cheatsheet(ghostwrite_core::Keymap::standard());
+        assert!(
+            !editors.iter().flat_map(|(_, rows)| rows).any(|row| row.view == ghostwrite_core::ViewKind::Code && row.keys.contains(key)),
+            "{key} is built in"
+        );
+    }
+    assert!(t.read(|e| e.modal.keymap().clashes().is_empty()), "and they don't take each other's");
     assert!(seen >= 2, "the plugins bind some");
 }
 

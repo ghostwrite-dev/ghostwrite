@@ -207,6 +207,30 @@ fn a_plugin_is_installed_and_removed_from_inside_the_editor(cx: &mut TestAppCont
     assert!(!plugins.join("mine-test").exists());
 }
 
+/// A plugin whose view's key is taken says so before it's installed.
+#[gpui::test]
+fn a_views_key_thats_taken_is_said_before_its_installed(cx: &mut TestAppContext) {
+    let code = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-plugins/lean/lean.wasm");
+    if !code.is_file() {
+        return eprintln!("skipped: scripts/build-plugins.sh puts the test plugins in place");
+    }
+    let mut t = with_plugin("x\n", cx);
+    let plugins = ghostwrite_project::scratch_dir("editor-plugins");
+    let editor = t.editor.clone();
+    t.cx.update(|_, cx| editor.update(cx, |e, _| e.plugins_at = Some(plugins.clone())));
+    let source = t.dir.join("clashing");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::copy(&code, source.join("code.wasm")).unwrap();
+    let manifest = r#"{ "name": "clash-test", "api": 1, "code": "code.wasm", "extensions": ["clashtest"],
+        "views": [{ "name": "notes", "title": "Notes", "shows": "blocks", "key": "space f" }] }"#;
+    std::fs::write(source.join("plugin.json"), manifest).unwrap();
+    t.command("plugin install clashing");
+    settle(&mut t);
+    let asked = t.status().unwrap_or_default();
+    assert!(asked.contains("its view notes: Notes beside the file, on space f"), "{asked}");
+    assert!(asked.contains("clash-test's notes view has no key: space f is the editor's (file_picker)") && asked.contains(". :plugin install! "), "{asked}");
+}
+
 #[gpui::test]
 fn a_linked_plugin_is_read_again_when_it_changes_and_unlinked(cx: &mut TestAppContext) {
     let mut t = with_plugin("x\n", cx);

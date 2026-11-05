@@ -48,15 +48,23 @@ pub(super) struct Row {
 }
 
 /// The `space ?` cheatsheet: every key, as the keymap has them (and yours
-/// with them), and what it can't say: [`BY_HAND`]. Sections are in its order.
+/// with them), and what it can't say: [`BY_HAND`]. Sections are in its order; those
+/// it hasn't (plugins' views'), after the one the keymap has before them.
 pub(super) fn cheatsheet(keymap: &ghostwrite_core::Keymap) -> Vec<(String, Vec<Row>)> {
     let mut sections: Vec<(String, Vec<Row>)> = BY_HAND.iter().map(|(title, _)| (title.to_string(), vec![])).collect();
+    let mut after = None;
     for section in keymap.cheatsheet() {
         let rows = section.lines.iter().map(|line| Row { view: line.view, keys: line.shown(), what: line.what.clone(), bound: line.keys.clone() });
-        match sections.iter_mut().find(|(title, _)| title == section.title) {
-            Some((_, lines)) => lines.extend(rows),
-            None => sections.push((section.title.to_string(), rows.collect())),
-        }
+        let at = match sections.iter().position(|(title, _)| *title == section.title) {
+            Some(at) => at,
+            None => {
+                let at = after.map_or(sections.len(), |after: usize| after + 1);
+                sections.insert(at, (section.title.clone(), vec![]));
+                at
+            }
+        };
+        sections[at].1.extend(rows);
+        after = Some(at);
     }
     for ((_, lines), (_, by_hand)) in sections.iter_mut().zip(BY_HAND) {
         let view = lines.first().map_or(ViewKind::Code, |row| row.view);
@@ -84,7 +92,7 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
     ("Match  m", &[]),
     ("Search", &[]),
     ("Space", &[]),
-    ("Views and panes", &[("click", "the keys go to the view clicked"), ("mode line", "the mode, and the view: NOR · terminal")]),
+    ("Views and panes", &[("click", "the keys go to the view clicked"), ("mode line", "the mode, and the view: NOR · terminal, a plugin's by its title")]),
     ("Files  space e", &[]),
     (
         "Terminal  space t",
@@ -101,8 +109,7 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
             ("⌘⌥←  ⌘⌥→", "move the tab, or drag it"),
         ],
     ),
-    ("Pages  space v", &[]),
-    ("Beside the file  space g", &[]),
+    ("Debugger  space x", &[]),
     (
         "Reviewing",
         &[
@@ -121,7 +128,7 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
             (":n :bn :bp :bc", "new, next, previous, close tab"),
             (":rl  :rm  :42", "reload, trash file, go to line"),
             (":format", "format the file (saving does too)"),
-            (":tree :term :preview", "Files, the terminal, a file's pages or what's beside it"),
+            (":tree :term :preview", "Files, the terminal, a plugin's view of the file: its pages, what's beside it"),
             (":tab-left :tab-right", "move the tab (⌘⌥← ⌘⌥→, gN gP, or drag it)"),
             (":model opus-5.5", "ask that model from now on (tab completes)"),
             (":api-key ‹key›", "keep a Claude API key safe on this machine"),
@@ -498,7 +505,7 @@ impl Editor {
         let view = self.view_now();
         let mut modal = self.modal.clone();
         modal.view = view;
-        modal.label(if view == ViewKind::Aside { self.view_title() } else { None })
+        modal.label(self.view_title(view))
     }
 
     /// Scroll the cheatsheet if `keystroke` is one that does.

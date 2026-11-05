@@ -40,8 +40,9 @@ Each says what the plugin adds and can reach; `:plugin install!` with the same s
 ## Getting started
 
 - Open a folder with ⌘⇧O, or `ghostwrite ~/code/thing`. `:tutor` teaches the keys.
-- `space ?` shows every key. To move around, `space e`, `space t`, `space v` and `space g`
-  go to Files, the terminal, a file's pages and the side view; the same key goes back.
+- `space ?` shows every key. To move around, `space e`, `space t` and `space x` go to Files,
+  the terminal and the debugger, and plugins' views have keys of their own (`space v` for
+  Typst's pages, `space g` for Lean's goals); the same key goes back.
 - Connect a model: `:api-key ‹key›` for the Anthropic API, or Claude Code if it's installed.
   `:model` lists what can be asked, local models included, and `:model ‹name›` chooses.
 - `space a` asks about the line or selection. Tab accepts a step, Enter redirects, and

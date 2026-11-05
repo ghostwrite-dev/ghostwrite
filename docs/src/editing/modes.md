@@ -51,10 +51,10 @@ A view is a place on screen that takes the keys:
 | Code | `NOR` | a file's text, in either pane of a split |
 | Files | `NOR · files` | the file tree, left of the code |
 | Terminal | `NOR · terminal` | your shell, under the code |
-| Pages | `NOR · pages` | a tab of a file's pages, which a plugin makes (Typst's, say) |
-| Beside the file | `NOR · lean`, by its title; `NOR · debugger` while debugging | the side view, right of the code: what a plugin shows (Lean's goals, say), or the debugger |
+| Debugger | `NOR · debugger` | where a program being debugged is stopped, right of the code |
+| A plugin's | by its title: `NOR · pages`, `NOR · goals` | a view a plugin declares for its files: a tab of a file's pages (Typst's), or what's beside a file (Lean's goals) |
 
-Each view has its own layer of keys over the code's. A key is looked up in the layer of the view with the keys first, then in the code's, so `:` and the `space` keys work everywhere. In Files and beside the file there's no text, so only their own keys and those that work anywhere do something. On the terminal and on pages, the code's motions move through what's there. The [key reference](../keys/README.md) has each view's layer, and you can [remap keys in one view](../configuration/keys.md#keys-for-one-view).
+Each view has its own layer of keys over the code's. A key is looked up in the layer of the view with the keys first, then in the code's, so `:` and the `space` keys work everywhere. In Files, the debugger and beside the file there's no text, so only their own keys and those that work anywhere do something. On the terminal and on pages, the code's motions move through what's there. The [key reference](../keys/README.md) has each view's layer, and you can [remap keys in one view](../configuration/keys.md#keys-for-one-view).
 
 ### Moving between views
 
@@ -64,9 +64,9 @@ Each view has its own layer of keys over the code's. A key is looked up in the l
 | --- | --- |
 | `space e` | go to Files; again, back to the code |
 | `space t` | go to the terminal, typing in it; again, back to the code |
-| `space v` | go to this file's pages, opening them if they aren't shown yet; again, back to the code |
-| `space g` | go to the side view (a plugin's panel, or the debugger); again, back to the code |
-| `esc` | from Files, the terminal (in normal mode) or beside the file, back to the code |
+| `space x` | go to the debugger, while something's being debugged; again, back to the code |
+| a plugin's view's key | go to that view of this file, opening it if it isn't shown yet (`space v` Typst's pages, `space g` Lean's goals); again, back to the code |
+| `esc` | from Files, the terminal (in normal mode), the debugger or beside the file, back to the code |
 | ⌘B | go to Files; from Files, hide it |
 | ⌘J | go to the terminal; from there, hide it |
 | a click | the keys go to what you clicked |
@@ -100,6 +100,10 @@ Files has the tree's keys as its own layer:
 
 See [The terminal](../terminal.md).
 
-### Pages and beside the file
+### A plugin's views
 
-A plugin can show a file's pages in a tab (Typst does), or something beside the file (Lean's goals). Both are views: `space v` goes to the pages and `space g` to the side view. On pages, `j` `k` and `ctrl-d` `ctrl-u` scroll and `+` `-` `=` zoom; beside the file, `j` `k` and `ctrl-d` `ctrl-u` scroll and `esc` goes back. See [Pages and what's beside a file](../languages/pages.md).
+A plugin declares its views of its own languages' files, each with a name, a title and maybe a key: a file's pages in a tab (Typst's, on `space v`), or something beside the file (Lean's goals, on `space g`). The editor has no such view of its own. On pages, `j` `k` and `ctrl-d` `ctrl-u` scroll and `+` `-` `=` zoom; beside the file, `j` `k` and `ctrl-d` `ctrl-u` scroll and `esc` goes back. Your keys for a view go under its name, and `focus_view ‹name›` goes there from a key of yours. See [Pages and what's beside a file](../languages/pages.md).
+
+### Debugger
+
+While a program's being debugged, the debugger is beside the code, over a plugin's panel if there's one. `space x` goes there; `j` `k` scroll it, and `esc` goes back. See [Debugging](../languages/debugger.md).

@@ -1,6 +1,6 @@
 # Pages and what's beside a file
 
-Some plugins show a file as something other than text: its pages in a tab, or something in the side view beside it. Both are [views](../editing/modes.md#views).
+Some plugins show a file as something other than text: its pages in a tab, or something beside it. Both are views the plugin declares, each with its title and key ([views](../editing/modes.md#views)).
 
 ## PDFs
 
@@ -31,7 +31,7 @@ They go from a tenth of the view's width to four times it, and scroll across whe
 
 Opening a `.typ` file without it suggests that command.
 
-`space v` (or `:preview`) opens a Typst file's pages in a tab of their own, compiled as you type, saved or not, and from the pages goes back to the file. `space v` is the editor's own key, for any file with pages. `space w v` puts them beside the file instead, and they keep up as you type.
+`space v` (or `:preview`) opens a Typst file's pages in a tab of their own, compiled as you type, saved or not, and from the pages goes back to the file. `space v` is the key of the plugin's view, `pages`, which the mode line calls `NOR · pages`. `space w v` puts them beside the file instead, and they keep up as you type.
 
 - The project's files and your system's fonts are used as they are. Packages come from Typst's cache, downloaded from packages.typst.org the first time.
 - The cursor and selection show on the pages too, on the glyphs they're on. Clicking a glyph puts the cursor on the text it came from, ready for when you go back; a double click goes back.
@@ -48,13 +48,13 @@ The first time, it takes some seconds to compile and read the fonts; after that 
 :plugin install ghostwrite-dev/lean
 ```
 
-A Lean file shows its goals in the side view, right of the code, as Lean's infoview does:
+A Lean file shows its goals beside it, right of the code, as Lean's infoview does, in the plugin's view `goals`:
 
 - the proof state at the cursor, or the type expected there;
 - the messages on the cursor's line, `#eval`'s output among them;
 - how far Lean has got checking the file.
 
-`space g` goes to the side view, where `j` and `k` scroll it, and again back to the code. `:preview` shows or hides it.
+`space g`, the view's key, goes there (`NOR · goals`), where `j` and `k` scroll it, and again back to the code. `:preview` shows or hides it.
 
 Lean runs through `lake serve`, started in the file's Lake project, so the project's toolchain and packages are used.
 

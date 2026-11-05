@@ -5,7 +5,40 @@ make — say what the model may read and what it may write, so that the model's
 side of Ghostwrite is put together from what's registered rather than written
 into the editor.
 
-Status: proposed. Nothing here is built yet.
+Status: the first step is built: plugins register their views (see [Views are
+registered](#views-are-registered)). The rest is proposed.
+
+## Views are registered
+
+Before a view can say what it gives the model, there has to be a place where views
+are registered rather than written into the editor. That's built:
+
+- **The editor's views** are the code, Files, the terminal and the debugger:
+  `ViewKind::{Code, Files, Terminal, Debugger}` in `ghostwrite-core`. The debugger is a
+  view of its own, beside the code, on `space x`.
+- **A plugin's views** are declared in its manifest, and the editor knows none but by
+  that: `ViewKind::Plugin(ViewId)`, where a `ViewId` names the plugin, the view and what
+  it shows.
+
+  ```json
+  "views": [{ "name": "goals", "title": "Goals", "shows": "blocks", "place": "beside", "key": "space g" }]
+  ```
+
+  - `shows` is a kind of content the editor knows how to draw (`Shows` in core): `pages`,
+    from the plugin's renderer, or `blocks`, from its panel. A kind brings its default
+    keys (`SHOWS` in the keymap), and more kinds can be added the same way.
+  - `place` is where it goes: `tab` or `beside`. For now each kind has one place.
+  - `key` is `space` and a letter, put in the keymap where it's free: the editor's keys
+    come first, then the plugin installed first. A clash is said at install, at start
+    and in `:plugin list`, and the user's `"keys"` settle it (`focus_view ‹name›`).
+  - The mode line and the cheatsheet call a view by its title; the user's keys for it go
+    under its name, over the plugin's (`"in": "‹name›"`), over its kind's.
+  - A view applies to its plugin's own languages' files.
+  - A plugin from before views (`"pages": true`, `"panel"`) gets the views it had:
+    `pages` on `space v`, and `aside` on `space g`. The manifest stays `"api": 1`.
+
+So the AI facet below hangs off a registration that exists: a `ViewId` is what a
+plugin's context sources, tools and step kinds will be registered against.
 
 ## The rule everything here serves
 
@@ -37,7 +70,8 @@ A plugin can add nothing but a few lines of rules for the prompt. So the model
 can't see Lean's goals, can't ask for Typst's errors, and can't point at a page
 or a goal: the views where that would matter most are invisible to it.
 
-The views refactor gives every place the user works a name and its own keys.
+The views refactor gives every place the user works a name and its own keys, and
+plugins register theirs.
 This takes the next step: every view also says what it gives the model, what
 the model may ask it, and what the model may propose in it. The built-in
 views register this the same way a plugin does, so the interface is used by
@@ -247,6 +281,7 @@ source, and `:plugin list` says which plugins add to it.
 
 ## Order of work
 
+0. **Views registered by plugins** (built): see above.
 1. **The facet for built-in views.** Move today's items, context sections and
    tools behind `AiFacet` and `StepKind` without changing what the model sees:
    the same prompt, byte for byte, built from registrations. The existing story

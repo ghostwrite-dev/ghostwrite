@@ -134,7 +134,8 @@ impl Editor {
                     Managed::Staged(source, staged) => {
                         let manifest = &staged.manifest;
                         let unchecked = staged.unchecked.as_ref().map_or_else(String::new, |why| format!(". {why}"));
-                        this.project.say(format!("{} ({}){unchecked}. :plugin install! {source} to install it", manifest.name, manifest.describe()));
+                        let clashes: String = this.clashes_if_added(manifest).into_iter().map(|clash| format!(". {clash}")).collect();
+                        this.project.say(format!("{} ({}){unchecked}{clashes}. :plugin install! {source} to install it", manifest.name, manifest.describe()));
                         this.staged_plugin = Some((source, *staged));
                     }
                 }
@@ -144,6 +145,15 @@ impl Editor {
         })
         .detach();
         Ok(())
+    }
+
+    /// The views of `manifest` whose keys would be taken, were it installed (in place of
+    /// one of its name, if there's one), as they'd be said.
+    pub(super) fn clashes_if_added(&self, manifest: &Manifest) -> Vec<String> {
+        let mut views: Vec<_> = ghostwrite_plugin::views().into_iter().filter(|view| view.id.plugin != manifest.name).collect();
+        views.extend_from_slice(manifest.views());
+        let (keymap, _) = super::keymap_for(&views);
+        keymap.clashes().into_iter().filter(|clash| clash.view.id.plugin == manifest.name).map(|clash| clash.said()).collect()
     }
 
     /// Look at the linked plugins every second, and read again those that have changed.

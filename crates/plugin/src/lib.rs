@@ -11,9 +11,11 @@
 //! - grammars on their own ([`Grammar`]), for what's inside a language;
 //! - language servers ([`Spec`]), what they start with and their settings, and
 //!   the kinds of token they name;
-//! - a [`Renderer`]: a file's pages, in a tab of their own (`:preview`);
-//! - a [`Panel`]: something beside a file, kept up to date from its server;
-//! - key bindings ([`Binding`]), for the files they're about;
+//! - views of a file ([`PluginView`]), each with a name, a title and maybe a key, showing
+//!   what the editor knows how to draw ([`Shows`]):
+//!   - a [`Renderer`]'s pages, in a tab of their own;
+//!   - a [`Panel`]'s blocks, beside a file, kept up to date from its server;
+//! - key bindings ([`Binding`]), for the files they're about, in the code or a view;
 //! - `:` commands ([`PluginCommand`]), and answers to what happens to files ([`Event`]);
 //! - rules for the model's prompt.
 
@@ -27,15 +29,15 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock, RwLock};
 
-pub use ghostwrite_core::Language;
 use ghostwrite_core::syntax::Grammar;
+pub use ghostwrite_core::{Language, PluginView, Shows, ViewId, ViewKind};
 use ghostwrite_lsp::registry::Spec;
 pub use ghostwrite_page::{Bitmap, Renderer};
 use serde_json::Value;
 
 /// A key sequence that runs a command, in normal and select mode: in the code, or in
-/// one of the views a plugin has (its pages, what's beside a file). Keys built in
-/// are the editor's to give: a plugin's mustn't be one of them (a test keeps to that).
+/// a view (one of the plugin's own, or the editor's). Keys built in are the editor's
+/// to give: a plugin's mustn't be one of them (a test keeps to that).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Binding {
     /// The keys, as the help writes them: `space v`, `g x`.
@@ -165,6 +167,17 @@ pub trait Plugin: Send + Sync {
     fn panel(&self, _language: &Language) -> Option<Box<dyn Panel>> {
         None
     }
+
+    /// Its views, of files of its languages.
+    fn views(&self) -> &'static [PluginView] {
+        &[]
+    }
+
+    /// Its views of a file of `language` (`None`: a file of none): those of its own languages'.
+    fn views_for(&self, language: Option<&Language>) -> &'static [PluginView] {
+        let ours = language.is_some_and(|language| self.languages().iter().any(|own| own.name == language.name));
+        if ours { self.views() } else { &[] }
+    }
 }
 
 /// Something beside a file, kept up to date from its language server. It says
@@ -202,6 +215,9 @@ pub enum Block {
 }
 
 static PLUGINS: RwLock<Vec<&'static dyn Plugin>> = RwLock::new(Vec::new());
+/// How many times plugins have come or gone: what's made of them all (the keys of their
+/// views) is made again when it's changed.
+static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static RUNTIME: OnceLock<Box<dyn Runtime>> = OnceLock::new();
 
 /// What runs a plugin's code and grammars, if this build has something that does.
@@ -272,6 +288,7 @@ pub fn add(plugin: Box<dyn Plugin>) {
     plugin.servers().into_iter().for_each(ghostwrite_lsp::registry::register);
     plugin.tokens().iter().for_each(|(token, scope)| ghostwrite_lsp::convert::register_token(token, scope));
     PLUGINS.write().unwrap_or_else(|e| e.into_inner()).push(plugin);
+    CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The plugin called `name` is gone, with what it adds (files open in its language
@@ -287,6 +304,12 @@ pub fn remove(name: &str) {
         }
         keep
     });
+    CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// How many times plugins have come or gone, so far.
+pub fn changes() -> u64 {
+    CHANGES.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn plugins() -> Vec<&'static dyn Plugin> {
@@ -331,6 +354,36 @@ pub fn renderer(language: &Language, root: &Path, path: &Path) -> Option<Result<
 /// What's beside a file of `language`, if anything is.
 pub fn panel(language: &Language) -> Option<Box<dyn Panel>> {
     plugins().iter().find_map(|p| p.panel(language))
+}
+
+/// Every plugin's views, the plugin installed first first.
+pub fn views() -> Vec<PluginView> {
+    plugins().iter().flat_map(|p| p.views().iter().copied()).collect()
+}
+
+/// The views there are of a file of `language`, the plugin installed first first.
+pub fn views_for(language: Option<&Language>) -> Vec<PluginView> {
+    plugins().iter().flat_map(|p| p.views_for(language).iter().copied()).collect()
+}
+
+/// The view of a file of `language` called `name`, if there's one.
+pub fn view_named(name: &str, language: Option<&Language>) -> Option<PluginView> {
+    views_for(language).into_iter().find(|view| view.id.name == name)
+}
+
+/// The view of a file of `language` that shows `shows`, if there's one.
+pub fn view_showing(shows: Shows, language: Option<&Language>) -> Option<PluginView> {
+    views_for(language).into_iter().find(|view| view.id.shows == shows)
+}
+
+/// The view `id`, if its plugin's still there.
+pub fn view(id: ViewId) -> Option<PluginView> {
+    views().into_iter().find(|view| view.id == id)
+}
+
+/// The panel of the view `id` for a file of `language`, if its plugin has one.
+pub fn panel_of(id: ViewId, language: &Language) -> Option<Box<dyn Panel>> {
+    plugins().iter().filter(|p| p.views_for(Some(language)).iter().any(|view| view.id == id)).find_map(|p| p.panel(language))
 }
 
 /// What the plugins add to the model's prompt.

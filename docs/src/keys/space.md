@@ -1,14 +1,14 @@
 # Space
 
-Ghostwrite's own keys are under `space`. Most of them work in any view. `space` and a letter is the one way to move between views: `e` Files, `t` the terminal, `v` pages, `g` the side view. The same key again, in that view, goes back to the code.
+Ghostwrite's own keys are under `space`. Most of them work in any view. `space` and a letter is the one way to move between views: `e` Files, `t` the terminal, `x` the debugger, and the keys plugins' views declare (`v` Typst's pages, `g` Lean's goals). The same key again, in that view, goes back to the code.
 
 | Keys | What they do | Commands |
 | --- | --- | --- |
 | `space a` | ask about the line or selection | `ask` |
 | `space e` | Files, the file tree (⌘B too); again: back to the code | `file_explorer` |
 | `space t` | the terminal, typing in it (⌘J too); again: back to the code | `terminal` |
-| `space v` | this file's pages, opened if they aren't shown yet (Typst's, say); again: back to the code | `toggle_pages` |
-| `space g` | the side view: a plugin's panel (Lean's goals, say) or the debugger; again: back to the code | `toggle_aside` |
+| `space x` | the debugger, while something's being debugged; again: back to the code | `debugger` |
+| a plugin's view's key | that view of this file (`space v` Typst's pages, `space g` Lean's goals), opened if it isn't shown yet; again: back to the code | `focus_view ‹name›` |
 | `space f` `space b` | pick a file, an open file (fuzzy) | `file_picker`, `buffer_picker` |
 | `space /` | search the project | `global_search` |
 | `space k` `space d` | docs here; this file's diagnostics | `hover`, `file_diagnostics` |

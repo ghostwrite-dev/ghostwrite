@@ -274,9 +274,7 @@ fn in_files_the_trees_keys_are_a_layer_of_their_own() {
     assert_eq!(m.view_key(Key::Char(' ')), Outcome::Handled);
     assert_eq!(m.view_key(Key::Char('e')), Outcome::Effect(Effect::Files), "space e goes back too");
     m.view_key(Key::Char(' '));
-    assert_eq!(m.view_key(Key::Char('v')), Outcome::Effect(Effect::Pages), "space v: the pages");
-    m.view_key(Key::Char(' '));
-    assert_eq!(m.view_key(Key::Char('g')), Outcome::Effect(Effect::Aside), "space g: the side view");
+    assert_eq!(m.view_key(Key::Char('x')), Outcome::Effect(Effect::Debugger), "space x: the debugger");
     assert_eq!(m.view_key(Key::Ctrl('w')), Outcome::Ignored, "ctrl-w goes nowhere");
     assert_eq!(m.pending_keys(), "", "and waits for nothing after it");
     m.enter(Mode::Ai);
@@ -313,7 +311,9 @@ fn the_mode_line_names_the_view_unless_its_the_code() {
     m.leave(Mode::Insert);
     m.view = ViewKind::Files;
     assert_eq!(m.label(None), "NOR · files");
-    m.view = ViewKind::Aside;
+    m.view = ViewKind::Debugger;
+    assert_eq!(m.label(None), "NOR · debugger");
+    m.view = GOALS.kind();
     assert_eq!(m.label(Some("Goals")), "NOR · goals", "a plugin's view, by its title");
 }
 
@@ -375,8 +375,7 @@ fn effects_come_back() {
     };
     assert_eq!(space('a', &mut t), Outcome::Effect(Effect::Assist));
     assert_eq!(space('t', &mut t), Outcome::Effect(Effect::Terminal));
-    assert_eq!(space('v', &mut t), Outcome::Effect(Effect::Pages));
-    assert_eq!(space('g', &mut t), Outcome::Effect(Effect::Aside));
+    assert_eq!(space('x', &mut t), Outcome::Effect(Effect::Debugger));
     assert_eq!(space('j', &mut t), Outcome::Effect(Effect::NextProblem));
     assert_eq!(s.modal.key(Key::Char(':'), &mut s.regs, &mut t), Outcome::Effect(Effect::CommandLine));
 }
@@ -607,7 +606,7 @@ fn a_views_layer_goes_over_the_codes_and_yours_over_both() {
     assert_eq!(m.view_key(Key::Char('a')), Outcome::Tree(TreeCommand::Add), "the rest as they were");
     m.view = ViewKind::Code;
     assert_eq!(m.command_for(Key::Char('x')), Some(Command::ExtendLineBelow), "the code's keys are its own");
-    m.view = ViewKind::Pages;
+    m.view = PAGES.kind();
     assert_eq!(m.command_for(Key::Char('j')), Some(Command::ScrollDown), "pages scroll");
     assert_eq!(m.command_for(Key::Char('w')), Some(Command::MoveNextWordStart), "and have the code's keys under theirs");
 }
@@ -787,4 +786,131 @@ fn without_a_grammar_syntax_keys_do_nothing() {
     s.selection = Range::point(2);
     s.keys("alt-o m a f ] f");
     assert_eq!(s.selection, Range::point(2));
+}
+
+/// A plugin's views, for the tests: pages on `space v`, and goals beside a file on `space g`.
+const PAGES: PluginView =
+    PluginView { id: ViewId { plugin: "typeset", name: "pages", shows: Shows::Pages }, title: "Pages", place: ViewPlace::Tab, key: Some("space v") };
+const GOALS: PluginView =
+    PluginView { id: ViewId { plugin: "prover", name: "goals", shows: Shows::Blocks }, title: "Goals", place: ViewPlace::Beside, key: Some("space g") };
+
+/// A modal over `keymap`, in `view`.
+fn in_view(keymap: Keymap, view: ViewKind) -> Modal {
+    let mut m = Modal { view, ..Modal::default() };
+    m.set_keymap(Box::leak(Box::new(keymap)));
+    m
+}
+
+#[test]
+fn a_plugins_view_has_its_key_and_the_keys_of_what_it_shows() {
+    let keymap = Keymap::default().with_views(&[PAGES, GOALS]);
+    let mut s = Session::new("abc\n");
+    s.modal.set_keymap(Box::leak(Box::new(keymap.clone())));
+    assert_eq!(s.outcome("space v"), Outcome::Effect(Effect::FocusView("pages")), "its key, from the code");
+    assert_eq!(s.outcome("space g"), Outcome::Effect(Effect::FocusView("goals")));
+    let mut m = in_view(keymap.clone(), ViewKind::Files);
+    m.view_key(Key::Char(' '));
+    assert_eq!(m.view_key(Key::Char('g')), Outcome::Effect(Effect::FocusView("goals")), "and from any view");
+    let mut m = in_view(keymap.clone(), GOALS.kind());
+    assert_eq!(m.view_key(Key::Char('j')), Outcome::Effect(Effect::Scroll { by: 1, pages: false }), "beside a file, j scrolls");
+    assert_eq!(m.view_key(Key::Ctrl('d')), Outcome::Effect(Effect::Scroll { by: 1, pages: true }));
+    assert_eq!(m.view_key(Key::Escape), Outcome::Effect(Effect::FocusCode));
+    m.view_key(Key::Char(' '));
+    assert_eq!(m.view_key(Key::Char('g')), Outcome::Effect(Effect::FocusView("goals")), "and its key goes back from there");
+    assert_eq!(m.view_key(Key::Char('d')), Outcome::Handled, "the code's keys don't reach the code");
+    let m = in_view(keymap, PAGES.kind());
+    assert_eq!(m.command_for(Key::Char('+')), Some(Command::ZoomIn), "pages zoom");
+    assert_eq!(m.command_for(Key::Char('w')), Some(Command::MoveNextWordStart), "over the code's keys");
+    assert!(Keymap::default().with_views(&[PAGES]).clashes().is_empty());
+}
+
+#[test]
+fn the_debugger_is_a_view_on_space_x() {
+    let mut s = Session::new("abc\n");
+    assert_eq!(s.outcome("space x"), Outcome::Effect(Effect::Debugger));
+    let mut m = Modal { view: ViewKind::Debugger, ..Modal::default() };
+    assert!(ViewKind::Debugger.without_text());
+    assert_eq!(m.view_key(Key::Char('k')), Outcome::Effect(Effect::Scroll { by: -1, pages: false }));
+    m.view_key(Key::Char(' '));
+    assert_eq!(m.view_key(Key::Char('x')), Outcome::Effect(Effect::Debugger), "again, back to the code");
+    assert_eq!(m.view_key(Key::Escape), Outcome::Effect(Effect::FocusCode));
+    assert_eq!(ViewKind::named("debugger"), Some(ViewKind::Debugger));
+}
+
+#[test]
+fn focus_view_goes_to_a_plugins_view_by_its_name() {
+    let (keymap, wrong) = Keymap::default().with_views(&[PAGES, GOALS]).with_yours(&[
+        ("space p".into(), "focus_view pages".into()),
+        ("space q".into(), "focus_view nowhere".into()),
+        ("space v".into(), "no_op".into()),
+    ]);
+    assert_eq!(wrong, ["\"space q\": no plugin has a view \"nowhere\" (there's pages, goals)"]);
+    let mut s = Session::new("abc\n");
+    s.modal.set_keymap(Box::leak(Box::new(keymap)));
+    assert_eq!(s.outcome("space p"), Outcome::Effect(Effect::FocusView("pages")), "your key for it");
+    assert_eq!(s.outcome("space v"), Outcome::Handled, "and its own, unbound");
+    s.modal.enter(Mode::Ai);
+    assert_eq!(s.outcome("space p"), Outcome::Effect(Effect::FocusView("pages")), "the keys can go there during a review");
+}
+
+#[test]
+fn a_views_key_the_editor_or_a_plugin_before_has_is_a_clash() {
+    let files = PluginView { id: ViewId { plugin: "lister", name: "listing", shows: Shows::Blocks }, key: Some("space f"), ..GOALS };
+    let other = PluginView { id: ViewId { plugin: "rival", name: "proofs", shows: Shows::Blocks }, ..GOALS };
+    let more = PluginView { id: ViewId { plugin: "papers", name: "pages", shows: Shows::Pages }, ..PAGES };
+    let keymap = Keymap::default().with_views(&[PAGES, GOALS, files, other, more]);
+    let clashes: Vec<String> = keymap.clashes().iter().map(|clash| clash.said()).collect();
+    assert_eq!(clashes.len(), 2, "{clashes:?}");
+    assert_eq!(
+        clashes[0],
+        "lister's listing view has no key: space f is the editor's (file_picker); give it one of yours, as \"space …\": \"focus_view listing\""
+    );
+    assert!(clashes[1].starts_with("rival's proofs view has no key: space g is prover's goals view's"), "the first installed has it: {clashes:?}");
+    let mut s = Session::new("abc\n");
+    s.modal.set_keymap(Box::leak(Box::new(keymap.clone())));
+    assert_eq!(s.outcome("space f"), Outcome::Effect(Effect::PickFile), "the editor's comes first");
+    assert_eq!(s.outcome("space g"), Outcome::Effect(Effect::FocusView("goals")), "then the plugin before");
+    assert_eq!(s.outcome("space v"), Outcome::Effect(Effect::FocusView("pages")), "views of one name share theirs");
+    let (keymap, wrong) = keymap.with_yours(&[("space P".into(), "focus_view proofs".into())]);
+    assert!(wrong.is_empty());
+    assert_eq!(keymap.clashes().len(), 1, "yours settle a clash");
+}
+
+#[test]
+fn your_keys_in_a_plugins_view_go_over_what_it_shows() {
+    let more = PluginView { id: ViewId { plugin: "papers", name: "pages", shows: Shows::Pages }, ..PAGES };
+    let (keymap, wrong) = Keymap::default()
+        .with_views(&[PAGES, GOALS, more])
+        .with_yours_in(PAGES.kind(), &[("n".into(), "scroll_page_down".into()), ("j".into(), "no_op".into())]);
+    assert!(wrong.is_empty(), "{wrong:?}");
+    let m = in_view(keymap.clone(), PAGES.kind());
+    assert_eq!(m.command_for(Key::Char('n')), Some(Command::ScrollPageDown));
+    assert_eq!(m.command_for(Key::Char('j')), Some(Command::NoOp), "hidden");
+    assert_eq!(m.command_for(Key::Char('k')), Some(Command::ScrollUp), "the rest as they were");
+    let m = in_view(keymap.clone(), more.kind());
+    assert_eq!(m.command_for(Key::Char('n')), Some(Command::ScrollPageDown), "in every view of the name");
+    let m = in_view(keymap.clone(), GOALS.kind());
+    assert_eq!(m.command_for(Key::Char('j')), Some(Command::ScrollDown), "and only those");
+    assert_eq!(keymap.view_named("pages"), Some(PAGES.kind()));
+    assert_eq!(keymap.view_named("terminal"), Some(ViewKind::Terminal));
+}
+
+#[test]
+fn the_cheatsheet_has_a_section_for_each_plugins_view() {
+    let (keymap, _) = Keymap::default().with_views(&[PAGES, GOALS]).with_yours_in(GOALS.kind(), &[("J".into(), "scroll_page_down".into())]);
+    let sheet = keymap.cheatsheet();
+    let section =
+        |title: &str| sheet.iter().find(|s| s.title == title).map(|s| s.lines.iter().map(|l| (l.view, l.shown(), l.what.clone())).collect::<Vec<_>>());
+    let pages = section("Pages  space v").expect("by its title and key");
+    assert!(pages.contains(&(PAGES.kind(), "+ - =".into(), "zoom in, out; fit the view (⌘= ⌘- ⌘0)".into())), "{pages:?}");
+    let goals = section("Goals  space g").expect("each view");
+    assert!(goals.iter().any(|(view, keys, _)| *view == GOALS.kind() && keys == "ctrl-d ctrl-u J"), "yours on its line: {goals:?}");
+    let views = section("Views and panes").unwrap();
+    assert!(views.iter().any(|(_, keys, what)| keys == "space v" && what.starts_with("Pages: a tab of this file's")), "{views:?}");
+    assert!(views.iter().any(|(_, keys, what)| keys == "space g" && what.starts_with("Goals: beside this file")), "{views:?}");
+    assert!(views.iter().any(|(_, keys, _)| keys == "space x"), "{views:?}");
+    let titles: Vec<&str> = sheet.iter().map(|s| s.title.as_str()).collect();
+    let at = |title: &str| titles.iter().position(|t| *t == title);
+    assert!(at("Debugger  space x") < at("Pages  space v") && at("Pages  space v") < at("Goals  space g"), "after the editor's views: {titles:?}");
+    assert!(Keymap::default().cheatsheet().iter().all(|s| s.title != "pages" && s.title != "blocks"), "none without a view");
 }

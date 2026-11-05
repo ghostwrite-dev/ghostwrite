@@ -81,7 +81,8 @@ fn it_knows_its_files_and_symbols() {
     assert_eq!((server.name, server.command), ("lean", &["lake", "serve"][..]), "so the project's toolchain and packages are used");
     assert_eq!(server.roots, ["lakefile.lean", "lakefile.toml", "lean-toolchain"]);
     assert_eq!(convert::token_scope("leanSorryLike", false), Some("constant.builtin"), "`sorry`, `admit`");
-    assert!(ghostwrite_plugin::keys(Some(lean)).iter().any(|key| key.keys == "space v" && key.command == "preview"));
+    let view = ghostwrite_plugin::view_showing(ghostwrite_plugin::Shows::Blocks, Some(lean)).expect("a view of the goals");
+    assert_eq!(view.key, Some("space g"), "beside the file");
     assert!(ghostwrite_plugin::panel(lean).is_some() && !ghostwrite_plugin::renders(lean));
 }
 
@@ -89,7 +90,8 @@ fn it_knows_its_files_and_symbols() {
 fn it_shows_the_goals_or_the_type_expected() {
     let lean = needs_the_plugin!();
     let mut goals = ghostwrite_plugin::panel(lean).unwrap();
-    assert_eq!(goals.title(), "Lean");
+    let view = ghostwrite_plugin::view_showing(ghostwrite_plugin::Shows::Blocks, Some(lean)).unwrap();
+    assert_eq!(goals.title(), view.title, "called what its view is");
     assert!(matches!(goals.blocks().as_slice(), [Block::Muted(_)]));
     goals.answered(vec![Some(json!({ "goals": ["n : Nat\n⊢ n + 0 = n"] })), None]);
     assert_eq!(goals.blocks(), [Block::Heading("1 goal".into()), Block::Code { text: "n : Nat\n⊢ n + 0 = n".into(), stands_out: Some('⊢') }]);

@@ -1,9 +1,9 @@
 //! Debugging a program from the editor: `:break` on the cursor's line, `:debug
 //! program`, then `:over`, `:step`, `:finish`, `:continue` and `:stop`. Those are
 //! commands, so that they can be given keys of your own. When it stops, the cursor goes
-//! there, and what's called what and the variables show in the side view, beside the
-//! code (on top of a plugin's panel, if there's one), with what it printed: `space g`
-//! goes there.
+//! there, and what's called what and the variables show in the debugger, a view of its
+//! own beside the code (on top of a plugin's panel, if there's one), with what it
+//! printed: `space x` goes there, and again back to the code.
 //! The debugger is whatever the config's `debugger` says, Xcode's by default.
 
 use std::collections::{BTreeSet, HashMap};
@@ -20,7 +20,7 @@ use crate::theme::{pt, theme};
 
 /// How much of what it printed is kept.
 const MAX_OUTPUT: usize = 20_000;
-/// Its height in the side view, over a panel.
+/// Its height beside the code, over a panel.
 const HEIGHT: f32 = 260.;
 
 #[derive(Default)]
@@ -28,6 +28,8 @@ pub(super) struct DebugPane {
     /// By file, its real path, and zero-based line. They stay on their line numbers as the text changes.
     pub(super) breakpoints: HashMap<PathBuf, BTreeSet<usize>>,
     pub(super) session: Option<Session>,
+    /// Where it's scrolled to.
+    pub(super) scroll: gpui::ScrollHandle,
 }
 
 pub(super) struct Session {
@@ -205,7 +207,7 @@ impl Editor {
         self.debug.breakpoints.get(&real(path))
     }
 
-    /// In the side view, while something's being debugged: where it's stopped, the
+    /// Beside the code, while something's being debugged: where it's stopped, the
     /// variables, and what it printed, one under another. `alone`, it has the whole
     /// height; over a plugin's panel, some of it.
     pub(super) fn render_debug(&self, alone: bool, cx: &Context<Self>) -> Option<AnyElement> {
@@ -231,8 +233,10 @@ impl Editor {
         let printed = session.output.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().map(|line| row(line.to_string()));
         Some(
             div()
+                .id("debug-pane")
                 .map(|d| if alone { d.flex_1().min_h_0() } else { d.flex_none().h(pt(HEIGHT)).border_b_1().border_color(theme.border) })
-                .overflow_hidden()
+                .overflow_y_scroll()
+                .track_scroll(&self.debug.scroll)
                 .flex()
                 .flex_col()
                 .gap_2()

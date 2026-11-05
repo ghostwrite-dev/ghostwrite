@@ -415,7 +415,8 @@ impl Editor {
             match came_from {
                 ViewKind::Files if self.tree_pane.shown => self.focus_on(ViewKind::Files, cx),
                 ViewKind::Terminal if self.terminal.shown && !self.terminal.shells.is_empty() => self.start_reading(false, cx),
-                ViewKind::Aside if self.aside_showing() => self.focus_on(ViewKind::Aside, cx),
+                // The debugger, or a plugin's view, if it's still there.
+                view @ (ViewKind::Debugger | ViewKind::Plugin(_)) => self.focus_on(view, cx),
                 _ => {}
             }
         }

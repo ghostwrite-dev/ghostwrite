@@ -186,8 +186,7 @@ commands! {
     Ask "ask" "ask the model about the line or selection, or to change it",
     FileExplorer "file_explorer" "the file tree",
     Terminal "terminal" "the terminal: type in it",
-    TogglePages "toggle_pages" "this file's pages, opened if they aren't shown yet; from there, back to the code",
-    ToggleAside "toggle_aside" "the side view: a plugin's panel, or the debugger; from there, back to the code",
+    Debugger "debugger" "the debugger, while something's being debugged; from there, back to the code",
     FilePicker "file_picker" "pick a file (fuzzy)",
     BufferPicker "buffer_picker" "pick an open file",
     GlobalSearch "global_search" "search the project",
@@ -214,7 +213,7 @@ commands! {
     RenameFile "rename_file" "rename the file or folder",
     DeleteFile "delete_file" "move the file or folder to the Trash",
 
-    // On pages, and beside a file.
+    // In a plugin's view (pages, what's beside a file), and the debugger.
     ScrollDown "scroll_down" "scroll down",
     ScrollUp "scroll_up" "scroll up",
     ScrollPageDown "scroll_page_down" "scroll down a screen",
@@ -286,10 +285,7 @@ impl Command {
     /// `space`, and going from view to view.
     pub fn anywhere(self) -> bool {
         use Command::*;
-        matches!(
-            self,
-            CommandMode | Ask | Terminal | FileExplorer | GlobalSearch | FilePicker | BufferPicker | Cheatsheet | TogglePages | ToggleAside | FocusCode
-        )
+        matches!(self, CommandMode | Ask | Terminal | FileExplorer | GlobalSearch | FilePicker | BufferPicker | Cheatsheet | Debugger | FocusCode)
     }
 
     /// Whether it types (`i`, `a`, `o`, `c`…): on the terminal, it types in its shell.

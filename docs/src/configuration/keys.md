@@ -18,6 +18,7 @@ A key can be bound to:
 
 - **a `:` command**, starting with `:`. Anything you can type on the command line works: `":w"`, `":format"`, `":model haiku-5.5"`, a plugin's command.
 - **one of the editor's commands, by name.** Where helix has the same command, it has helix's name.
+- **`focus_view` and a plugin's view's name**: `"space p": "focus_view pages"` goes to that view of the file in front, and back, as its own key does. This is how you give a view a key, or another one: a view whose own key is taken has none until you do.
 - **`no_op`**, which unbinds the key, and whatever it led on to.
 
 The command names are the last column of each page of the [key reference](../keys/README.md), and all of them are [listed below](#command-names).
@@ -42,7 +43,7 @@ A key that can't be bound (a command name that isn't one, keys that aren't keys,
 
 ## Keys for one view
 
-Keys said flat, as above, are the code's, and so every [view's](../editing/modes.md#views) under its own layer. To bind a key in one view only, put it under that view's name: `"files"`, `"terminal"`, `"pages"` or `"aside"` (what a plugin shows beside a file).
+Keys said flat, as above, are the code's, and so every [view's](../editing/modes.md#views) under its own layer. To bind a key in one view only, put it under that view's name: `"files"`, `"terminal"`, `"debugger"`, or a plugin's view's, as it declares it (`"pages"` for Typst's, `"goals"` for Lean's). Under a plugin's view's name, they're in each view of that name.
 
 ```json
 {
@@ -57,7 +58,7 @@ Keys said flat, as above, are the code's, and so every [view's](../editing/modes
 
 A key in a view's layer comes before the code's there, and nowhere else: above, `R` renames in Files and still replaces with what was yanked in the code. In a view's layer, `no_op` hides the code's binding in that view only.
 
-Each view's own commands (`files_down`, `scroll_down`, `zoom_in` and the rest) are at the end of the list below. `"code"` is a name too, the same as saying keys flat.
+Each view's own commands (`files_down`, `scroll_down`, `zoom_in` and the rest) are at the end of the list below. In a plugin's view, yours go over the plugin's own keys there, which go over those of what it shows. `"code"` is a name too, the same as saying keys flat.
 
 A key under a name that isn't a view, or that can't be bound, is said when Ghostwrite starts, with the view it's in: `pages: "q": no command "no_such"`.
 
@@ -208,8 +209,8 @@ Every command a key can run, as `crates/core/src/modal/command.rs` has them:
 | `ask` | ask the model about the line or selection, or to change it |
 | `file_explorer` | the file tree |
 | `terminal` | the terminal: type in it |
-| `toggle_pages` | this file's pages, opened if they aren't shown yet; from there, back to the code |
-| `toggle_aside` | the side view: a plugin's panel, or the debugger; from there, back to the code |
+| `debugger` | the debugger, while something's being debugged; from there, back to the code |
+| `focus_view ‹name›` | a plugin's view of the file in front, by its name, opened if it isn't shown yet; from there, back to the code |
 | `file_picker` | pick a file (fuzzy) |
 | `buffer_picker` | pick an open file |
 | `global_search` | search the project |
@@ -233,7 +234,7 @@ Every command a key can run, as `crates/core/src/modal/command.rs` has them:
 | `add_file` | a new file or folder here (name/ for a folder) |
 | `rename_file` | rename the file or folder |
 | `delete_file` | move the file or folder to the Trash |
-| `scroll_down` | scroll down |
+| `scroll_down` | scroll down (in a plugin's view, or the debugger) |
 | `scroll_up` | scroll up |
 | `scroll_page_down` | scroll down a screen |
 | `scroll_page_up` | scroll up a screen |

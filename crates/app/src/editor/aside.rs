@@ -1,13 +1,14 @@
-//! The side view, beside the code: what a plugin has for a file's language, and the
+//! What's beside the code: a plugin's view of blocks for a file's language, and the
 //! debugger. A plugin's is a [`ghostwrite_plugin::Panel`], which says what to ask the
 //! file's language server about the cursor and what to show of the answers. It's kept
 //! on the document, kept up to date as the cursor moves and the file is edited. While
-//! something's being debugged, the debugger is in the side view too, on top of the
-//! panel if there's one (see [`super::debug`]). The pane's left edge drags to resize
-//! it. `space g` opens it and puts the keys there (again, back to the code), and
-//! `:preview` shows or hides a panel. It's a view: there `j` and `k` scroll it, a
-//! click puts the keys there too, and the mode line calls it by what's on top.
+//! something's being debugged, the debugger is there too, on top of the panel if
+//! there's one (see [`super::debug`]): each is a view of its own. The pane's left edge
+//! drags to resize it. The plugin's view's key opens it and puts the keys there (again,
+//! back to the code), and `:preview` shows or hides it. There `j` and `k` scroll it, a
+//! click puts the keys there too, and the mode line calls it by its title.
 
+use ghostwrite_core::{Language, Shows, ViewKind};
 use ghostwrite_lsp::{Diagnostic, Severity};
 use ghostwrite_plugin::{Block, Panel};
 use gpui::{AnyElement, Context, Hsla, MouseButton, MouseDownEvent, div, prelude::*};
@@ -24,6 +25,12 @@ use crate::ui::pane::{Edge, Resizable};
 /// The pane: half the room, until its edge is dragged.
 pub(super) fn width() -> Resizable {
     Resizable::new("preview-width", Edge::Left, None)
+}
+
+/// What's beside a file of `language`: the panel of its plugin's view of blocks, if it has one.
+pub(super) fn panel_for(language: &Language) -> Option<Aside> {
+    let view = ghostwrite_plugin::view_showing(Shows::Blocks, Some(language))?;
+    Some(Aside::new(view, ghostwrite_plugin::panel_of(view.id, language)?))
 }
 
 /// How wide it can be dragged, in a window `room` points wide.
@@ -51,7 +58,7 @@ impl Editor {
         if self.preview_pages(cx)? {
             return Ok(());
         }
-        if self.current()?.doc.language.and_then(ghostwrite_plugin::panel).is_none() {
+        if self.current()?.doc.language.and_then(panel_for).is_none() {
             return Err("this file has nothing to preview".into());
         }
         self.project.aside_shown = !self.project.aside_shown;
@@ -80,8 +87,8 @@ impl Editor {
             return;
         }
         if doc.aside.is_none() {
-            let Some(panel) = doc.language.and_then(ghostwrite_plugin::panel) else { return };
-            doc.aside = Some(Aside::new(panel));
+            let Some(aside) = doc.language.and_then(panel_for) else { return };
+            doc.aside = Some(aside);
         }
         let (Some(lsp), Some(aside)) = (doc.lsp.as_ref(), doc.aside.as_mut()) else { return };
         let now = (doc.buffer.version(), cursor);
@@ -113,16 +120,49 @@ impl Editor {
         .detach();
     }
 
-    /// The side view beside `tab`'s code, if there's something to show in it: the
-    /// debugger, while something's being debugged, over the file's panel, if it's shown.
+    /// What's beside `tab`'s code, if there's something to show: the debugger, while
+    /// something's being debugged, over the file's panel, if it's shown. Each is a view,
+    /// and a click on one puts the keys there.
     pub(super) fn render_aside(&self, tab: &Tab, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let panel = tab.doc.aside.as_ref().filter(|_| self.project.aside_shown).map(|aside| self.render_panel(aside.panel.as_ref(), cx));
+        let theme = theme(cx).clone();
+        let keyed = |view: ViewKind| if self.modal.view == view { theme.success } else { theme.border };
+        let panel = tab.doc.aside.as_ref().filter(|_| self.project.aside_shown).map(|aside| {
+            let view = aside.view.kind();
+            div()
+                .flex_1()
+                .min_h_0()
+                .border_l_1()
+                .border_color(keyed(view))
+                .debug_selector(|| "panel".to_string())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.focus_on(view, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(self.render_panel(aside.panel.as_ref(), cx))
+        });
         // The debugger on top, while it's running; alone, it has the whole height.
-        let debug = self.render_debug(panel.is_none(), cx);
+        let debug = self.render_debug(panel.is_none(), cx).map(|debug| {
+            div()
+                .flex()
+                .flex_col()
+                .when(panel.is_none(), |d| d.flex_1().min_h_0())
+                .border_l_1()
+                .border_color(keyed(ViewKind::Debugger))
+                .child(debug)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.focus_on(ViewKind::Debugger, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+        });
         if panel.is_none() && debug.is_none() {
             return None;
         }
-        let theme = theme(cx);
         Some(
             div()
                 .relative()
@@ -133,13 +173,10 @@ impl Editor {
                 })
                 .flex()
                 .flex_col()
-                .border_l_1()
-                .border_color(if self.modal.view == ghostwrite_core::ViewKind::Aside { theme.success } else { theme.border })
                 .bg(theme.tab_bar)
                 .debug_selector(|| "aside".to_string())
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| this.focus_on(ghostwrite_core::ViewKind::Aside, cx)))
                 .children(debug)
-                .children(panel.map(|panel| div().flex_1().min_h_0().child(panel)))
+                .children(panel)
                 .child(self.aside_width.handle("aside-edge").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, window, cx| {

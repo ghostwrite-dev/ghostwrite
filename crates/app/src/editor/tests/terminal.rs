@@ -507,11 +507,11 @@ fn a_program_is_debugged_from_the_editor(cx: &mut TestAppContext) {
     t.cx.update(|window, _| window.refresh());
     t.cx.run_until_parked();
     let pane = t.cx.debug_bounds("debug-pane").expect("and the debugger is drawn");
-    let aside = t.cx.debug_bounds("aside").expect("in the side view");
+    let aside = t.cx.debug_bounds("aside").expect("beside the code");
     assert!(aside.contains(&pane.center()), "{pane:?} in {aside:?}");
-    t.keys("space g");
-    assert_eq!(t.at().0, ViewKind::Aside, "space g goes there");
-    t.keys("space g");
+    t.keys("space x");
+    assert_eq!(t.at().0, ViewKind::Debugger, "space x goes there");
+    t.keys("space x");
 
     t.command("over");
     wait_for(&mut t, |e| stopped_on(e) == Some(3));

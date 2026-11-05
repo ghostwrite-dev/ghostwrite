@@ -10,10 +10,11 @@
 //! [`Modal::insert`].
 //!
 //! The modes are the same in every view: the code, Files (the file tree),
-//! the Terminal, and a plugin's views (a tab of pages, and what's beside a
-//! file). [`Modal::view`] says which has the keys, and its layer of the
-//! keymap goes over the code's: in Files, `j` is a row down, and keys that
-//! are about text do nothing ([`Modal::view_key`]); on the terminal, insert
+//! the Terminal, the Debugger, and the views plugins declare ([`PluginView`]: a
+//! tab of a file's pages, say, or what's beside a file). [`Modal::view`] says
+//! which has the keys, and its layer of the keymap goes over the code's: in Files,
+//! `j` is a row down, and keys that are about text do nothing
+//! ([`Modal::view_key`]); on the terminal, insert
 //! mode types in its shell (the editor sends the keys there itself), entered
 //! and left with [`Modal::enter`] and [`Modal::leave`], so a story under
 //! review is still there to go back to.
@@ -28,9 +29,9 @@
 //!
 //! The modes live in their own files: `normal` (normal and select mode's
 //! commands, which AI mode shares), `insert` (with the completion menu's
-//! keys), and `views` (the keys of views with no text: Files, and what's
-//! beside a file); the commands' names are in `command`, and which keys run
-//! them in `keymap`. Insert mode's keys are its own.
+//! keys), and `views` (the views plugins declare, and the keys of views with no
+//! text: Files, the Debugger, and what's beside a file); the commands' names are
+//! in `command`, and which keys run them in `keymap`. Insert mode's keys are its own.
 
 mod command;
 mod insert;
@@ -39,7 +40,8 @@ mod normal;
 mod views;
 
 pub use command::Command;
-pub use keymap::{Bound, CheatLine, DEFAULT, Keymap, Section, VIEWS, YOURS, parse_keys, sequence};
+pub use keymap::{Bound, CheatLine, Clash, DEFAULT, Keymap, SHOWS, Section, Taken, VIEWS, YOURS, parse_keys, sequence};
+pub use views::{PluginView, Shows, ViewId, ViewPlace};
 
 #[cfg(test)]
 mod tests;
@@ -76,7 +78,8 @@ impl Mode {
 }
 
 /// A view: a place on screen that takes the keys. Each has the modes, and its
-/// own layer of the keymap over the code's.
+/// own layer of the keymap over the code's. The editor's are built in; the rest
+/// are plugins', which they declare in their manifests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum ViewKind {
     /// A file's text, in either pane of a split.
@@ -86,35 +89,40 @@ pub enum ViewKind {
     Files,
     /// The terminal under the code.
     Terminal,
-    /// A tab of a file's pages, which a plugin makes.
-    Pages,
-    /// What a plugin shows beside a file (Lean's goals, say).
-    Aside,
+    /// Where a program being debugged is stopped, and its variables, beside the code.
+    Debugger,
+    /// One a plugin declares: a tab of a file's pages, what's beside a file.
+    Plugin(ViewId),
 }
 
 impl ViewKind {
-    pub const ALL: [ViewKind; 5] = [ViewKind::Code, ViewKind::Files, ViewKind::Terminal, ViewKind::Pages, ViewKind::Aside];
+    /// The editor's own.
+    pub const BUILT_IN: [ViewKind; 4] = [ViewKind::Code, ViewKind::Files, ViewKind::Terminal, ViewKind::Debugger];
 
-    /// Its name, as the mode line and the config say it: `files`.
+    /// Its name, as the mode line and the config say it: `files`, or a plugin's view's (`goals`).
     pub fn name(self) -> &'static str {
         match self {
             ViewKind::Code => "code",
             ViewKind::Files => "files",
             ViewKind::Terminal => "terminal",
-            ViewKind::Pages => "pages",
-            ViewKind::Aside => "aside",
+            ViewKind::Debugger => "debugger",
+            ViewKind::Plugin(id) => id.name,
         }
     }
 
-    /// The view called `name`.
+    /// The built-in view called `name`.
     pub fn named(name: &str) -> Option<ViewKind> {
-        ViewKind::ALL.into_iter().find(|view| view.name() == name)
+        ViewKind::BUILT_IN.into_iter().find(|view| view.name() == name)
     }
 
     /// Whether it has no text for the keys to move through: only its own keys, and
     /// those that work anywhere, do something there.
     pub fn without_text(self) -> bool {
-        matches!(self, ViewKind::Files | ViewKind::Aside)
+        match self {
+            ViewKind::Files | ViewKind::Debugger => true,
+            ViewKind::Plugin(id) => id.shows.without_text(),
+            ViewKind::Code | ViewKind::Terminal => false,
+        }
     }
 }
 
@@ -163,7 +171,7 @@ pub enum Effect {
     FocusCode,
     /// `i`, `a` and the other keys that type, on the terminal: type in its shell.
     TypeInTerminal,
-    /// `j`, `k`, `ctrl-d`, `ctrl-u` on pages or beside a file: scroll so many lines
+    /// `j`, `k`, `ctrl-d`, `ctrl-u` in a plugin's view or the debugger: scroll so many lines
     /// down (up, if less than none), or (`pages`) so many screens.
     Scroll {
         by: i32,
@@ -226,11 +234,11 @@ pub enum Effect {
     Search,
     /// `space t`: the terminal, typing in it; or from there, back to the code.
     Terminal,
-    /// `space v`: the file's pages, opened if they aren't shown yet; or from there, back to the code.
-    Pages,
-    /// `space g`: the side view (a plugin's panel, the debugger), opened if it isn't
-    /// shown yet; or from there, back to the code.
-    Aside,
+    /// A plugin's view, by its name (`focus_view pages`, and the key it declares): for the
+    /// file in front, opened if it isn't shown yet; or from there, back to the code.
+    FocusView(&'static str),
+    /// `space x`: the debugger, while something's being debugged; or from there, back to the code.
+    Debugger,
     /// `gf`: the file named under the cursor (or selected), at the line and column after it.
     GotoFile,
     /// `space j`: go to the next error in the file (or warning, if it has

@@ -60,14 +60,18 @@ pub fn install() {
 /// What's wrong with the plugins that couldn't be read.
 static NOT_READ: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(vec![]);
 
-/// `:plugins`: what's there, what each adds, and what's wrong with the rest.
-pub fn list() -> String {
+/// `:plugins`: what's there, what each adds, the views whose keys are taken (`clashes`),
+/// and what's wrong with the rest.
+pub fn list(clashes: &[String]) -> String {
     let there: Vec<String> =
         ghostwrite_plugin::listed().into_iter().map(|(name, adds)| if adds.is_empty() { name } else { format!("{name} ({adds})") }).collect();
-    let read =
+    let mut said =
         if there.is_empty() { "no plugins: :plugin install ‹folder, owner/repo or git URL›".to_string() } else { format!("plugins: {}", there.join(", ")) };
+    if !clashes.is_empty() {
+        said = format!("{said}. Keys taken: {}", clashes.join("; "));
+    }
     let wrong = NOT_READ.lock().unwrap_or_else(|e| e.into_inner());
-    if wrong.is_empty() { read } else { format!("{read}. Not read: {}", wrong.join("; ")) }
+    if wrong.is_empty() { said } else { format!("{said}. Not read: {}", wrong.join("; ")) }
 }
 
 #[cfg(test)]
@@ -84,6 +88,10 @@ mod tests {
         assert!(ghostwrite_plugin::renders(language("paper.typ")), "pages");
         assert!(ghostwrite_plugin::panel(language("paper.typ")).is_none());
         assert!(ghostwrite_plugin::panel(language("Basic.lean")).is_some(), "goals");
+        let views = |path: &str| ghostwrite_plugin::views_for(Some(language(path))).into_iter().map(|view| (view.id.shows, view.key)).collect::<Vec<_>>();
+        assert_eq!(views("paper.typ"), [(ghostwrite_core::Shows::Pages, Some("space v"))], "a view of its pages");
+        assert_eq!(views("Basic.lean"), [(ghostwrite_core::Shows::Blocks, Some("space g"))], "and of the goals, beside the file");
+        assert!(views("main.rs").is_empty());
         assert!(!ghostwrite_plugin::renders(language("Basic.lean")));
         assert!(ghostwrite_plugin::panel(language("main.rs")).is_none() && !ghostwrite_plugin::renders(language("main.rs")), "and nothing for the rest");
         assert!(language("Basic.lean").abbreviations.is_some(), "symbols");

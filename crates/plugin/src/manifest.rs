@@ -18,9 +18,9 @@
 //!
 //! A key runs a `:` command (a plugin's own, or the editor's), or an editor command by
 //! its name (`zoom_in`). Keys are for the code, unless one says which view they're
-//! for: `"in": "pages"` for a tab of the pages a plugin makes, `"aside"` for what it
-//! shows beside a file, or `"files"`, `"terminal"`. There they come after that view's
-//! own keys, and the user's:
+//! for: one of the plugin's own, by its name (`"in": "pages"`), or the editor's
+//! `"files"`, `"terminal"`, `"debugger"`. There they come after that view's own keys,
+//! and the user's:
 //!
 //! ```json
 //! { "keys": [{ "in": "pages", "keys": "space n", "command": "scroll_page_down", "what": "the next page" }] }
@@ -83,15 +83,33 @@
 //! the kinds of semantic token a plugin's servers name can show as scopes
 //! (`"tokens": { "proofHole": "constant.builtin" }`).
 //!
-//! With code, a plugin can have a panel beside files of its languages, kept up to date
-//! from their server. The manifest says what to ask the server about the cursor, again as
-//! it moves or the text changes, and which of its notifications the panel hears of; the
-//! code says what to show of the answers (`panel-open`, `panel-answered` and
-//! `panel-notification`), and what it keeps about each file comes back to it each time:
+//! With code, a plugin can have views of files of its languages, each showing a kind of
+//! thing the editor draws: `pages` it makes of a file, in a tab of their own, or `blocks`
+//! (headings, code, lines) beside the file. Each has a name (for the user's keys, and
+//! `focus_view`), a title (for the mode line and the cheatsheet), and if it likes, a
+//! key, `space` and a letter, that goes there and back. A plugin has one of each kind:
 //!
 //! ```json
 //! {
-//!   "panel": { "title": "Proof", "requests": ["$/proof/goal"], "notifications": ["$/proof/progress"] }
+//!   "views": [{ "name": "goals", "title": "Goals", "shows": "blocks", "place": "beside", "key": "space g" }]
+//! }
+//! ```
+//!
+//! `place` is where it goes: `tab` (pages, for now) or `beside` (blocks, for now), which is
+//! what it is if it isn't said. A key the editor has, or a view of a plugin installed
+//! before has, stays theirs, and the editor says so. A plugin that says `"pages": true`
+//! or has a `"panel"` and no view of it has one anyway: `pages`, on `space v`, and
+//! `aside`, called by its panel's title, on `space g`.
+//!
+//! Blocks are a panel's, kept up to date from the file's server. The manifest says what
+//! to ask the server about the cursor, again as it moves or the text changes, and which
+//! of its notifications the panel hears of; the code says what to show of the answers
+//! (`panel-open`, `panel-answered` and `panel-notification`), and what it keeps about
+//! each file comes back to it each time:
+//!
+//! ```json
+//! {
+//!   "panel": { "requests": ["$/proof/goal"], "notifications": ["$/proof/progress"] }
 //! }
 //! ```
 //!
@@ -136,6 +154,8 @@ use ghostwrite_core::abbreviation::Abbreviations;
 use ghostwrite_core::syntax::Grammar;
 use ghostwrite_lsp::registry::{Env, Settings, Spec};
 use serde_json::Value;
+
+use ghostwrite_core::{PluginView, Shows, ViewId, ViewKind, ViewPlace};
 
 use crate::{Binding, Block, Code, Context, Event, Panel, Plugin, PluginCommand, Renderer, Reply, Shown};
 
@@ -412,6 +432,102 @@ fn servers(json: &Value, name: &str, code: Option<&Arc<dyn Code>>) -> Result<Vec
     Ok(found)
 }
 
+/// The views `json` says the plugin `plugin` has, or what's wrong with them.
+fn views_said(json: &Value, plugin: &'static str) -> Result<Vec<PluginView>, String> {
+    let mut views: Vec<PluginView> = vec![];
+    let said = match &json["views"] {
+        Value::Null => return Ok(views),
+        Value::Array(said) => said,
+        _ => return Err("its `views` aren't a list".into()),
+    };
+    for view in said {
+        let name = view["name"].as_str().ok_or("a view has no `name`")?;
+        if !proper_name(name) {
+            return Err(format!("`{name}` isn't a view's name: letters, digits, - and _"));
+        }
+        if ViewKind::named(name).is_some() {
+            return Err(format!("the view {name}: that's the editor's own"));
+        }
+        if views.iter().any(|other| other.id.name == name) {
+            return Err(format!("it has two views called {name}"));
+        }
+        let kinds = || Shows::ALL.iter().map(|shows| shows.name()).collect::<Vec<_>>().join(" and ");
+        let shows = match view["shows"].as_str() {
+            Some(shows) => Shows::named(shows).ok_or(format!("the view {name} shows `{shows}`: there's {}", kinds()))?,
+            None => return Err(format!("the view {name} doesn't say what it `shows`: {}", kinds())),
+        };
+        if let Some(other) = views.iter().find(|other| other.id.shows == shows) {
+            return Err(format!("the views {} and {name} both show {}: a plugin has one view of each", other.id.name, shows.name()));
+        }
+        let place = match view["place"].as_str() {
+            None => shows.place(),
+            Some(place) => match ViewPlace::named(place) {
+                Some(place) if place == shows.place() => place,
+                Some(_) => return Err(format!("the view {name}: {} show {}, for now", shows.name(), placed(shows.place()))),
+                None => return Err(format!("the view {name} is placed `{place}`: there's tab and beside")),
+            },
+        };
+        let key = match view["key"].as_str() {
+            None => None,
+            Some(key) if view_key(key) => Some(forever(key)),
+            Some(key) => return Err(format!("the view {name}'s key `{key}` isn't space and a letter, as \"space v\"")),
+        };
+        let title = view["title"].as_str().filter(|title| !title.trim().is_empty()).map_or(forever(name), forever);
+        views.push(PluginView { id: ViewId { plugin, name: forever(name), shows }, title, place, key });
+    }
+    Ok(views)
+}
+
+/// Where a view goes, as a manifest says it.
+fn placed(place: ViewPlace) -> &'static str {
+    match place {
+        ViewPlace::Tab => "in a tab",
+        ViewPlace::Beside => "beside the file",
+    }
+}
+
+/// Whether `key` is `space` and a letter: what goes from view to view.
+fn view_key(key: &str) -> bool {
+    let mut words = key.split_whitespace();
+    let (Some("space"), Some(letter), None) = (words.next(), words.next(), words.next()) else { return false };
+    let mut chars = letter.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_alphabetic())
+}
+
+/// The views it declares, and for the pages it makes and its panel, if it declares none
+/// of them, those it had before views were declared: `pages` on `space v`, and `aside`
+/// (called by its panel's title) on `space g`.
+fn with_defaults(mut views: Vec<PluginView>, plugin: &'static str, pages: bool, panel: Option<&'static str>) -> Vec<PluginView> {
+    let has = |views: &[PluginView], shows: Shows| views.iter().any(|view| view.id.shows == shows);
+    if pages && !has(&views, Shows::Pages) {
+        let id = ViewId { plugin, name: "pages", shows: Shows::Pages };
+        views.push(PluginView { id, title: "Pages", place: ViewPlace::Tab, key: Some("space v") });
+    }
+    if let Some(title) = panel.filter(|_| !has(&views, Shows::Blocks)) {
+        let id = ViewId { plugin, name: "aside", shows: Shows::Blocks };
+        views.push(PluginView { id, title, place: ViewPlace::Beside, key: Some("space g") });
+    }
+    views
+}
+
+/// The view a key `"in"` `name` is for: one of the editor's, or the plugin's own.
+/// `pages` and `aside` were the editor's before plugins declared views: a key in them
+/// is in the plugin's view of the same name, whether it has one or not.
+fn in_view(name: &str, plugin: &'static str, views: &[PluginView]) -> Option<ViewKind> {
+    if let Some(view) = ViewKind::named(name) {
+        return Some(view);
+    }
+    if let Some(view) = views.iter().find(|view| view.id.name == name) {
+        return Some(view.kind());
+    }
+    let (name, shows) = match name {
+        "pages" => ("pages", Shows::Pages),
+        "aside" => ("aside", Shows::Blocks),
+        _ => return None,
+    };
+    Some(ViewKind::Plugin(ViewId { plugin, name, shows }))
+}
+
 pub struct Manifest {
     pub name: &'static str,
     pub version: Option<&'static str>,
@@ -426,6 +542,7 @@ pub struct Manifest {
     code: Option<Arc<dyn Code>>,
     pages: bool,
     panel: Option<PanelSaid>,
+    views: &'static [PluginView],
     /// Kinds of semantic token its servers name, and the scope each shows as.
     tokens: &'static [(&'static str, &'static str)],
     access: Access,
@@ -528,7 +645,9 @@ impl Manifest {
             }
             None => None,
         };
-        let pages = json["pages"].as_bool().unwrap_or(false);
+        let said_views = views_said(&json, name)?;
+        let shows = |kind: Shows| said_views.iter().any(|view| view.id.shows == kind);
+        let pages = json["pages"].as_bool().unwrap_or(false) || shows(Shows::Pages);
         if pages && code.is_none() {
             return Err("its pages have no `code` to make them".into());
         }
@@ -572,12 +691,35 @@ impl Manifest {
             return Err("only its pages show, but it doesn't say it makes them, or of which files".into());
         }
         let grammars = json["grammars"].as_array().map_or(&[][..], Vec::as_slice).iter().map(|said| grammar(said, folder)).collect::<Result<_, _>>()?;
+        let rules = forever(json["rules"].as_str().unwrap_or(""));
+        // A view of blocks is its panel's: called what the view is, unless the panel says.
+        let blocks_title = said_views.iter().find(|view| view.id.shows == Shows::Blocks).map(|view| view.title);
+        let panel = match &json["panel"] {
+            Value::Null => blocks_title.map(|title| PanelSaid { title, requests: &[], notifications: &[] }),
+            said => {
+                let title = said["title"].as_str().map(forever).or(blocks_title).unwrap_or(name);
+                Some(PanelSaid { title, requests: strings(&said["requests"]), notifications: strings(&said["notifications"]) })
+            }
+        };
+        if panel.is_some() {
+            if code.is_none() {
+                return Err("its panel has no `code` to say what's in it".into());
+            }
+            if languages.is_empty() {
+                return Err("its panel is beside files of its languages, and it has none".into());
+            }
+        }
+        if !said_views.is_empty() && languages.is_empty() {
+            return Err("its views are of files of its languages, and it has none".into());
+        }
+        let views = with_defaults(said_views, name, pages, panel.map(|panel| panel.title));
+        let plugin = name;
         let mut keys = vec![];
         for binding in json["keys"].as_array().map_or(&[][..], Vec::as_slice) {
             let field = |name: &str| binding[name].as_str().ok_or(format!("a key has no `{name}`"));
             let view = match binding["in"].as_str() {
-                None => ghostwrite_core::ViewKind::Code,
-                Some(name) => ghostwrite_core::ViewKind::named(name).ok_or(format!("a key is in `{name}`, which isn't a view"))?,
+                None => ViewKind::Code,
+                Some(name) => in_view(name, plugin, &views).ok_or(format!("a key is in `{name}`, which isn't a view"))?,
             };
             keys.push(Binding {
                 keys: forever(field("keys")?),
@@ -586,20 +728,6 @@ impl Manifest {
                 what: forever(binding["what"].as_str().unwrap_or("")),
             });
         }
-        let rules = forever(json["rules"].as_str().unwrap_or(""));
-        let panel = match &json["panel"] {
-            Value::Null => None,
-            said => {
-                if code.is_none() {
-                    return Err("its panel has no `code` to say what's in it".into());
-                }
-                if languages.is_empty() {
-                    return Err("its panel is beside files of its languages, and it has none".into());
-                }
-                let title = said["title"].as_str().map_or(name, forever);
-                Some(PanelSaid { title, requests: strings(&said["requests"]), notifications: strings(&said["notifications"]) })
-            }
-        };
         let mut tokens = vec![];
         for (token, scope) in json["tokens"].as_object().into_iter().flatten() {
             let scope = scope.as_str().ok_or(format!("the token {token} shows as no scope"))?;
@@ -621,6 +749,7 @@ impl Manifest {
             code,
             pages,
             panel,
+            views: Box::leak(views.into_boxed_slice()),
             tokens: Box::leak(tokens.into_boxed_slice()),
             access,
         })
@@ -708,8 +837,9 @@ impl Plugin for Manifest {
         for server in &self.servers {
             parts.push(format!("starts `{}` with your permissions", server.command.join(" ")));
         }
-        if let Some(panel) = &self.panel {
-            parts.push(format!("shows {} beside its files", panel.title));
+        for view in self.views {
+            let key = view.key.map_or(String::new(), |key| format!(", on {key}"));
+            parts.push(format!("its view {}: {} {}{key}", view.id.name, view.title, placed(view.place)));
         }
         parts.extend(self.access.described());
         if !self.keys.is_empty() {
@@ -778,6 +908,10 @@ impl Plugin for Manifest {
 
     fn prompt_rules(&self) -> &'static str {
         self.rules
+    }
+
+    fn views(&self) -> &'static [PluginView] {
+        self.views
     }
 
     /// For files of its languages, if it says it has one.
@@ -902,7 +1036,10 @@ mod tests {
             Some("a key is in `nowhere`, which isn't a view")
         );
         let paged = Manifest::parse(r#"{ "name": "x", "keys": [{ "in": "pages", "keys": "n", "command": "scroll_page_down" }] }"#).unwrap();
-        assert_eq!(paged.keys(None)[0].view, ghostwrite_core::ViewKind::Pages, "keys can be a view's");
+        let pages = ViewKind::Plugin(ViewId { plugin: "x", name: "pages", shows: Shows::Pages });
+        assert_eq!(paged.keys(None)[0].view, pages, "keys can be a view's");
+        let files = Manifest::parse(r#"{ "name": "x", "keys": [{ "in": "files", "keys": "n", "command": "files_down" }] }"#).unwrap();
+        assert_eq!(files.keys(None)[0].view, ViewKind::Files, "or the editor's");
         let folder = ghostwrite_project::scratch_dir("manifests");
         std::fs::write(folder.join("good.json"), ZIG).unwrap();
         std::fs::write(folder.join("bad.json"), "{").unwrap();
@@ -944,5 +1081,138 @@ mod tests {
         assert!(parse(r#"{ "name": "a", "commands": [{ "name": "go" }] }"#).contains("no `code`"));
         let no_folder = Manifest::parse(r#"{ "name": "a", "api": 1, "code": "x.wasm" }"#).err().unwrap_or_default();
         assert!(no_folder.contains("a folder of its own"), "{no_folder}");
+    }
+
+    /// Code that does nothing, as a runtime would have it: for what a manifest says of it.
+    struct Idle;
+
+    impl Code for Idle {
+        fn check(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn run(&self, _: &str, _: &[String], _: &Context) -> Reply {
+            Ok(vec![])
+        }
+        fn on_event(&self, _: Event, _: &Context) -> Reply {
+            Ok(vec![])
+        }
+        fn renderer(&self, _: &Path, _: &Path) -> Result<Box<dyn Renderer>, String> {
+            Err("none".into())
+        }
+        fn highlight(&self, _: &str) -> Vec<(std::ops::Range<usize>, String)> {
+            vec![]
+        }
+        fn server_env(&self, _: &str, _: &Path, _: &Path, _: &[(String, String)]) -> Result<Vec<(String, String)>, String> {
+            Ok(vec![])
+        }
+        fn server_settings(&self, _: &str, _: &Path, _: &Path, _: &[(String, String)], _: &str) -> Result<Value, String> {
+            Ok(Value::Null)
+        }
+        fn panel_open(&self, _: &str) -> Result<Shown, String> {
+            Ok(Shown::default())
+        }
+        fn panel_answered(&self, _: &str, _: &[Option<Value>]) -> Result<Shown, String> {
+            Ok(Shown::default())
+        }
+        fn panel_notification(&self, _: &str, _: &str, _: &Value) -> Result<(Shown, bool), String> {
+            Ok((Shown::default(), false))
+        }
+    }
+
+    struct Idling;
+
+    impl crate::Runtime for Idling {
+        fn code(&self, _: &str, _: &Path, _: &Access) -> Box<dyn Code> {
+            Box::new(Idle)
+        }
+        fn grammar(&self, _: &str, _: &Path) -> Box<dyn ghostwrite_core::syntax::Load> {
+            unreachable!("no grammars here")
+        }
+    }
+
+    /// `json`, in a folder with its code, its fields after `"name"`, `"api"`, `"code"` and its files.
+    fn with_code(json: &str) -> Result<Manifest, String> {
+        crate::set_runtime(Box::new(Idling));
+        let folder = ghostwrite_project::scratch_dir("views");
+        std::fs::write(folder.join("x.wasm"), "").unwrap();
+        Manifest::parse_in(&format!(r#"{{ "name": "prover", "api": 1, "code": "x.wasm", "extensions": ["prv"], {json} }}"#), Some(&folder))
+    }
+
+    #[test]
+    fn a_plugin_declares_its_views() {
+        let plugin = with_code(
+            r#""views": [
+                { "name": "pages", "title": "Pages", "shows": "pages", "place": "tab", "key": "space v" },
+                { "name": "goals", "title": "Goals", "shows": "blocks", "key": "space g" } ],
+              "panel": { "requests": ["$/goal"] },
+              "keys": [{ "in": "goals", "keys": "n", "command": "scroll_down" }]"#,
+        )
+        .unwrap();
+        let [pages, goals] = plugin.views() else { panic!("two views: {:?}", plugin.views()) };
+        assert_eq!((pages.id, pages.place, pages.key), (ViewId { plugin: "prover", name: "pages", shows: Shows::Pages }, ViewPlace::Tab, Some("space v")));
+        assert_eq!((goals.title, goals.place, goals.key), ("Goals", ViewPlace::Beside, Some("space g")), "beside, as blocks are, unless it says");
+        let language = plugin.languages()[0];
+        assert!(plugin.renders(language), "pages it shows, it makes");
+        let panel = plugin.panel(language).expect("and the blocks are its panel's");
+        assert_eq!((panel.title(), panel.requests()), ("Goals", &["$/goal"][..]), "called what its view is");
+        assert_eq!(plugin.keys(Some(language))[0].view, goals.kind(), "a key in its view, by name");
+        assert_eq!(plugin.views_for(Some(language)).len(), 2);
+        assert!(plugin.views_for(Some(&Language::DEFAULT)).is_empty() && plugin.views_for(None).is_empty(), "of its own files only");
+        let said = plugin.describe();
+        assert!(said.contains("its view goals: Goals beside the file, on space g") && said.contains("its view pages: Pages in a tab, on space v"), "{said}");
+        let quiet = with_code(r#""views": [{ "name": "notes", "shows": "blocks" }]"#).unwrap();
+        assert_eq!((quiet.views()[0].title, quiet.views()[0].key), ("notes", None), "a title and key are its own to give");
+    }
+
+    #[test]
+    fn whats_wrong_with_a_view_is_said() {
+        let wrong = |views: &str| with_code(&format!(r#""views": {views}"#)).err().unwrap_or_default();
+        let shows = |name: &str, more: &str| format!(r#"[{{ "name": "{name}", "shows": "blocks"{more} }}]"#);
+        assert_eq!(wrong(r#"[{ "name": "a", "shows": "pictures" }]"#), "the view a shows `pictures`: there's pages and blocks");
+        assert_eq!(wrong(r#"[{ "name": "a" }]"#), "the view a doesn't say what it `shows`: pages and blocks");
+        for key in ["g", "space", "space gg", "ctrl-g", "space 1", "space g h"] {
+            assert_eq!(wrong(&shows("a", &format!(r#", "key": "{key}""#))), format!("the view a's key `{key}` isn't space and a letter, as \"space v\""));
+        }
+        assert_eq!(wrong(r#"[{ "name": "a", "shows": "blocks" }, { "name": "a", "shows": "pages" }]"#), "it has two views called a");
+        assert_eq!(
+            wrong(r#"[{ "name": "a", "shows": "blocks" }, { "name": "b", "shows": "blocks" }]"#),
+            "the views a and b both show blocks: a plugin has one view of each"
+        );
+        assert_eq!(wrong(&shows("files", "")), "the view files: that's the editor's own");
+        assert_eq!(wrong(&shows("a b", "")), "`a b` isn't a view's name: letters, digits, - and _");
+        assert_eq!(wrong(&shows("a", r#", "place": "tab""#)), "the view a: blocks show beside the file, for now");
+        assert_eq!(wrong(&shows("a", r#", "place": "above""#)), "the view a is placed `above`: there's tab and beside");
+        assert_eq!(wrong(r#"[{ "shows": "blocks" }]"#), "a view has no `name`");
+        assert_eq!(wrong(r#"{ "name": "a" }"#), "its `views` aren't a list");
+        let elsewhere = with_code(r#""keys": [{ "in": "goals", "keys": "n", "command": "scroll_down" }]"#).err();
+        assert_eq!(elsewhere.as_deref(), Some("a key is in `goals`, which isn't a view"), "a key in a view it hasn't");
+        crate::set_runtime(Box::new(Idling));
+        let folder = ghostwrite_project::scratch_dir("views-nowhere");
+        std::fs::write(folder.join("x.wasm"), "").unwrap();
+        let none = Manifest::parse_in(r#"{ "name": "a", "api": 1, "code": "x.wasm", "views": [{ "name": "a", "shows": "blocks" }] }"#, Some(&folder));
+        assert_eq!(none.err().as_deref(), Some("its panel is beside files of its languages, and it has none"));
+        let pages = Manifest::parse(r#"{ "name": "a", "extensions": ["a"], "views": [{ "name": "a", "shows": "pages" }] }"#);
+        assert_eq!(pages.err().as_deref(), Some("its pages have no `code` to make them"));
+    }
+
+    /// A plugin from before views were declared has them anyway, as the editor's own
+    /// `space v` and `space g` were for it: its pages, and its panel, by its title.
+    #[test]
+    fn a_plugin_from_before_views_has_the_views_it_had() {
+        let old = with_code(
+            r#""pages": true, "panel": { "title": "Proof", "requests": ["$/goal"] },
+              "keys": [{ "in": "pages", "keys": "n", "command": "scroll_page_down" }, { "in": "aside", "keys": "K", "command": "go" }]"#,
+        )
+        .unwrap();
+        let [pages, aside] = old.views() else { panic!("two views: {:?}", old.views()) };
+        let id = |name, shows| ViewId { plugin: "prover", name, shows };
+        assert_eq!(*pages, PluginView { id: id("pages", Shows::Pages), title: "Pages", place: ViewPlace::Tab, key: Some("space v") });
+        assert_eq!(*aside, PluginView { id: id("aside", Shows::Blocks), title: "Proof", place: ViewPlace::Beside, key: Some("space g") });
+        let language = old.languages()[0];
+        assert_eq!(old.keys(Some(language)).iter().map(|key| key.view).collect::<Vec<_>>(), [pages.kind(), aside.kind()], "its keys in them");
+        assert_eq!(old.panel(language).map(|panel| panel.title()), Some("Proof"));
+        let newer = with_code(r#""pages": true, "views": [{ "name": "goals", "shows": "blocks" }]"#).unwrap();
+        let names: Vec<&str> = newer.views().iter().map(|view| view.id.name).collect();
+        assert_eq!(names, ["goals", "pages"], "what it makes and doesn't declare a view of, it has the old view of");
     }
 }

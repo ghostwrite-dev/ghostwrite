@@ -222,7 +222,7 @@ fn its_code_says_whats_in_a_panel_beside_its_files_and_the_editor_keeps_its_stat
     let plugin = Manifest::parse_in(json, Some(&folder)).unwrap();
     let language = plugin.languages()[0];
     assert!(plugin.panel(&Language::DEFAULT).is_none(), "only beside its own files");
-    assert!(plugin.describe().contains("shows Told beside its files"), "{}", plugin.describe());
+    assert!(plugin.describe().contains("its view aside: Told beside the file, on space g"), "a view of it, as before views: {}", plugin.describe());
     let mut panel = plugin.panel(language).expect("a panel");
     assert_eq!((panel.title(), panel.requests()), ("Told", &["$/first", "$/second"][..]));
     assert_eq!(panel.blocks(), [Block::Muted("nothing yet, in panelled".into())], "before anything's asked");

@@ -1,19 +1,24 @@
 //! The keymap: which keys run which [`Command`] in normal and select mode
 //! (and AI mode, looking around), as helix keeps it: a trie, where `g`,
 //! `space`, `space w`, `z`, `m`, `]`, `[` lead on to more keys. `space` and a
-//! letter is the one way from view to view (`space e`, `t`, `v`, `g`), and the
-//! panes are under `space w`, as helix's window mode is.
+//! letter is the one way from view to view (`space e`, `t`, `x`, and the keys
+//! plugins' views declare), and the panes are under `space w`, as helix's window
+//! mode is.
 //!
 //! [`DEFAULT`] is the keymap as data, in the cheatsheet's sections and
 //! lines, so [`Keymap::cheatsheet`] comes from what's bound. Each view that
 //! isn't the code has a layer of its own over it, as Zed's key contexts are:
-//! [`VIEWS`]. A key is looked up in the layer of the view with the keys first,
-//! then in the code's. Your own keys (the config's `"keys"`, for the code and
-//! every view, or `"files"`, `"terminal"` and the like for one) go over them:
-//! a command by name, a `:` command, or `no_op` to unbind a key.
+//! [`VIEWS`] for the editor's, and for a plugin's, the layer of what it shows
+//! ([`SHOWS`]). A key is looked up in the layer of the view with the keys first,
+//! then in the code's. The keys plugins' views declare go in the code's where
+//! they're free ([`Keymap::with_views`]): the editor's come first, then the plugin
+//! installed first. Your own keys (the config's `"keys"`, for the code and
+//! every view, or `"files"`, `"goals"` and the like for one) go over them all:
+//! a command by name, `focus_view` and a view's name, a `:` command, or `no_op`
+//! to unbind a key.
 
 use super::command::Command::{self, *};
-use super::{Key, ViewKind};
+use super::{Key, PluginView, Shows, ViewKind};
 
 /// One line of the cheatsheet: its keys and the commands they run, and what they do.
 type Line = (&'static [(&'static str, Command)], &'static str);
@@ -152,8 +157,7 @@ pub const DEFAULT: &[(&str, &[Line])] = &[
         &[
             (&[("space e", FileExplorer)], "Files, the file tree (⌘B too); again: back to the code"),
             (&[("space t", Terminal)], "the terminal, typing in it (⌘J too); again: back to the code"),
-            (&[("space v", TogglePages)], "this file's pages, opened if they aren't shown yet; again: back to the code"),
-            (&[("space g", ToggleAside)], "the side view: a plugin's panel, or the debugger; again: back to the code"),
+            (&[("space x", Debugger)], "the debugger, while something's being debugged; again: back to the code"),
             (&[("space w v", Vsplit)], "two panes: this file's pages, or the next tab"),
             (&[("space w w", RotateView)], "the other pane"),
             (&[("space w q", Wonly), ("space w o", Wonly)], "only this one"),
@@ -162,9 +166,9 @@ pub const DEFAULT: &[(&str, &[Line])] = &[
     ("Command line  :", &[(&[(":", CommandMode)], "the command line")]),
 ];
 
-/// The keys of each view that isn't the code, over the code's, by the cheatsheet's
-/// sections and lines. Elsewhere the code's keys work as ever: on the terminal and
-/// on pages they move through the text, and in a view with no text only those that
+/// The keys of each of the editor's views that isn't the code, over the code's, by the
+/// cheatsheet's sections and lines. Elsewhere the code's keys work as ever: on the
+/// terminal they move through the text, and in a view with no text only those that
 /// work anywhere do (see [`Command::anywhere`]).
 pub const VIEWS: &[(ViewKind, &str, &[Line])] = &[
     (
@@ -188,8 +192,22 @@ pub const VIEWS: &[(ViewKind, &str, &[Line])] = &[
         ],
     ),
     (
-        ViewKind::Pages,
-        "Pages  space v",
+        ViewKind::Debugger,
+        "Debugger  space x",
+        &[
+            (&[("j", ScrollDown), ("down", ScrollDown), ("k", ScrollUp), ("up", ScrollUp)], "scroll down, up"),
+            (&[("ctrl-d", ScrollPageDown), ("ctrl-u", ScrollPageUp)], "a screen down, up"),
+            (&[("esc", FocusCode)], "back to the code (space x too)"),
+        ],
+    ),
+];
+
+/// The keys of a plugin's view, by what it shows, over the code's: each such view's
+/// section of the cheatsheet has them, under its title. Its plugin's keys (`"in"`) and
+/// yours for it (by its name) go over them.
+pub const SHOWS: &[(Shows, &[Line])] = &[
+    (
+        Shows::Pages,
         &[
             (&[("j", ScrollDown), ("down", ScrollDown), ("k", ScrollUp), ("up", ScrollUp)], "scroll down, up"),
             (&[("ctrl-d", ScrollPageDown), ("ctrl-u", ScrollPageUp)], "a screen down, up"),
@@ -197,8 +215,7 @@ pub const VIEWS: &[(ViewKind, &str, &[Line])] = &[
         ],
     ),
     (
-        ViewKind::Aside,
-        "Beside the file  space g",
+        Shows::Blocks,
         &[
             (&[("j", ScrollDown), ("down", ScrollDown), ("k", ScrollUp), ("up", ScrollUp)], "scroll down, up"),
             (&[("ctrl-d", ScrollPageDown), ("ctrl-u", ScrollPageUp)], "a screen down, up"),
@@ -207,28 +224,91 @@ pub const VIEWS: &[(ViewKind, &str, &[Line])] = &[
     ),
 ];
 
-/// Every section of the cheatsheet the keymap has, and the view its keys are for:
-/// [`DEFAULT`]'s, then [`VIEWS`]'.
-fn sections() -> impl Iterator<Item = (ViewKind, &'static str, &'static [Line])> {
-    DEFAULT.iter().map(|(title, lines)| (ViewKind::Code, *title, *lines)).chain(VIEWS.iter().copied())
+/// Where a key is looked up: the layer of one of the editor's views, the layer of what
+/// a plugin's view shows, or yours for the plugin's views of a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Layer {
+    Of(ViewKind),
+    Shows(Shows),
+    Named(&'static str),
+}
+
+/// Every static section of the cheatsheet the keymap has, and the layer its keys are in:
+/// [`DEFAULT`]'s, [`VIEWS`]', then [`SHOWS`]'.
+fn sections() -> impl Iterator<Item = (Layer, &'static str, &'static [Line])> {
+    let default = DEFAULT.iter().map(|(title, lines)| (Layer::Of(ViewKind::Code), *title, *lines));
+    let views = VIEWS.iter().map(|(view, title, lines)| (Layer::Of(*view), *title, *lines));
+    default.chain(views).chain(SHOWS.iter().map(|(shows, lines)| (Layer::Shows(*shows), shows.name(), *lines)))
+}
+
+/// The layers `view`'s keys are looked up in, the first first.
+fn layers_of(view: ViewKind) -> Vec<Layer> {
+    match view {
+        ViewKind::Code => vec![Layer::Of(ViewKind::Code)],
+        ViewKind::Plugin(id) => vec![Layer::Named(id.name), Layer::Shows(id.shows), Layer::Of(ViewKind::Code)],
+        view => vec![Layer::Of(view), Layer::Of(ViewKind::Code)],
+    }
+}
+
+/// The layer your keys for `view` go in.
+fn yours_for(view: ViewKind) -> Layer {
+    match view {
+        ViewKind::Plugin(id) => Layer::Named(id.name),
+        view => Layer::Of(view),
+    }
+}
+
+/// A plugin's view that has no key, as the one it declares is taken: by the editor
+/// (the editor's keys come first), or by a view of a plugin installed before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clash {
+    pub view: PluginView,
+    pub keys: &'static str,
+    pub with: Taken,
+}
+
+/// Who has the keys a plugin's view declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Taken {
+    /// The editor, for this (a command's name, or keys they lead on to).
+    Editor(String),
+    View(PluginView),
+}
+
+impl Clash {
+    /// What it comes to, for the status line and `:plugin list`.
+    pub fn said(&self) -> String {
+        let PluginView { id, .. } = self.view;
+        let whose = match &self.with {
+            Taken::Editor(what) => format!("the editor's ({what})"),
+            Taken::View(other) => format!("{}'s {} view's", other.id.plugin, other.id.name),
+        };
+        format!("{}'s {} view has no key: {} is {whose}; give it one of yours, as \"space …\": \"focus_view {}\"", id.plugin, id.name, self.keys, id.name)
+    }
 }
 
 /// The cheatsheet's section for keys of yours it has no line for.
 pub const YOURS: &str = "Your keys";
+/// The section the keys of plugins' views are in, with the editor's.
+const VIEWS_AND_PANES: &str = "Views and panes";
 
 /// What a key sequence is bound to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bound {
     Command(Command),
+    /// A plugin's view, by its name: the key it declares, or yours (`"focus_view goals"`).
+    View(&'static str),
     /// A `:` command (without its `:`), of yours: `"ctrl-s": ":w"`.
     Typed(String),
 }
 
 /// Where a binding shows in the cheatsheet: on a line of [`sections`] (its
-/// section and line), or with the rest of yours.
+/// section and line), on the line of a plugin's view (by its first in the keymap's
+/// views), or with the rest of yours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Shown {
     At(usize, usize),
+    View(usize),
     Yours,
 }
 
@@ -252,10 +332,14 @@ type Trie = Vec<(Key, Node)>;
 /// The keys of normal and select mode: the code's, and each view's layer over them.
 #[derive(Debug, Clone)]
 pub struct Keymap {
-    /// By [`ViewKind`], in its order.
-    layers: Vec<Trie>,
+    /// Each layer that has keys.
+    layers: Vec<(Layer, Trie)>,
     /// How many bindings have been made, for their order.
     made: usize,
+    /// The plugins' views, the plugin installed first first.
+    views: Vec<PluginView>,
+    /// Those of them whose keys were taken.
+    clashes: Vec<Clash>,
 }
 
 /// What a key sequence comes to.
@@ -269,7 +353,7 @@ pub(super) enum Found<'a> {
 /// A section of the cheatsheet.
 #[derive(Debug, Clone)]
 pub struct Section {
-    pub title: &'static str,
+    pub title: String,
     pub lines: Vec<CheatLine>,
 }
 
@@ -296,14 +380,14 @@ impl CheatLine {
 }
 
 impl Default for Keymap {
-    /// [`DEFAULT`], and [`VIEWS`] over it.
+    /// [`DEFAULT`], [`VIEWS`] and [`SHOWS`]: the editor's keys, with no plugin's views.
     fn default() -> Self {
-        let mut keymap = Keymap { layers: ViewKind::ALL.iter().map(|_| vec![]).collect(), made: 0 };
-        for (s, (view, _, lines)) in sections().enumerate() {
+        let mut keymap = Keymap { layers: vec![], made: 0, views: vec![], clashes: vec![] };
+        for (s, (layer, _, lines)) in sections().enumerate() {
             for (l, (bindings, _)) in lines.iter().enumerate() {
                 for (keys, command) in bindings.iter() {
                     let keys = parse_keys(keys).unwrap_or_else(|| panic!("the default keymap's {keys:?}"));
-                    keymap.bind(view, &keys, Bound::Command(*command), Shown::At(s, l));
+                    keymap.bind(layer, &keys, Bound::Command(*command), Shown::At(s, l));
                 }
             }
         }
@@ -312,10 +396,81 @@ impl Default for Keymap {
 }
 
 impl Keymap {
-    /// [`DEFAULT`], made once.
+    /// The editor's keys, made once.
     pub fn standard() -> &'static Keymap {
         static STANDARD: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
         STANDARD.get_or_init(Keymap::default)
+    }
+
+    /// This keymap with the keys plugins' `views` declare (the plugin installed first
+    /// first), each where it's free: one the editor has, or a view of another name
+    /// before it, stays theirs, and that's kept as a [`Clash`]. Views of one name share
+    /// their key: `focus_view` goes to the one for the file in front.
+    pub fn with_views(mut self, views: &[PluginView]) -> Keymap {
+        self.views = views.to_vec();
+        self.clashes.clear();
+        let mut given: Vec<(Vec<Key>, PluginView)> = vec![];
+        for (i, view) in views.iter().enumerate() {
+            let Some(said) = view.key else { continue };
+            let Some(keys) = parse_keys(said) else { continue };
+            if let Some(what) = self.editors_for(&keys) {
+                self.clashes.push(Clash { view: *view, keys: said, with: Taken::Editor(what) });
+                continue;
+            }
+            if let Some((_, other)) = given.iter().find(|(given, _)| *given == keys) {
+                if other.id.name != view.id.name {
+                    self.clashes.push(Clash { view: *view, keys: said, with: Taken::View(*other) });
+                }
+                continue;
+            }
+            let first = views.iter().position(|v| v.id.name == view.id.name).unwrap_or(i);
+            self.bind(Layer::Of(ViewKind::Code), &keys, Bound::View(view.id.name), Shown::View(first));
+            given.push((keys, *view));
+        }
+        self
+    }
+
+    /// What of the editor's `keys` would take, if they'd take any: a command bound to
+    /// them or before them, or the keys they lead on to.
+    fn editors_for(&self, keys: &[Key]) -> Option<String> {
+        let code = self.layer(Layer::Of(ViewKind::Code));
+        for end in 1..=keys.len() {
+            match find(code, &keys[..end]) {
+                Found::Bound(Bound::Command(command)) => return Some(command.name().to_string()),
+                Found::Bound(Bound::Typed(line)) => return Some(format!(":{line}")),
+                Found::Bound(Bound::View(_)) | Found::Nothing => return None,
+                Found::Keys if end == keys.len() => return Some(format!("{} leads on to more", sequence(keys))),
+                Found::Keys => {}
+            }
+        }
+        None
+    }
+
+    /// The plugins' views it has, the plugin installed first first.
+    pub fn views(&self) -> &[PluginView] {
+        &self.views
+    }
+
+    /// The plugins' views whose keys are taken, and that yours haven't given one.
+    pub fn clashes(&self) -> Vec<&Clash> {
+        self.clashes.iter().filter(|clash| !self.has_key(clash.view.id.name)).collect()
+    }
+
+    /// Whether the views called `name` have a key, in the code's layer.
+    fn has_key(&self, name: &str) -> bool {
+        self.keys_of(name).next().is_some()
+    }
+
+    /// The keys that go to the views called `name`.
+    fn keys_of<'a>(&'a self, name: &'a str) -> impl Iterator<Item = Vec<Key>> + 'a {
+        let mut found = vec![];
+        walk(self.layer(Layer::Of(ViewKind::Code)), &mut vec![], &mut found);
+        found.into_iter().filter(move |(_, binding)| matches!(binding.bound, Bound::View(of) if of == name)).map(|(keys, _)| keys)
+    }
+
+    /// The view called `name`: one of the editor's, or a plugin's.
+    pub fn view_named(&self, name: &str) -> Option<ViewKind> {
+        ViewKind::named(name).or_else(|| self.views.iter().find(|view| view.id.name == name).map(|view| view.kind()))
     }
 
     /// This keymap with your keys over it (the config's `"keys"`), and
@@ -325,14 +480,16 @@ impl Keymap {
     }
 
     /// The same, for `view`: the code's (which are every view's, under its own),
-    /// or a view's own layer (the config's `"keys": { "files": { … } }`).
+    /// or a view's own layer (the config's `"keys": { "files": { … } }`, or a plugin's
+    /// view's by its name, `"goals"`).
     pub fn with_yours_in(mut self, view: ViewKind, yours: &[(String, String)]) -> (Keymap, Vec<String>) {
         let wrong = yours.iter().filter_map(|(keys, to)| self.bind_yours_in(view, keys, to).err()).collect();
         (self, wrong)
     }
 
     /// `keys` (`"space w"`) bound to `to` in the code: a `:` command (`":wa"`), a
-    /// command's name (`"extend_line_below"`), or `no_op`, which unbinds them.
+    /// command's name (`"extend_line_below"`), a plugin's view (`"focus_view goals"`),
+    /// or `no_op`, which unbinds them.
     pub fn bind_yours(&mut self, keys: &str, to: &str) -> Result<(), String> {
         self.bind_yours_in(ViewKind::Code, keys, to)
     }
@@ -355,30 +512,57 @@ impl Keymap {
                 "\"{keys}\": those keys lead on to others ({shown}), so they can't be bound themselves: bind keys after them, as \"{keys} x\""
             ));
         }
+        let layer = yours_for(view);
         if let Some(line) = to.strip_prefix(':') {
-            self.bind(view, &sequence, Bound::Typed(line.trim().to_string()), Shown::Yours);
+            self.bind(layer, &sequence, Bound::Typed(line.trim().to_string()), Shown::Yours);
+            return Ok(());
+        }
+        if let Some(name) = to.trim().strip_prefix("focus_view").filter(|rest| rest.is_empty() || rest.starts_with(' ')).map(str::trim) {
+            let Some(at) = self.views.iter().position(|view| view.id.name == name) else {
+                let mut names: Vec<&str> = self.views.iter().map(|view| view.id.name).collect();
+                names.dedup();
+                let there = if names.is_empty() { "no plugin has any".to_string() } else { format!("there's {}", names.join(", ")) };
+                return Err(format!("\"{keys}\": no plugin has a view \"{name}\" ({there})"));
+            };
+            let name = self.views[at].id.name;
+            self.bind(layer, &sequence, Bound::View(name), Shown::View(at));
             return Ok(());
         }
         match Command::named(to.trim()) {
             Some(NoOp) if view == ViewKind::Code => self.unbind(&sequence),
-            Some(NoOp) => self.bind(view, &sequence, Bound::Command(NoOp), Shown::Yours),
+            Some(NoOp) => self.bind(layer, &sequence, Bound::Command(NoOp), Shown::Yours),
             // Where the command is in the cheatsheet already, it shows there.
-            Some(command) => self.bind(view, &sequence, Bound::Command(command), shown_at(view, command)),
-            None => return Err(format!("\"{keys}\": no command \"{to}\" (a : command starts with :)")),
+            Some(command) => {
+                let shown = self.shown_at(layer, command);
+                self.bind(layer, &sequence, Bound::Command(command), shown)
+            }
+            None => return Err(format!("\"{keys}\": no command \"{to}\" (a : command starts with :, a plugin's view is focus_view and its name)")),
         }
         Ok(())
     }
 
-    fn layer(&self, view: ViewKind) -> &Trie {
-        &self.layers[view as usize]
+    fn layer(&self, layer: Layer) -> &Trie {
+        static NONE: Trie = Vec::new();
+        self.layers.iter().find(|(of, _)| *of == layer).map_or(&NONE, |(_, trie)| trie)
     }
 
-    /// `keys` bound in `view`'s layer, over whatever was: a binding on the way to them gives way.
-    fn bind(&mut self, view: ViewKind, keys: &[Key], bound: Bound, shown: Shown) {
+    fn layer_mut(&mut self, layer: Layer) -> &mut Trie {
+        let at = match self.layers.iter().position(|(of, _)| *of == layer) {
+            Some(at) => at,
+            None => {
+                self.layers.push((layer, vec![]));
+                self.layers.len() - 1
+            }
+        };
+        &mut self.layers[at].1
+    }
+
+    /// `keys` bound in `layer`, over whatever was: a binding on the way to them gives way.
+    fn bind(&mut self, layer: Layer, keys: &[Key], bound: Bound, shown: Shown) {
         let Some((last, before)) = keys.split_last() else { return };
         let binding = Binding { bound, shown, order: self.made };
         self.made += 1;
-        let mut nodes = &mut self.layers[view as usize];
+        let mut nodes = self.layer_mut(layer);
         for key in before {
             let at = match nodes.iter().position(|(k, _)| k == key) {
                 Some(at) => at,
@@ -415,7 +599,7 @@ impl Keymap {
                 }
             }
         }
-        from(&mut self.layers[ViewKind::Code as usize], keys);
+        from(self.layer_mut(Layer::Of(ViewKind::Code)), keys);
     }
 
     /// What `keys` come to in the code.
@@ -424,60 +608,91 @@ impl Keymap {
         self.find_in(ViewKind::Code, keys)
     }
 
-    /// What `keys` come to in `view`: in its layer, or if they're nothing there, in the code's.
+    /// What `keys` come to in `view`: in its layers, or if they're nothing there, in the code's.
     pub(super) fn find_in(&self, view: ViewKind, keys: &[Key]) -> Found<'_> {
-        if view != ViewKind::Code {
-            match find(self.layer(view), keys) {
+        for layer in layers_of(view) {
+            match find(self.layer(layer), keys) {
                 Found::Nothing => {}
                 found => return found,
             }
         }
-        find(self.layer(ViewKind::Code), keys)
+        Found::Nothing
     }
 
     /// Every binding (but those that hide one of the code's): the view it's in, its
-    /// keys, and what they're bound to.
+    /// keys, and what they're bound to. A plugin's view's are those of what it shows,
+    /// and yours for it, once for the views of each name.
     pub fn bindings(&self) -> Vec<(ViewKind, Vec<Key>, &Bound)> {
         self.all().into_iter().map(|(view, keys, binding)| (view, keys, &binding.bound)).collect()
     }
 
-    fn all(&self) -> Vec<(ViewKind, Vec<Key>, &Binding)> {
-        fn walk<'a>(nodes: &'a [(Key, Node)], keys: &mut Vec<Key>, all: &mut Vec<(Vec<Key>, &'a Binding)>) {
-            for (key, node) in nodes {
-                keys.push(*key);
-                match node {
-                    Node::Bound(binding) => all.push((keys.clone(), binding)),
-                    Node::Keys(next) => walk(next, keys, all),
-                }
-                keys.pop();
+    /// The first of the plugins' views of each name.
+    fn named_views(&self) -> Vec<PluginView> {
+        let mut views: Vec<PluginView> = vec![];
+        for view in &self.views {
+            if views.iter().all(|seen| seen.id.name != view.id.name) {
+                views.push(*view);
             }
         }
+        views
+    }
+
+    fn all(&self) -> Vec<(ViewKind, Vec<Key>, &Binding)> {
+        let shown = |binding: &&Binding| binding.bound != Bound::Command(NoOp);
         let mut all = vec![];
-        for view in ViewKind::ALL {
+        for view in ViewKind::BUILT_IN {
             let mut theirs = vec![];
-            walk(self.layer(view), &mut vec![], &mut theirs);
-            all.extend(theirs.into_iter().filter(|(_, binding)| binding.bound != Bound::Command(NoOp)).map(|(keys, binding)| (view, keys, binding)));
+            walk(self.layer(Layer::Of(view)), &mut vec![], &mut theirs);
+            all.extend(theirs.into_iter().filter(|(_, binding)| shown(binding)).map(|(keys, binding)| (view, keys, binding)));
+        }
+        for view in self.named_views() {
+            let (yours, kind) = (self.layer(Layer::Named(view.id.name)), self.layer(Layer::Shows(view.id.shows)));
+            let (mut theirs, mut under) = (vec![], vec![]);
+            walk(yours, &mut vec![], &mut theirs);
+            walk(kind, &mut vec![], &mut under);
+            // What shows has, unless yours go over it.
+            theirs.extend(under.into_iter().filter(|(keys, _)| matches!(find(yours, keys), Found::Nothing)));
+            all.extend(theirs.into_iter().filter(|(_, binding)| shown(binding)).map(|(keys, binding)| (view.kind(), keys, binding)));
         }
         all
     }
 
     /// The `space ?` cheatsheet: every binding, on the lines [`DEFAULT`] and
-    /// [`VIEWS`] put it on (keys of yours that have none at the end, under [`YOURS`]).
+    /// [`VIEWS`] put it on, and a section for the plugins' views of each name, under
+    /// its title and key, with the lines of what it shows (keys of yours that have none
+    /// at the end, under [`YOURS`]).
     pub fn cheatsheet(&self) -> Vec<Section> {
-        let mut all = self.all();
-        all.sort_by_key(|(view, _, binding)| (binding.shown, *view, binding.order));
         let sections_of: Vec<_> = sections().collect();
+        let named = self.named_views();
+        // The plugins' views' sections come after the editor's views'.
+        let after_views = DEFAULT.len() + VIEWS.len();
+        let views_and_panes = DEFAULT.iter().position(|(title, _)| *title == VIEWS_AND_PANES).unwrap_or(0);
+        let debugger_line = DEFAULT[views_and_panes].1.iter().position(|(bindings, _)| bindings.iter().any(|(_, c)| *c == Debugger)).unwrap_or(0);
+        let group = |view: ViewKind| named.iter().position(|named| named.kind() == view).unwrap_or(0);
+        // Where each goes: its section, which of the views' it's for, its line, and after which on it.
+        let place = |view: ViewKind, shown: Shown| match shown {
+            Shown::At(s, l) if matches!(sections_of[s].0, Layer::Shows(_)) => (after_views, group(view), l, 0),
+            Shown::At(s, l) => (s, 0, l, 0),
+            Shown::View(i) => (views_and_panes, 0, debugger_line, 1 + i),
+            Shown::Yours => (usize::MAX, 0, 0, 0),
+        };
+        let mut all = self.all();
+        all.sort_by_key(|(view, _, binding)| (place(*view, binding.shown), binding.order));
         let mut sections: Vec<Section> = vec![];
         let mut last = None;
         for (view, keys, binding) in all {
             let arg = match &binding.bound {
                 Bound::Command(command) => command.arg(),
-                Bound::Typed(_) => None,
+                Bound::View(_) | Bound::Typed(_) => None,
             };
+            let at = place(view, binding.shown);
             let (title, what) = match (binding.shown, &binding.bound) {
-                (Shown::At(s, l), _) => (sections_of[s].1, sections_of[s].2[l].1.to_string()),
-                (Shown::Yours, Bound::Typed(line)) => (YOURS, format!(":{line}")),
-                (Shown::Yours, Bound::Command(command)) => (YOURS, command.doc().to_string()),
+                (Shown::At(s, l), _) if matches!(sections_of[s].0, Layer::Shows(_)) => (self.section_title(named[at.1]), sections_of[s].2[l].1.to_string()),
+                (Shown::At(s, l), _) => (sections_of[s].1.to_string(), sections_of[s].2[l].1.to_string()),
+                (Shown::View(i), _) => (VIEWS_AND_PANES.to_string(), going_to(self.views[i])),
+                (Shown::Yours, Bound::Typed(line)) => (YOURS.to_string(), format!(":{line}")),
+                (Shown::Yours, Bound::View(name)) => (YOURS.to_string(), format!("the {name} view")),
+                (Shown::Yours, Bound::Command(command)) => (YOURS.to_string(), command.doc().to_string()),
             };
             // Yours in a view of its own say which.
             let what = if binding.shown == Shown::Yours && view != ViewKind::Code { format!("{}: {what}", view.name()) } else { what };
@@ -486,15 +701,63 @@ impl Keymap {
             }
             let lines = &mut sections.last_mut().expect("pushed just above").lines;
             match lines.last_mut() {
-                Some(line) if last == Some(binding.shown) && binding.shown != Shown::Yours => {
+                Some(line) if last == Some(at) && binding.shown != Shown::Yours => {
                     line.keys.push(keys);
                     line.arg = line.arg.or(arg);
                 }
                 _ => lines.push(CheatLine { view, keys: vec![keys], arg, what }),
             }
-            last = Some(binding.shown);
+            last = Some(at);
         }
         sections
+    }
+
+    /// The title of the section of the views called as `view` is: its title, and the keys
+    /// that go there.
+    fn section_title(&self, view: PluginView) -> String {
+        let keys: Vec<String> = self.keys_of(view.id.name).map(|keys| sequence(&keys)).collect();
+        if keys.is_empty() { view.title.to_string() } else { format!("{}  {}", view.title, keys.join("  ")) }
+    }
+
+    /// The line of the sections of `layer` `command` is first on, if it's on one: for a
+    /// plugin's view's (yours for it), the lines of what it shows.
+    fn shown_at(&self, layer: Layer, command: Command) -> Shown {
+        let layer = match layer {
+            Layer::Named(name) => match self.views.iter().find(|view| view.id.name == name) {
+                Some(view) => Layer::Shows(view.id.shows),
+                None => return Shown::Yours,
+            },
+            layer => layer,
+        };
+        for (s, (_, _, lines)) in sections().enumerate().filter(|(_, (of, ..))| *of == layer) {
+            for (l, (bindings, _)) in lines.iter().enumerate() {
+                if bindings.iter().any(|(_, c)| *c == command) {
+                    return Shown::At(s, l);
+                }
+            }
+        }
+        Shown::Yours
+    }
+}
+
+/// What the key of a plugin's `view` does, for the cheatsheet.
+fn going_to(view: PluginView) -> String {
+    let where_ = match view.place {
+        super::ViewPlace::Tab => "a tab of this file's, opened if it isn't yet",
+        super::ViewPlace::Beside => "beside this file",
+    };
+    format!("{}: {where_}; again: back to the code", view.title)
+}
+
+/// Every binding in `nodes`, after `keys`.
+fn walk<'a>(nodes: &'a [(Key, Node)], keys: &mut Vec<Key>, all: &mut Vec<(Vec<Key>, &'a Binding)>) {
+    for (key, node) in nodes {
+        keys.push(*key);
+        match node {
+            Node::Bound(binding) => all.push((keys.clone(), binding)),
+            Node::Keys(next) => walk(next, keys, all),
+        }
+        keys.pop();
     }
 }
 
@@ -520,18 +783,6 @@ fn find<'a>(layer: &'a Trie, keys: &[Key]) -> Found<'a> {
         }
     }
     if keys.is_empty() { Found::Nothing } else { Found::Keys }
-}
-
-/// The line of `view`'s sections `command` is first on, if it's on one.
-fn shown_at(view: ViewKind, command: Command) -> Shown {
-    for (s, (_, lines)) in sections().enumerate().filter(|(_, (of, ..))| *of == view).map(|(s, (_, _, lines))| (s, ((), lines))) {
-        for (l, (bindings, _)) in lines.iter().enumerate() {
-            if bindings.iter().any(|(_, c)| *c == command) {
-                return Shown::At(s, l);
-            }
-        }
-    }
-    Shown::Yours
 }
 
 impl Key {
@@ -642,14 +893,20 @@ mod tests {
     #[test]
     fn the_default_keymap_binds_each_key_once_in_each_view() {
         let mut seen = std::collections::HashSet::new();
-        for (view, _, lines) in sections() {
+        for (layer, _, lines) in sections() {
             for (bindings, _) in lines.iter() {
                 for (keys, _) in bindings.iter() {
-                    assert!(seen.insert((view, self::keys(keys))), "{keys} twice in {view:?}");
+                    assert!(seen.insert((layer, self::keys(keys))), "{keys} twice in {layer:?}");
                 }
             }
         }
-        assert_eq!(Keymap::standard().bindings().len(), seen.len());
+        let of_views = |seen: &std::collections::HashSet<(Layer, Vec<Key>)>| seen.iter().filter(|(layer, _)| matches!(layer, Layer::Of(_))).count();
+        assert_eq!(Keymap::standard().bindings().len(), of_views(&seen), "what plugins' views show has no keys of its own till there's one");
+        let views: Vec<PluginView> = Shows::ALL
+            .into_iter()
+            .map(|shows| PluginView { id: super::super::ViewId { plugin: "p", name: shows.name(), shows }, title: "", place: shows.place(), key: None })
+            .collect();
+        assert_eq!(Keymap::default().with_views(&views).bindings().len(), seen.len());
     }
 
     #[test]
@@ -707,7 +964,7 @@ mod tests {
         let sheet = keymap.cheatsheet();
         let line = |what: &str| sheet.iter().flat_map(|s| &s.lines).find(|line| line.what.starts_with(what)).map(CheatLine::shown);
         assert_eq!(line("select line").as_deref(), Some("X alt-x % Z"), "Z joins x's line, and x is gone");
-        assert_eq!(sheet.last().map(|s| s.title), Some(YOURS));
+        assert_eq!(sheet.last().map(|s| s.title.as_str()), Some(YOURS));
         assert_eq!(line(":w").as_deref(), Some("ctrl-s"));
         assert_eq!(line("find / till").as_deref(), Some("f t F T ‹c›"));
         assert_eq!(line("pick a file").as_deref(), Some("space f  space b"));

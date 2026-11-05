@@ -1,6 +1,6 @@
 # Key reference
 
-To move around, `space` and a letter goes to a view: `space e` Files, `space t` the terminal, `space v` pages, `space g` the side view. The same key again goes back to the code. See [Views and panes](views.md).
+To move around, `space` and a letter goes to a view: `space e` Files, `space t` the terminal, `space x` the debugger, and a plugin's views by the keys they declare (`space v` Typst's pages, `space g` Lean's goals). The same key again goes back to the code. See [Views and panes](views.md).
 
 This is every key, in the same sections and order as the `space ?` cheatsheet. The tables come from the keymap itself (`crates/core/src/modal/keymap.rs`), and the names in their last column from `command.rs` beside it.
 
@@ -36,4 +36,4 @@ A key is looked up in the layer of the view that has the keys first, then in the
 ## What's not here
 
 - Keys you've bound yourself show in the cheatsheet under **Your keys**, or on the line of the command they run. See [Your own keys](../configuration/keys.md).
-- Plugins can add keys for their files, or for one of their views. They show under **Plugin keys** in `space ?` while a file of theirs is in front. `space v` and `space g` are the editor's own, for pages and the side view, whatever the plugin.
+- Plugins can add keys for their files, or for one of their views. They show under **Plugin keys** in `space ?` while a file of theirs is in front. A plugin's views' keys show in **Views and panes**, and each view has a section of its own, by its title and key.

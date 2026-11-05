@@ -117,6 +117,11 @@ impl Modal {
                 Outcome::Handled
             }
             Found::Bound(Bound::Command(command)) => self.command(*command, keys, regs, t),
+            // A plugin's view, as going to Files or the terminal is.
+            Found::Bound(Bound::View(name)) => {
+                (self.count, self.sticky_col) = (None, None);
+                Outcome::Effect(Effect::FocusView(name))
+            }
             // Yours wait while a story's reviewed, as the keys under `space` do.
             Found::Bound(Bound::Typed(line)) if !self.mode.reviewing() => {
                 self.count = None;
@@ -311,8 +316,7 @@ impl Modal {
             Ask if self.mode.reviewing() => return Some(Outcome::Review(Review::Ask)),
             Ask => Effect::Assist,
             Terminal => Effect::Terminal,
-            TogglePages => Effect::Pages,
-            ToggleAside => Effect::Aside,
+            Debugger => Effect::Debugger,
             GotoNextProblem => Effect::NextProblem,
             FileExplorer => Effect::Files,
             Hover => Effect::Hover,

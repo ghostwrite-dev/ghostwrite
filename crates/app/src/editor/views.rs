@@ -1,30 +1,42 @@
 //! Views: the places on screen that take the keys. The code (either pane of a split),
-//! Files (the tree, left of it), the Terminal (under it), and a plugin's views: a tab
-//! of pages, which is in a pane as code is, and what's beside a file, right of the
-//! code. The modes are the same in each; which view has the keys is
+//! Files (the tree, left of it), the Terminal (under it), the Debugger (right of the
+//! code), and the views plugins declare for files of their languages: a tab of a file's
+//! pages, which is in a pane as code is, or what's beside a file, right of the code.
+//! The editor knows no plugin's view but by what it declares ([`PluginView`]). The modes
+//! are the same in each; which view has the keys is
 //! [`Modal::view`](ghostwrite_core::Modal::view), and its layer of the keymap comes
 //! first.
 //!
 //! `space` and a letter is the one way from view to view: `space e` goes to Files,
-//! `space t` to the terminal, `space v` to the file's pages (opening them), `space g`
-//! to the side view (a plugin's panel, the debugger), and each again, from its view,
-//! back to the code. A click puts the keys where it is. Whatever was going on in a view ends as the keys
-//! leave it: typing (insert mode) and selecting (select mode) in the code, typing
-//! in the shell, naming a file. A story's AI mode goes with the keys.
+//! `space t` to the terminal, `space x` to the debugger, and a plugin's view's key (or
+//! yours, bound to `focus_view` and its name) to that view of the file in front,
+//! opening it; each again, from its view, goes back to the code. A click puts the keys
+//! where it is. Whatever was going on in a view ends as the keys leave it: typing
+//! (insert mode) and selecting (select mode) in the code, typing in the shell, naming
+//! a file. A story's AI mode goes with the keys.
 
-use ghostwrite_core::{Mode, ViewKind};
+use ghostwrite_core::{Mode, PluginView, Shows, ViewId, ViewKind, ViewPlace};
 use gpui::{Context, ScrollStrategy};
 
 use super::Editor;
 use super::prompt::PromptKind;
 
-/// How far a key scrolls pages, or what's beside a file, in points.
+/// How far a key scrolls pages, what's beside a file, or the debugger, in points.
 pub(super) const LINE: f32 = 40.;
 
+/// Whether a plugin's view `id` is in a tab, as a file's pages are.
+fn in_a_tab(id: ViewId) -> bool {
+    id.shows.place() == ViewPlace::Tab
+}
+
 impl Editor {
-    /// Whether the keys are on the code: a file's text, or a tab of pages.
+    /// Whether the keys are on the code: a file's text, or a tab of its pages.
     pub(super) fn in_code(&self) -> bool {
-        matches!(self.modal.view, ViewKind::Code | ViewKind::Pages)
+        match self.modal.view {
+            ViewKind::Code => true,
+            ViewKind::Plugin(id) => in_a_tab(id),
+            _ => false,
+        }
     }
 
     /// Typing in the terminal's shell: every key but ⌘ ones goes there.
@@ -32,37 +44,48 @@ impl Editor {
         self.modal.view == ViewKind::Terminal && self.modal.mode == Mode::Insert
     }
 
-    /// Whether a plugin shows its panel beside the file in front.
-    pub(super) fn panel_showing(&self) -> bool {
-        self.project.aside_shown && self.tab().is_some_and(|tab| tab.doc.aside.is_some())
+    /// Whether the debugger's up: something's being debugged, beside a file.
+    pub(super) fn debugger_showing(&self) -> bool {
+        self.tab().is_some() && self.debug.session.is_some()
     }
 
-    /// Whether there's a side view: a plugin's panel beside the file in front, or the
-    /// debugger, while something's being debugged.
+    /// Whether there's something beside the code: a plugin's panel, or the debugger.
+    #[cfg(test)]
     pub(super) fn aside_showing(&self) -> bool {
-        self.panel_showing() || self.tab().is_some() && self.debug.session.is_some()
+        self.shown_beside().is_some() || self.debugger_showing()
     }
 
-    /// What the view with the keys is called in the mode line, if it isn't its kind:
-    /// the side view, by what's on top in it.
-    pub(super) fn view_title(&self) -> Option<&'static str> {
-        match self.modal.view {
-            ViewKind::Aside if self.debug.session.is_some() => Some("Debugger"),
-            ViewKind::Aside => Some(self.tab()?.doc.aside.as_ref()?.panel.title()),
-            _ => None,
-        }
+    /// The plugin's view beside the file in front, if it's shown.
+    fn shown_beside(&self) -> Option<PluginView> {
+        self.tab()?.doc.aside.as_ref().filter(|_| self.project.aside_shown).map(|aside| aside.view)
+    }
+
+    /// What `view` is called in the mode line, if it isn't its name: a plugin's, by its title.
+    pub(super) fn view_title(&self, view: ViewKind) -> Option<&'static str> {
+        let ViewKind::Plugin(id) = view else { return None };
+        let beside = self.tab().and_then(|tab| tab.doc.aside.as_ref()).map(|aside| aside.view).filter(|view| view.id == id);
+        Some(beside.or_else(|| ghostwrite_plugin::view(id))?.title)
+    }
+
+    /// The view a tab of pages is: the view of pages of the file they're of, from its plugin.
+    fn pages_view(&self) -> ViewKind {
+        let view = ghostwrite_plugin::view_showing(Shows::Pages, self.active_language()).map(|view| view.id);
+        // A tab of pages no plugin's view has any more is still pages.
+        ViewKind::Plugin(view.unwrap_or(ViewId { plugin: "", name: "pages", shows: Shows::Pages }))
     }
 
     /// The view the keys are on, as things are now: a tab of pages is a view of its own,
     /// and a view that's gone (hidden, closed) leaves them on the code.
     pub(super) fn view_now(&self) -> ViewKind {
-        let pages = self.tab().is_some_and(|tab| tab.doc.view_of.is_some());
+        if self.in_code() {
+            let pages = self.tab().is_some_and(|tab| tab.doc.view_of.is_some());
+            return if pages { self.pages_view() } else { ViewKind::Code };
+        }
         match self.modal.view {
-            ViewKind::Code | ViewKind::Pages if pages => ViewKind::Pages,
-            ViewKind::Code | ViewKind::Pages => ViewKind::Code,
             ViewKind::Files if !self.tree_pane.shown => ViewKind::Code,
             ViewKind::Terminal if !self.terminal.shown || self.terminal.shells.is_empty() => ViewKind::Code,
-            ViewKind::Aside if !self.aside_showing() => ViewKind::Code,
+            ViewKind::Debugger if !self.debugger_showing() => ViewKind::Code,
+            ViewKind::Plugin(id) if self.shown_beside().is_none_or(|beside| beside.id != id) => ViewKind::Code,
             view => view,
         }
     }
@@ -85,12 +108,13 @@ impl Editor {
     /// ends: typing, selecting, naming a file. (Into the terminal, there's nothing to
     /// read yet: see [`Self::start_reading`] and [`Self::type_in_terminal`].)
     pub(super) fn focus_on(&mut self, to: ViewKind, cx: &mut Context<Self>) {
-        let to = if to == ViewKind::Pages { ViewKind::Code } else { to };
+        // A tab of pages is the code's pane's: which tab's in front says which it is.
+        let to = if matches!(to, ViewKind::Plugin(id) if in_a_tab(id)) { ViewKind::Code } else { to };
         if self.modal.view == to || to == ViewKind::Code && self.in_code() {
             return;
         }
         match self.modal.view {
-            ViewKind::Code | ViewKind::Pages => self.leave_insert(),
+            _ if self.in_code() => self.leave_insert(),
             ViewKind::Files => self.stop_naming(),
             ViewKind::Terminal => {
                 if self.modal.mode == Mode::Insert {
@@ -100,7 +124,7 @@ impl Editor {
                 }
                 self.stop_reading();
             }
-            ViewKind::Aside => {}
+            _ => {}
         }
         self.stop_selecting();
         self.modal.cancel_pending();
@@ -130,14 +154,46 @@ impl Editor {
         cx.notify();
     }
 
-    /// `space v`: the keys to the file's pages, which open in a tab of their own if
-    /// they aren't shown yet; from the pages, back to the file. Whatever plugin makes
-    /// them: a file with none says so.
-    pub(super) fn toggle_pages(&mut self, cx: &mut Context<Self>) {
+    /// `focus_view name`, and the key a plugin's view declares: the keys to the view of
+    /// the file in front called `name`, opened if it isn't shown yet; from there, back to
+    /// the code. A file with no such view says whose it is.
+    pub(super) fn focus_view(&mut self, name: &str, cx: &mut Context<Self>) {
+        let now = self.view_now();
+        if let ViewKind::Plugin(id) = now
+            && id.name == name
+            && !in_a_tab(id)
+        {
+            return self.focus_on(ViewKind::Code, cx);
+        }
+        // What's beside the file already, or a view its plugin has of it.
+        let beside = self.tab().and_then(|tab| tab.doc.aside.as_ref()).map(|aside| aside.view).filter(|view| view.id.name == name);
+        let pages = match now {
+            ViewKind::Plugin(id) if id.name == name => Some(PluginView { id, title: id.name, place: ViewPlace::Tab, key: None }),
+            _ => None,
+        };
+        let Some(view) = beside.or(pages).or_else(|| ghostwrite_plugin::view_named(name, self.active_language())) else {
+            let mut whose: Vec<&str> = ghostwrite_plugin::views().iter().filter(|view| view.id.name == name).map(|view| view.id.plugin).collect();
+            whose.dedup();
+            let said = match whose.as_slice() {
+                [] => format!("there's no {name} view: no plugin has one"),
+                [one] => format!("this file has no {name} view: {one} has one, for its own files"),
+                [many @ .., last] => format!("this file has no {name} view: {} and {last} have one, for their own files", many.join(", ")),
+            };
+            return self.project.say(said);
+        };
+        match view.place {
+            ViewPlace::Tab => self.go_to_pages(view, cx),
+            ViewPlace::Beside => self.go_beside(view, cx),
+        }
+    }
+
+    /// To the tab of the file's pages, which opens if it isn't shown yet; from the pages,
+    /// back to the file.
+    fn go_to_pages(&mut self, view: PluginView, cx: &mut Context<Self>) {
         let elsewhere = !self.in_code();
         self.focus_on(ViewKind::Code, cx);
         // From another view to a tab of pages that's in front already: there.
-        if elsewhere && self.view_now() == ViewKind::Pages {
+        if elsewhere && self.view_now() == view.kind() {
             return;
         }
         if self.tab().is_some_and(|tab| tab.doc.pages_are_the_text()) {
@@ -145,49 +201,56 @@ impl Editor {
         }
         match self.preview_pages(cx) {
             Ok(true) => {}
-            Ok(false) => self.project.say("this file has no pages: no plugin makes any of it"),
+            Ok(false) => self.project.say(format!("this file has no {}: its plugin makes none of it", view.id.name)),
             Err(why) => self.project.say(why),
         }
         self.modal.view = self.view_now();
         cx.notify();
     }
 
-    /// `space g`: the keys to the side view, which opens if the file's plugin has a
-    /// panel for it or something's being debugged; from there, back to the code.
-    pub(super) fn toggle_aside(&mut self, cx: &mut Context<Self>) {
-        if self.modal.view == ViewKind::Aside {
-            return self.focus_on(ViewKind::Code, cx);
-        }
+    /// To what the plugin shows beside the file, which shows if it isn't yet.
+    fn go_beside(&mut self, view: PluginView, cx: &mut Context<Self>) {
         if let Some(tab) = self.project.tabs.active_mut() {
-            if tab.doc.aside.is_none()
-                && let Some(panel) = tab.doc.language.and_then(ghostwrite_plugin::panel)
+            if tab.doc.aside.as_ref().is_none_or(|aside| aside.view.id != view.id)
+                && let Some(panel) = tab.doc.language.and_then(|language| ghostwrite_plugin::panel_of(view.id, language))
             {
-                tab.doc.aside = Some(super::aside::Aside::new(panel));
+                tab.doc.aside = Some(super::aside::Aside::new(view, panel));
             }
             if tab.doc.aside.is_some() {
                 self.project.aside_shown = true;
                 self.refresh_aside(cx);
             }
         }
-        if !self.aside_showing() {
-            return self.project.say("this file has nothing beside it: no plugin shows a panel for it, and nothing's being debugged");
+        if self.shown_beside().is_none_or(|beside| beside.id != view.id) {
+            return self.project.say(format!("this file has nothing in its {} view: its plugin shows nothing of it", view.id.name));
         }
-        self.focus_on(ViewKind::Aside, cx);
+        self.focus_on(view.kind(), cx);
     }
 
-    /// `j`, `k`, `ctrl-d`, `ctrl-u` on pages or beside the file: `by` lines (or with
-    /// `pages`, screens) down, or up if it's less than none.
+    /// `space x`: the keys to the debugger, while something's being debugged; from
+    /// there, back to the code.
+    pub(super) fn toggle_debugger(&mut self, cx: &mut Context<Self>) {
+        if self.modal.view == ViewKind::Debugger {
+            return self.focus_on(ViewKind::Code, cx);
+        }
+        if !self.debugger_showing() {
+            return self.project.say("nothing's being debugged: :debug path/to/program");
+        }
+        self.focus_on(ViewKind::Debugger, cx);
+    }
+
+    /// `j`, `k`, `ctrl-d`, `ctrl-u` on pages, beside the file or in the debugger: `by`
+    /// lines (or with `pages`, screens) down, or up if it's less than none.
     pub(super) fn scroll_view(&mut self, by: i32, pages: bool, cx: &mut Context<Self>) {
         let rows = if pages { self.measured.rows.max(2) as f32 } else { 1. };
         let down = LINE * rows * by as f32;
-        match self.modal.view {
-            ViewKind::Aside => {
-                let handle = &self.aside_scroll;
-                let (offset, most) = (handle.offset(), handle.max_offset().height);
-                handle.set_offset(gpui::point(offset.x, (offset.y - gpui::px(down)).clamp(-most.max(gpui::px(0.)), gpui::px(0.))));
-                cx.notify();
-            }
-            _ => self.scroll_pages(None, gpui::Point::new(gpui::px(0.), gpui::px(-down)), cx),
-        }
+        let handle = match self.modal.view {
+            ViewKind::Debugger => &self.debug.scroll,
+            ViewKind::Plugin(id) if !in_a_tab(id) => &self.aside_scroll,
+            _ => return self.scroll_pages(None, gpui::Point::new(gpui::px(0.), gpui::px(-down)), cx),
+        };
+        let (offset, most) = (handle.offset(), handle.max_offset().height);
+        handle.set_offset(gpui::point(offset.x, (offset.y - gpui::px(down)).clamp(-most.max(gpui::px(0.)), gpui::px(0.))));
+        cx.notify();
     }
 }

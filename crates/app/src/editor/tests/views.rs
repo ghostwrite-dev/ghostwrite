@@ -1,7 +1,8 @@
-//! Views: the keys going from the code to Files, the terminal and a plugin's views and
-//! back with `space` and a letter, the panes under `space w`, the mode line saying where they are, each view's own keys (yours, and a
+//! Views: the keys going from the code to Files, the terminal, the debugger and a
+//! plugin's views and back with `space` and a letter, the panes under `space w`, the mode line saying where they are, each view's own keys (yours, and a
 //! plugin's), and a story reviewed in whichever view has them.
 
+use ghostwrite_core::{Language, PluginView, Shows, ViewId, ViewPlace};
 use ghostwrite_plugin::{Binding, Block, Panel, Plugin};
 
 use super::terminal::{printed, wait_for};
@@ -24,11 +25,25 @@ impl Panel for Goals {
     }
 }
 
-/// A plugin with keys in its views: `H` on pages (an editor command, by name), `K`
-/// beside a file (its own command). For files of no language only, so it's in no one else's way.
+/// The test plugin's views, with the keys a test gives them ([`test_keys`]): as
+/// registered, they have none, so that they're in no one else's way.
+const PAGES: PluginView =
+    PluginView { id: ViewId { plugin: "views-test", name: "pages", shows: Shows::Pages }, title: "Pages", place: ViewPlace::Tab, key: Some("space v") };
+const GOALS: PluginView =
+    PluginView { id: ViewId { plugin: "views-test", name: "goals", shows: Shows::Blocks }, title: "Goals", place: ViewPlace::Beside, key: Some("space g") };
+
+/// The test plugin's language: its views are of its files.
+static VIEWS_TEST: Language = Language { name: "views-test", extensions: &["viewstest"], ..Language::DEFAULT };
+
+/// A plugin with views, and keys in them: `H` on its pages (an editor command, by name),
+/// `K` beside a file (its own command). For files of its own language only.
 struct Views;
 
 impl Plugin for Views {
+    fn name(&self) -> &str {
+        "views-test"
+    }
+
     fn commands(&self) -> &'static [ghostwrite_plugin::PluginCommand] {
         &[ghostwrite_plugin::PluginCommand { name: "views-test", what: "" }]
     }
@@ -37,12 +52,21 @@ impl Plugin for Views {
         Ok(vec![ghostwrite_plugin::Action::Say("ran in its view".into())])
     }
 
+    fn languages(&self) -> Vec<&'static Language> {
+        vec![&VIEWS_TEST]
+    }
+
+    fn views(&self) -> &'static [PluginView] {
+        const VIEWS: &[PluginView] = &[PluginView { key: None, ..PAGES }, PluginView { key: None, ..GOALS }];
+        VIEWS
+    }
+
     fn keys(&self, language: Option<&ghostwrite_core::Language>) -> &'static [Binding] {
         const KEYS: &[Binding] = &[
-            Binding { keys: "H", view: ViewKind::Pages, command: "scroll_page_down", what: "a screen down" },
-            Binding { keys: "K", view: ViewKind::Aside, command: "views-test", what: "say so" },
+            Binding { keys: "H", view: ViewKind::Plugin(PAGES.id), command: "scroll_page_down", what: "a screen down" },
+            Binding { keys: "K", view: ViewKind::Plugin(GOALS.id), command: "views-test", what: "say so" },
         ];
-        if language.is_none() { KEYS } else { &[] }
+        if language.is_some_and(|language| language.name == VIEWS_TEST.name) { KEYS } else { &[] }
     }
 }
 
@@ -52,27 +76,39 @@ fn with_views_plugin<'a>(text: &str, cx: &'a mut TestAppContext) -> Setup<'a> {
     open(text, &[], cx)
 }
 
+/// The editor's keys, and the test plugin's views' on `space v` and `space g`.
+fn test_keys(t: &mut Setup) {
+    let keymap: &'static ghostwrite_core::Keymap = Box::leak(Box::new(ghostwrite_core::Keymap::default().with_views(&[PAGES, GOALS])));
+    t.editor.update(t.cx, |e, _| e.use_keys(keymap, &[]));
+}
+
 /// What a plugin shows beside the file in front, shown.
 fn show_goals(t: &mut Setup) {
     t.editor.update(t.cx, |e, _| {
         e.project.aside_shown = true;
-        e.tab_mut().unwrap().doc.aside = Some(crate::editor::aside::Aside::new(Box::new(Goals)));
+        e.tab_mut().unwrap().doc.aside = Some(crate::editor::aside::Aside::new(GOALS, Box::new(Goals)));
     });
     draw(t);
 }
 
-/// A tab of doc.txt's pages, in front.
+/// A tab of the pages of the file in front, in front.
 fn open_pages(t: &mut Setup) {
     t.editor.update(t.cx, |e, cx| {
-        let of = e.tab().unwrap().doc.id;
-        let ix = e.project.tabs.add(|id| Document::view(id, of, "doc.txt · pages".into()));
+        let tab = e.tab().unwrap();
+        let (of, name) = (tab.doc.id, format!("{} · pages", tab.doc.name()));
+        let ix = e.project.tabs.add(|id| Document::view(id, of, name));
         e.activate(ix, cx);
     });
 }
 
-/// How far doc.txt's pages are scrolled down.
+/// The view a tab of pages of a file no plugin has views of is.
+fn pages_of_none() -> ViewKind {
+    ViewKind::Plugin(ViewId { plugin: "", name: "pages", shows: Shows::Pages })
+}
+
+/// How far the pages in front are scrolled down.
 fn pages_top(t: &mut Setup) -> f32 {
-    t.read(|e| e.project.tabs.iter().find(|tab| tab.doc.view_of.is_none()).unwrap().view.pages.top)
+    t.read(|e| e.project.tabs.by_id(e.shown_pages().unwrap()).unwrap().view.pages.top)
 }
 
 fn draw(t: &mut Setup) {
@@ -168,6 +204,7 @@ fn esc_esc_or_ctrl_backslash_ctrl_n_stop_typing_in_the_terminal(cx: &mut TestApp
 fn the_mode_line_says_the_mode_and_the_view(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
+    test_keys(&mut t);
     assert_eq!(t.mode_line(), "NOR", "the code is just the mode");
     t.keys("i");
     assert_eq!(t.mode_line(), "INS");
@@ -198,16 +235,17 @@ fn the_mode_line_says_the_mode_and_the_view(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn space_g_puts_the_keys_beside_the_file_where_j_scrolls_and_space_g_or_esc_goes_back(cx: &mut TestAppContext) {
+fn a_views_key_puts_the_keys_beside_the_file_where_j_scrolls_and_its_key_or_esc_goes_back(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[], cx);
+    test_keys(&mut t);
     t.cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(300.)));
     t.keys("space g");
-    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "nothing beside this file");
-    assert!(t.status().is_some_and(|said| said.starts_with("this file has nothing beside it")), "{:?}", t.status());
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "no goals beside this file");
+    assert!(t.status().is_some_and(|said| said.contains("no goals view")), "{:?}", t.status());
     show_goals(&mut t);
     t.editor.update(t.cx, |e, _| e.project.aside_shown = false);
     t.keys("space g");
-    assert_eq!(t.at(), (ViewKind::Aside, Mode::Normal), "space g shows it, and puts the keys there");
+    assert_eq!(t.at(), (GOALS.kind(), Mode::Normal), "its key shows it, and puts the keys there");
     assert!(t.read(|e| e.project.aside_shown));
     t.keys("j j");
     draw(&mut t);
@@ -216,44 +254,50 @@ fn space_g_puts_the_keys_beside_the_file_where_j_scrolls_and_space_g_or_esc_goes
     t.keys("x d");
     assert_eq!(t.text(), "x\n", "the code's keys don't reach the code from here");
     t.keys("space g");
-    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "space g again: back to the code");
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "its key again: back to the code");
     assert!(t.read(|e| e.aside_showing()), "which leaves it up");
     t.keys("space g escape");
     assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "esc goes back too");
     t.keys("space e space g");
-    assert_eq!(t.at().0, ViewKind::Aside, "from Files too");
+    assert_eq!(t.at().0, GOALS.kind(), "from Files too");
     t.keys("escape");
     let aside = t.cx.debug_bounds("aside").expect("it's drawn");
     t.cx.simulate_click(aside.center(), gpui::Modifiers::none());
-    assert_eq!(t.at().0, ViewKind::Aside, "a click puts the keys there too");
+    assert_eq!(t.at().0, GOALS.kind(), "a click puts the keys there too");
     t.editor.update(t.cx, |e, _| e.project.aside_shown = false);
     t.keys("j");
     assert_eq!(t.at().0, ViewKind::Code, "hidden, the keys are back on the code");
 }
 
-/// A plugin's panel opens with `space g`, made for the file as it's asked for.
+/// A plugin's panel opens with its view's key, made for the file as it's asked for.
 #[gpui::test]
-fn space_g_opens_the_panel_of_a_files_plugin(cx: &mut TestAppContext) {
+fn a_files_plugins_view_beside_it_opens_with_its_key(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[], cx);
     let path = t.dir.join("Basic.lean");
     std::fs::write(&path, "example : 1 = 1 := rfl\n").unwrap();
     t.editor.update(t.cx, |e, cx| e.open_paths(vec![path], cx));
     assert!(t.read(|e| e.tab().unwrap().doc.aside.is_none() && !e.aside_showing()), "nothing beside it until it's asked for");
-    t.keys("space g");
-    assert_eq!(t.at(), (ViewKind::Aside, Mode::Normal));
-    assert_eq!(t.mode_line(), "NOR · lean", "the plugin's panel");
+    let view = t.read(|e| ghostwrite_plugin::view_showing(Shows::Blocks, e.tab().unwrap().doc.language)).expect("the plugin's view");
+    t.keys(view.key.expect("with a key"));
+    assert_eq!(t.at(), (view.kind(), Mode::Normal));
+    assert_eq!(t.mode_line(), format!("NOR · {}", view.title.to_lowercase()), "by its title");
     draw(&mut t);
     assert!(t.cx.debug_bounds("aside").is_some(), "drawn");
-    t.keys("space g");
+    t.keys(view.key.unwrap());
     assert_eq!(t.at(), (ViewKind::Code, Mode::Normal));
 }
 
-/// While something's being debugged, the debugger is in the side view: alone, or over a panel.
+/// While something's being debugged, the debugger is a view of its own beside the code:
+/// alone, or over a plugin's panel.
 #[gpui::test]
-fn the_debugger_is_in_the_side_view(cx: &mut TestAppContext) {
+fn the_debugger_is_a_view_beside_the_code_on_space_x(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
+    test_keys(&mut t);
     t.cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(600.)));
+    t.keys("space x");
+    assert_eq!(t.at().0, ViewKind::Code, "nothing's being debugged");
+    assert!(t.status().is_some_and(|said| said.starts_with("nothing's being debugged")), "{:?}", t.status());
     // A debugger that answers `initialize`, and then listens.
     let adapter = t.dir.join("adapter.sh");
     let answer = r#"{"seq":1,"type":"response","request_seq":1,"success":true,"command":"initialize","body":{}}"#;
@@ -264,30 +308,37 @@ fn the_debugger_is_in_the_side_view(cx: &mut TestAppContext) {
     t.editor.update(t.cx, |e, cx| e.pretend_debugging(&adapter, vec![frame], vec![first], cx)).unwrap();
     draw(&mut t);
     let pane = t.cx.debug_bounds("debug-pane").expect("the debugger is drawn");
-    let aside = t.cx.debug_bounds("aside").expect("in the side view");
+    let aside = t.cx.debug_bounds("aside").expect("beside the code");
     assert!(aside.contains(&pane.center()), "{pane:?} in {aside:?}");
     assert!(pane.size.height > aside.size.height * 0.9, "alone, it has the whole of it: {pane:?} in {aside:?}");
     let code = t.cx.debug_bounds("code-view").unwrap();
     assert!(pane.origin.x >= code.origin.x + code.size.width, "beside the code, not under it");
-    t.keys("space g");
-    assert_eq!(t.at(), (ViewKind::Aside, Mode::Normal), "space g goes there");
+    t.keys("space x");
+    assert_eq!(t.at(), (ViewKind::Debugger, Mode::Normal), "space x goes there");
     assert_eq!(t.mode_line(), "NOR · debugger");
-    t.keys("space g");
-    assert_eq!(t.at().0, ViewKind::Code);
+    t.keys("space x");
+    assert_eq!(t.at().0, ViewKind::Code, "and back");
 
-    // With a plugin's panel: the debugger on top.
+    // With a plugin's panel: the debugger on top, each a view.
     show_goals(&mut t);
     let pane = t.cx.debug_bounds("debug-pane").expect("still drawn");
     let aside = t.cx.debug_bounds("aside").unwrap();
     assert_eq!(pane.origin.y, aside.origin.y, "on top");
     assert!(pane.size.height < aside.size.height, "over the panel");
     t.cx.simulate_click(aside.center() + gpui::point(gpui::px(0.), aside.size.height / 4.), gpui::Modifiers::none());
-    assert_eq!(t.at().0, ViewKind::Aside, "a click puts the keys there");
-    assert_eq!(t.mode_line(), "NOR · debugger", "called by what's on top");
+    assert_eq!(t.at().0, GOALS.kind(), "a click on the panel puts the keys there");
+    assert_eq!(t.mode_line(), "NOR · goals");
+    t.cx.simulate_click(pane.center(), gpui::Modifiers::none());
+    assert_eq!(t.at().0, ViewKind::Debugger, "and on the debugger, there");
+    t.keys("space g");
+    assert_eq!(t.at().0, GOALS.kind(), "from one to the other with their keys");
+    t.keys("space x");
+    assert_eq!(t.at().0, ViewKind::Debugger);
     t.command("stop");
     draw(&mut t);
     assert!(t.read(|e| e.debug.session.is_none()), "stopped: {:?}", t.status());
-    assert_eq!(t.mode_line(), "NOR · goals", "and the panel's all there is");
+    assert_eq!(t.mode_line(), "NOR", "and the keys are back on the code");
+    assert!(t.cx.debug_bounds("panel").is_some(), "the panel's all there is");
 }
 
 #[gpui::test]
@@ -297,7 +348,7 @@ fn your_keys_can_be_a_views_own(cx: &mut TestAppContext) {
     t.editor.update(t.cx, |e, _| e.project.tree.refresh());
     let keys = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
     let (keymap, _) = ghostwrite_core::Keymap::default().with_yours_in(ViewKind::Files, &keys(&[("J", "files_down"), ("j", "no_op")]));
-    let (keymap, _) = keymap.with_yours_in(ViewKind::Pages, &keys(&[("n", "scroll_page_down")]));
+    let (keymap, _) = keymap.with_yours_in(pages_of_none(), &keys(&[("n", "scroll_page_down")]));
     let keymap: &'static ghostwrite_core::Keymap = Box::leak(Box::new(keymap));
     t.editor.update(t.cx, |e, _| e.use_keys(keymap, &[]));
     t.keys("space e g g");
@@ -316,9 +367,14 @@ fn your_keys_can_be_a_views_own(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_plugin_binds_keys_in_its_own_views(cx: &mut TestAppContext) {
     let mut t = with_views_plugin("x\n", cx);
+    test_keys(&mut t);
+    let path = t.dir.join("views.viewstest");
+    std::fs::write(&path, "x\n").unwrap();
+    t.editor.update(t.cx, |e, cx| e.open_paths(vec![path], cx));
     t.keys("H");
     assert_eq!(t.text(), "x\n", "nothing in the code");
     open_pages(&mut t);
+    assert_eq!(t.read(|e| e.view_now()), PAGES.kind(), "a tab of its pages is its view of them");
     let top = pages_top(&mut t);
     t.keys("j");
     assert_eq!(pages_top(&mut t), top + 40., "the view's own keys");
@@ -328,13 +384,79 @@ fn a_plugin_binds_keys_in_its_own_views(cx: &mut TestAppContext) {
     show_goals(&mut t);
     t.keys("space g K");
     t.cx.run_until_parked();
-    assert_eq!(t.status().as_deref(), Some("ran in its view"), "and its own command, beside the file");
+    assert_eq!(t.status().as_deref(), Some("views-test: ran in its view"), "and its own command, beside the file");
+}
+
+/// Your keys in a plugin's view, by its name, go over what it shows and the plugin's.
+#[gpui::test]
+fn your_keys_go_over_a_plugins_in_its_view(cx: &mut TestAppContext) {
+    let mut t = with_views_plugin("x\n", cx);
+    let path = t.dir.join("yours.viewstest");
+    std::fs::write(&path, "x\n").unwrap();
+    t.editor.update(t.cx, |e, cx| e.open_paths(vec![path], cx));
+    let yours = [("H", "scroll_up"), ("J", "scroll_page_down"), ("j", "no_op")].map(|(k, v)| (k.to_string(), v.to_string()));
+    let (keymap, wrong) = ghostwrite_core::Keymap::default().with_views(&[PAGES, GOALS]).with_yours_in(PAGES.kind(), &yours);
+    assert!(wrong.is_empty(), "{wrong:?}");
+    let keymap: &'static ghostwrite_core::Keymap = Box::leak(Box::new(keymap));
+    t.editor.update(t.cx, |e, _| e.use_keys(keymap, &[]));
+    open_pages(&mut t);
+    let top = pages_top(&mut t);
+    t.keys("j");
+    assert_eq!(pages_top(&mut t), top, "j unbound there");
+    t.keys("J");
+    let down = pages_top(&mut t);
+    assert!(down > top + 80., "J a screen down");
+    t.keys("H");
+    assert_eq!(pages_top(&mut t), down - 40., "and H yours, not the plugin's");
+    t.keys("space v");
+    assert_eq!(t.at().0, ViewKind::Code, "its key goes back to the file");
+}
+
+/// `focus_view` and a view's name, bound to a key of yours, goes there as its own key does.
+#[gpui::test]
+fn focus_view_is_a_key_of_yours_for_a_view(cx: &mut TestAppContext) {
+    let mut t = open("x\n", &[], cx);
+    let yours = [("space G", "focus_view goals"), ("space g", "no_op")].map(|(k, v)| (k.to_string(), v.to_string()));
+    let (keymap, wrong) = ghostwrite_core::Keymap::default().with_views(&[PAGES, GOALS]).with_yours(&yours);
+    assert!(wrong.is_empty(), "{wrong:?}");
+    let keymap: &'static ghostwrite_core::Keymap = Box::leak(Box::new(keymap));
+    t.editor.update(t.cx, |e, _| e.use_keys(keymap, &[]));
+    show_goals(&mut t);
+    t.keys("space g");
+    assert_eq!(t.at().0, ViewKind::Code, "its own key, unbound");
+    t.keys("space G");
+    assert_eq!(t.at().0, GOALS.kind(), "yours");
+    t.keys("space G");
+    assert_eq!(t.at().0, ViewKind::Code, "and back");
+    let sheet = crate::editor::view::cheatsheet(keymap);
+    assert!(sheet.iter().any(|(title, _)| title == "Goals  space G"), "the cheatsheet calls it by its title and your key");
+}
+
+/// A view whose key is the editor's, or another plugin's, is said at the start, with the
+/// rest that's wrong with the keys, and in `:plugins`.
+#[gpui::test]
+fn a_views_key_thats_taken_is_said_at_the_start_and_in_the_list(cx: &mut TestAppContext) {
+    let mut t = open("x\n", &[], cx);
+    let taken = PluginView { key: Some("space f"), ..GOALS };
+    let rival = PluginView { id: ViewId { plugin: "rival-test", name: "proofs", shows: Shows::Blocks }, ..GOALS };
+    t.editor.update(t.cx, |e, _| e.make_keys(&[PAGES, taken], true));
+    let said = t.status().unwrap_or_default();
+    assert!(said.starts_with("plugins' keys: views-test's goals view has no key: space f is the editor's (file_picker)"), "{said}");
+    t.keys("space f");
+    assert!(t.read(|e| e.picker.is_some()), "the editor's comes first");
+    t.keys("escape");
+    t.editor.update(t.cx, |e, _| e.make_keys(&[GOALS, rival], true));
+    let said = t.status().unwrap_or_default();
+    assert!(said.contains("rival-test's proofs view has no key: space g is views-test's goals view's"), "the plugin installed first has it: {said}");
+    t.command("plugins");
+    let listed = t.status().unwrap_or_default();
+    assert!(listed.contains("Keys taken: rival-test's proofs view has no key"), "{listed}");
 }
 
 #[gpui::test]
 fn the_cheatsheet_has_each_views_keys_and_every_section(cx: &mut TestAppContext) {
-    let _t = open("", &[], cx);
-    let sheet = crate::editor::view::cheatsheet(ghostwrite_core::Keymap::standard());
+    let mut t = open("", &[], cx);
+    let sheet = crate::editor::view::cheatsheet(t.read(|e| e.modal.keymap()));
     let section = |title: &str| sheet.iter().find(|(t, _)| t == title).map(|(_, rows)| rows.iter().map(|row| (row.view, row.keys.clone())).collect::<Vec<_>>());
     let files = section("Files  space e").expect("Files has a section");
     assert!(files.contains(&(ViewKind::Files, "j down k up".into())), "{files:?}");
@@ -342,18 +464,30 @@ fn the_cheatsheet_has_each_views_keys_and_every_section(cx: &mut TestAppContext)
     let terminal = section("Terminal  space t").expect("so does the terminal");
     assert!(terminal.contains(&(ViewKind::Terminal, "enter".into())), "{terminal:?}");
     assert!(terminal.iter().any(|(_, keys)| keys.contains("ctrl-\\ ctrl-n")), "{terminal:?}");
-    assert!(section("Pages  space v").is_some() && section("Beside the file  space g").is_some() && section("Window  ⌘").is_some());
+    let debugger = section("Debugger  space x").expect("and the debugger");
+    assert!(debugger.contains(&(ViewKind::Debugger, "esc".into())), "{debugger:?}");
+    let pages = section("Pages  space v").expect("a plugin's view, by its title and key");
+    assert!(pages.iter().any(|(view, keys)| matches!(view, ViewKind::Plugin(id) if id.shows == Shows::Pages) && keys == "+ - ="), "{pages:?}");
+    assert!(sheet.iter().any(|(title, _)| title.ends_with("  space g")), "and the other plugin's");
+    assert!(section("Window  ⌘").is_some());
     let views = section("Views and panes").expect("going from view to view, and the panes");
-    for keys in ["space e", "space t", "space v", "space g", "space w v", "space w w", "space w q  space w o", "click"] {
+    for keys in ["space e", "space t", "space x", "space v", "space g", "space w v", "space w w", "space w q  space w o", "click"] {
         assert!(views.iter().any(|(_, shown)| shown == keys), "{keys}: {views:?}");
     }
     assert!(sheet.iter().flat_map(|(_, rows)| rows).all(|row| !row.keys.starts_with("ctrl-w") || row.keys.contains('⌫')), "no ctrl-w but typing's");
-    // Every section has a place in the columns, in order.
+    // Every section has a place in the columns, in order, the plugins' views' after the editor's.
     let titles: Vec<String> = sheet.iter().map(|(title, _)| title.clone()).collect();
+    let at = |title: &str| titles.iter().position(|t| t == title);
+    assert!(at("Debugger  space x") < at("Pages  space v") && at("Pages  space v") < at("Reviewing"), "{titles:?}");
     let columns = crate::editor::view::columns(sheet, 3);
     assert_eq!(columns.len(), 3);
     let placed: Vec<String> = columns.into_iter().flatten().map(|(title, _)| title).collect();
     assert_eq!(placed, titles);
+    // Drawn, too.
+    t.keys("space ?");
+    t.cx.update(|window, _| window.refresh());
+    t.cx.run_until_parked();
+    assert!(t.read(|e| e.cheatsheet));
 }
 
 #[gpui::test]

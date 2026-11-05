@@ -11,7 +11,7 @@ Ghostwrite talks to any debug adapter (the Debug Adapter Protocol). By default t
 
 1. `:break` puts a breakpoint on the cursor's line, or takes one away.
 2. `:debug program args` builds nothing: it runs the program you name, with its arguments, in the debugger.
-3. When it stops, the cursor goes there and the line is marked. The calls, the variables and what the program printed show in the side view. `space g` goes there, and again back to the code.
+3. When it stops, the cursor goes there and the line is marked. The calls, the variables and what the program printed show in the debugger, a view of its own beside the code. `space x` goes there (`NOR · debugger`), where `j` and `k` scroll it, and again back to the code.
 4. Go on with:
 
 | Command | What it does |

@@ -1,6 +1,6 @@
 # Plugins
 
-Everything Ghostwrite knows about a kind of file comes from a plugin: languages, language servers, a file's pages in a tab, a panel beside a file (in the side view), key bindings, `:` commands, and rules for the model's prompt. A plugin's code is WebAssembly, so one build runs on every system, in a sandbox.
+Everything Ghostwrite knows about a kind of file comes from a plugin: languages, language servers, views of a file (its pages in a tab, a panel beside it), each with a key of its own, key bindings, `:` commands, and rules for the model's prompt. A plugin's code is WebAssembly, so one build runs on every system, in a sandbox.
 
 ## Installing
 

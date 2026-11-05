@@ -12,8 +12,7 @@ A plugin is a folder with a `plugin.json` in it. It needs only the parts it uses
 | abbreviations and tokens | `\alpha` typing `α`; colors for a server's own kinds of token | no |
 | `:` commands and events | code that runs when you type a command, or a file is opened, saved or closed | yes |
 | highlighting by code | for a language no grammar parses well | yes |
-| pages | a file shown as pages in a tab (a PDF, a typeset document) | yes |
-| a panel | something in the side view beside a file, kept up to date from its server | yes |
+| views | its own views of its files, with a title and a key: pages in a tab (a PDF, a typeset document), or a panel beside a file, kept up to date from its server | yes |
 | server configuration | what a server starts with, and its settings | yes |
 
 Code is Rust compiled to WebAssembly (`wasm32-wasip2`), so one build runs on every system, and can't take the editor down.

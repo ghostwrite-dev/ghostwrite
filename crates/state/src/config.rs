@@ -5,7 +5,10 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use ghostwrite_core::{Keymap, ViewKind};
+use ghostwrite_core::{Keymap, PluginView, ViewKind};
+
+/// A key of yours: the view it's in (none: the code's), the keys, and what they're bound to.
+pub type YourKey = (Option<String>, String, String);
 
 pub struct Config {
     /// Files bigger than this aren't opened, so a stray log or binary can't hang the editor.
@@ -35,13 +38,13 @@ pub struct Config {
     pub debugger: Vec<String>,
     /// Your own keys in normal and select mode: a `:` command (`"ctrl-s":
     /// ":w"`, `"space w": ":wa"`), a command by name (`"x":
-    /// "extend_line_below"`), or `"no_op"` to unbind a key. Said flat, they're the
-    /// code's, and every view's under its own; under a view's name, that view's
-    /// alone: `"files": { "r": "rename_file" }`, `"terminal"`, `"pages"`, `"aside"`.
-    pub keys: Vec<(ViewKind, String, String)>,
-    /// The keymap, with your keys over the default one.
-    pub keymap: Keymap,
-    /// What's wrong with your keys, if anything is.
+    /// "extend_line_below"`), a plugin's view by its name (`"space p": "focus_view
+    /// pages"`), or `"no_op"` to unbind a key. Said flat (no view), they're the code's,
+    /// and every view's under its own; under a view's name, that view's alone:
+    /// `"files": { "r": "rename_file" }`, `"terminal"`, `"debugger"`, or a plugin's
+    /// view's, `"goals"`. See [`Config::keymap`].
+    pub keys: Vec<YourKey>,
+    /// What's wrong with your keys that can be said without the plugins, if anything is.
     pub problems: Vec<String>,
     /// The theme for light and dark appearance, by name, from `themes/` beside the config.
     pub theme_light: Option<String>,
@@ -65,7 +68,6 @@ impl Default for Config {
             animations: true,
             debugger: if cfg!(target_os = "macos") { vec!["/usr/bin/xcrun".into(), "lldb-dap".into()] } else { vec!["lldb-dap".into()] },
             keys: vec![],
-            keymap: Keymap::default(),
             problems: vec![],
             theme_light: None,
             theme_dark: None,
@@ -101,14 +103,6 @@ fn from_json(json: &serde_json::Value) -> Config {
     }
     if let Some(keys) = json.get("keys").and_then(|v| v.as_object()) {
         (config.keys, config.problems) = yours(keys);
-        let mut keymap = Keymap::default();
-        for view in ViewKind::ALL {
-            let theirs: Vec<(String, String)> = config.keys.iter().filter(|(of, ..)| *of == view).map(|(_, keys, to)| (keys.clone(), to.clone())).collect();
-            let wrong;
-            (keymap, wrong) = keymap.with_yours_in(view, &theirs);
-            config.problems.extend(wrong.into_iter().map(|wrong| if view == ViewKind::Code { wrong } else { format!("{}: {wrong}", view.name()) }));
-        }
-        config.keymap = keymap;
     }
     config.theme_light = json.get("theme_light").and_then(|v| v.as_str()).map(str::to_string);
     config.theme_dark = json.get("theme_dark").and_then(|v| v.as_str()).map(str::to_string);
@@ -148,20 +142,57 @@ fn from_json(json: &serde_json::Value) -> Config {
     config
 }
 
+impl Config {
+    /// The keymap: the editor's keys, the keys plugins' `views` declare where they're
+    /// free, and yours over them all. And what's wrong with yours: a view under whose
+    /// name they are is one of the editor's or one of those.
+    pub fn keymap(&self, views: &[PluginView]) -> (Keymap, Vec<String>) {
+        let mut keymap = Keymap::default().with_views(views);
+        let mut problems = self.problems.clone();
+        let mut names: Vec<Option<&str>> = vec![None];
+        for (view, ..) in &self.keys {
+            if !names.contains(&view.as_deref()) {
+                names.push(view.as_deref());
+            }
+        }
+        for name in names {
+            let view = match name {
+                None => ViewKind::Code,
+                Some(name) => match keymap.view_named(name) {
+                    Some(view) => view,
+                    None => {
+                        let mut views: Vec<&str> = ViewKind::BUILT_IN.iter().map(|view| view.name()).collect();
+                        views.extend(keymap.views().iter().map(|view| view.id.name).filter(|name| *name != "code"));
+                        views.dedup();
+                        problems.push(format!("\"{name}\": a command, or a view ({}) and its keys", views.join(", ")));
+                        continue;
+                    }
+                },
+            };
+            let theirs: Vec<(String, String)> =
+                self.keys.iter().filter(|(of, ..)| of.as_deref() == name).map(|(_, keys, to)| (keys.clone(), to.clone())).collect();
+            let wrong;
+            (keymap, wrong) = keymap.with_yours_in(view, &theirs);
+            problems.extend(wrong.into_iter().map(|wrong| match name {
+                None => wrong,
+                Some(name) => format!("{name}: {wrong}"),
+            }));
+        }
+        (keymap, problems)
+    }
+}
+
 /// Your keys, by view: those said flat are the code's, and those under a view's name
 /// (`"files": { … }`) that view's. And what isn't either.
-fn yours(keys: &serde_json::Map<String, serde_json::Value>) -> (Vec<(ViewKind, String, String)>, Vec<String>) {
+fn yours(keys: &serde_json::Map<String, serde_json::Value>) -> (Vec<YourKey>, Vec<String>) {
     let (mut found, mut wrong) = (vec![], vec![]);
     for (key, to) in keys {
         match to {
-            serde_json::Value::String(to) => found.push((ViewKind::Code, key.clone(), to.clone())),
-            serde_json::Value::Object(theirs) if let Some(view) = ViewKind::named(key) => {
-                found.extend(theirs.iter().filter_map(|(key, to)| Some((view, key.clone(), to.as_str()?.to_string()))));
+            serde_json::Value::String(to) => found.push((None, key.clone(), to.clone())),
+            serde_json::Value::Object(theirs) => {
+                found.extend(theirs.iter().filter_map(|(keys, to)| Some((Some(key.clone()), keys.clone(), to.as_str()?.to_string()))));
             }
-            _ => {
-                let views: Vec<&str> = ViewKind::ALL.iter().map(|view| view.name()).collect();
-                wrong.push(format!("\"{key}\": a command, or a view ({}) and its keys", views.join(", ")));
-            }
+            _ => wrong.push(format!("\"{key}\": a command, or a view and its keys")),
         }
     }
     (found, wrong)
@@ -169,35 +200,47 @@ fn yours(keys: &serde_json::Map<String, serde_json::Value>) -> (Vec<(ViewKind, S
 
 #[cfg(test)]
 mod tests {
-    use ghostwrite_core::{Key, Modal};
+    use ghostwrite_core::{Key, Modal, PluginView, Shows, ViewId};
 
     #[test]
     fn your_keys_are_bound_and_those_that_cant_be_are_said() {
         let json = serde_json::json!({ "keys": { "ctrl-s": ":w", "Z": "extend_line_below", "x": "no_op", "q": "extend_lin_below" } });
-        let config: &'static super::Config = Box::leak(Box::new(super::from_json(&json)));
-        let mut modal = Modal::default();
-        modal.set_keymap(&config.keymap);
+        let (modal, problems) = modal_of(&json, &[]);
         assert_eq!(modal.command_for(Key::Char('Z')), Some(ghostwrite_core::Command::ExtendLineBelow));
         assert!(!modal.binds(Key::Char('x')), "unbound");
         assert!(modal.binds(Key::Ctrl('s')));
         assert_eq!(modal.command_for(Key::Char('q')), Some(ghostwrite_core::Command::ReplayMacro), "as it was");
-        assert_eq!(config.problems, ["\"q\": no command \"extend_lin_below\" (a : command starts with :)"]);
+        assert_eq!(problems, ["\"q\": no command \"extend_lin_below\" (a : command starts with :, a plugin's view is focus_view and its name)"]);
     }
 
     #[test]
     fn keys_that_lead_on_to_others_cant_be_bound_and_that_is_said() {
         let json = serde_json::json!({ "keys": { "space w": ":wa", "space W": ":wa", "files": { "space w": "undo" } } });
-        let config: &'static super::Config = Box::leak(Box::new(super::from_json(&json)));
-        let mut modal = Modal::default();
-        modal.set_keymap(&config.keymap);
-        assert_eq!(config.problems.len(), 2, "{:?}", config.problems);
+        let (modal, problems) = modal_of(&json, &[]);
+        assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(
-            config.problems[0].starts_with("\"space w\": those keys lead on to others (space w v, space w w, space w q, space w o), so they can't be bound"),
-            "{:?}",
-            config.problems
+            problems[0].starts_with("\"space w\": those keys lead on to others (space w v, space w w, space w q, space w o), so they can't be bound"),
+            "{problems:?}"
         );
-        assert!(config.problems[1].starts_with("files: \"space w\": those keys lead on to others"), "{:?}", config.problems);
+        assert!(problems[1].starts_with("files: \"space w\": those keys lead on to others"), "{problems:?}");
         assert!(modal.binds(Key::Char(' ')), "space is as it was");
+    }
+
+    /// A plugin's view of pages, as the tests have it.
+    const PAGES: PluginView = PluginView {
+        id: ViewId { plugin: "typeset", name: "pages", shows: Shows::Pages },
+        title: "Pages",
+        place: ghostwrite_core::ViewPlace::Tab,
+        key: Some("space v"),
+    };
+
+    /// A modal with the keys `json` says over the editor's and `views`', and what's wrong with them.
+    fn modal_of(json: &serde_json::Value, views: &[PluginView]) -> (Modal, Vec<String>) {
+        let config = super::from_json(json);
+        let (keymap, problems) = config.keymap(views);
+        let mut modal = Modal::default();
+        modal.set_keymap(Box::leak(Box::new(keymap)));
+        (modal, problems)
     }
 
     #[test]
@@ -209,10 +252,9 @@ mod tests {
             "terminal": { "Y": ":w" },
             "pages": { "J": "scroll_down", "q": "no_such" },
             "nowhere": { "a": "undo" },
+            "space p": "focus_view pages",
         } });
-        let config: &'static super::Config = Box::leak(Box::new(super::from_json(&json)));
-        let mut modal = Modal::default();
-        modal.set_keymap(&config.keymap);
+        let (mut modal, problems) = modal_of(&json, &[PAGES]);
         modal.view = ViewKind::Files;
         assert_eq!(modal.command_for(Key::Char('R')), Some(ghostwrite_core::Command::RenameFile));
         assert_eq!(modal.command_for(Key::Char('r')), Some(ghostwrite_core::Command::NoOp), "hidden in Files");
@@ -221,10 +263,13 @@ mod tests {
         assert_eq!(modal.command_for(Key::Char('R')), Some(ghostwrite_core::Command::ReplaceWithYanked), "and a view's are its own");
         modal.view = ViewKind::Terminal;
         assert!(modal.binds(Key::Char('Y')));
-        modal.view = ViewKind::Pages;
-        assert_eq!(modal.command_for(Key::Char('J')), Some(ghostwrite_core::Command::ScrollDown));
-        assert_eq!(config.problems.len(), 2, "{:?}", config.problems);
-        assert!(config.problems.iter().any(|p| p.starts_with("\"nowhere\": a command, or a view (code, files")), "{:?}", config.problems);
-        assert!(config.problems.iter().any(|p| p.starts_with("pages: \"q\": no command")), "{:?}", config.problems);
+        modal.view = PAGES.kind();
+        assert_eq!(modal.command_for(Key::Char('J')), Some(ghostwrite_core::Command::ScrollDown), "a plugin's view's, by its name");
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().any(|p| p.starts_with("\"nowhere\": a command, or a view (code, files, terminal, debugger, pages)")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.starts_with("pages: \"q\": no command")), "{problems:?}");
+        let (_, problems) = modal_of(&json, &[]);
+        assert!(problems.iter().any(|p| p.starts_with("\"pages\": a command, or a view")), "with no plugin that has it: {problems:?}");
+        assert!(problems.iter().any(|p| p.starts_with("\"space p\": no plugin has a view \"pages\"")), "{problems:?}");
     }
 }

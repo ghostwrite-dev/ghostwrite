@@ -1,19 +1,19 @@
 # Pages
 
-A plugin can show a file as pages, in a tab of their own: a typeset document from its source, or a file that isn't text at all.
+A plugin can show a file as pages, in a view of their own, a tab: a typeset document from its source, or a file that isn't text at all. The view's `key` goes there and back; see [Views](manifest.md#views).
 
 ```json
 {
   "name": "typst",
   "api": 1,
   "code": "typst.wasm",
-  "pages": true,
+  "views": [{ "name": "pages", "title": "Pages", "shows": "pages", "place": "tab", "key": "space v" }],
   "extensions": ["typ"],
   "access": { "project": true, "fonts": true }
 }
 ```
 
-For a file that isn't text (a PDF, an image), add `"only_pages": true`: it opens as its pages, read-only, and the plugin reads the file itself each time they're made, so it needs `"access": { "project": true }`. `"pages_at_own_size": true` keeps pages from being shown bigger than they are, as for images.
+For a file that isn't text (a PDF, an image), add `"only_pages": true`: it opens as its pages (its view needs no key: the file's tab is its pages), read-only, and the plugin reads the file itself each time they're made, so it needs `"access": { "project": true }`. `"pages_at_own_size": true` keeps pages from being shown bigger than they are, as for images.
 
 ## The three calls
 
@@ -47,7 +47,7 @@ It answers a `Drawing` exactly as wide and as high as the region, a row at a tim
 
 ## Keys
 
-Pages open with the editor's own `space v` (or `:preview`), so a plugin needs no key for them. Keys for the pages view itself go under `"in": "pages"`:
+Pages open with the view's `key` (or `:preview`, or the user's `focus_view pages`). Keys for the view itself go under `"in"` and its name:
 
 ```json
 "keys": [{ "in": "pages", "keys": "space n", "command": "scroll_page_down", "what": "the next page" }]

@@ -11,14 +11,14 @@ With a project open:
 
 ## Getting around
 
-Files, the terminal, a file's pages and the side view are views, as the code is, and the modes work the same in each. The mode line says where the keys are: `NOR · files`, `INS · terminal`. `space` and a letter takes you to a view, and the same key again brings you back to the code:
+Files, the terminal, the debugger and the views plugins add (a file's pages, Lean's goals) are views, as the code is, and the modes work the same in each. The mode line says where the keys are: `NOR · files`, `INS · terminal`. `space` and a letter takes you to a view, and the same key again brings you back to the code:
 
 | Keys | Goes to |
 | --- | --- |
 | `space e` | Files, the file tree |
 | `space t` | the terminal, typing in it (`esc esc` to move through what it printed) |
-| `space v` | this file's pages, such as Typst's preview |
-| `space g` | the side view: Lean's goals, say, or the debugger |
+| `space x` | the debugger, while something's being debugged |
+| `space v`, `space g` | a plugin's views: Typst's pages, Lean's goals |
 
 That's the one way to move around. `esc` from Files or the terminal's normal mode also goes back to the code, and splits are under `space w` (`space w v` splits, `space w w` goes to the other pane). See [Modes and views](editing/modes.md).
 
@@ -40,7 +40,7 @@ Ghostwrite is modal. Keys move and act; you only type text in insert mode. As in
 
 ## Every key: space ?
 
-Press `space ?` at any time to see every key, in sections: moving, selecting, editing, views, each view's own keys (Files, the terminal, pages, the side view), reviewing a story, the `:` commands and the window. `j` and `k` scroll it; any other key closes it. It lists your own keys and the keys your plugins add, too. The [key reference](keys/README.md) in these docs is the same list.
+Press `space ?` at any time to see every key, in sections: moving, selecting, editing, views, each view's own keys (Files, the terminal, the debugger, and each plugin's view, by its title), reviewing a story, the `:` commands and the window. `j` and `k` scroll it; any other key closes it. It lists your own keys and the keys your plugins add, too. The [key reference](keys/README.md) in these docs is the same list.
 
 ## The tutor
 

@@ -1,11 +1,11 @@
 # Beside a file
 
-A plugin can show a panel beside files of its languages, in the side view right of the code, kept up to date from their language server, as Lean's goals are. The manifest says what to ask the server; the code says what to show of the answers.
+A plugin can show a panel beside files of its languages, right of the code, kept up to date from their language server, as Lean's goals are: a view of `blocks`. The manifest says what to ask the server; the code says what to show of the answers.
 
 ```json
 {
+  "views": [{ "name": "goals", "title": "Goals", "shows": "blocks", "place": "beside", "key": "space g" }],
   "panel": {
-    "title": "Lean",
     "requests": ["$/lean/plainGoal", "$/lean/plainTermGoal"],
     "notifications": ["$/lean/fileProgress"]
   }
@@ -14,11 +14,11 @@ A plugin can show a panel beside files of its languages, in the side view right 
 
 | Field | What it is |
 | --- | --- |
-| `title` | the panel's title, which the mode line shows (`NOR · lean`); the plugin's name if it doesn't say |
+| `title` | the heading at the panel's top; its view's title if it doesn't say. The mode line calls it by its view's title (`NOR · goals`) |
 | `requests` | requests to the server about the cursor, sent again as it moves or the text changes |
 | `notifications` | the server's own notifications about the file that the panel hears of |
 
-A panel needs code, and at least one language. The user goes there with `space g`, and `:preview` shows or hides it.
+A panel needs code, and at least one language. The user goes there with its view's `key` (or `focus_view` and its name), and `:preview` shows or hides it. See [Views](manifest.md#views).
 
 ## The three calls
 

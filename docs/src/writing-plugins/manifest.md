@@ -14,18 +14,19 @@ Every file a manifest names has to be inside the plugin's folder: no `..`, no ab
 | `code` | path | its WebAssembly, built for `wasm32-wasip2` |
 | `commands` | list | `:` commands its code runs: `[{ "name": "word-count", "what": "count the words" }]`. Names are letters, digits, `-` and `_` |
 | `events` | list | what its code hears of: `"opened"`, `"saved"`, `"closed"` |
-| `keys` | list | key bindings: `[{ "keys": "space z", "command": "term", "what": "…" }]`. `command` is a `:` command (with or without its `:`) or an editor command by name (`zoom_in`). For its languages' files, or every file if it has none. `"in"` names the view they're for: `"pages"`, `"aside"`, `"files"` or `"terminal"`; without it, the code (and a tab of its pages) |
+| `keys` | list | key bindings: `[{ "keys": "space z", "command": "term", "what": "…" }]`. `command` is a `:` command (with or without its `:`) or an editor command by name (`zoom_in`). For its languages' files, or every file if it has none. `"in"` names the view they're for: one of its own `views` by name, or `"files"`, `"terminal"` or `"debugger"`; without it, the code (and a tab of its pages) |
 | `rules` | string | lines starting `- ` added to the model's prompt |
 | `tokens` | object | kinds of semantic token its servers name, and the [scope](grammars.md#highlights) each shows as: `{ "leanSorryLike": "constant.builtin" }` |
 | `server` | list | the short form of one server: its command (`["zls"]`), named `‹name›-server` |
 | `servers` | list | its language servers: see below |
 | `languages` | list | more languages, each written as the plugin's own: see below |
 | `grammars` | list | grammars that aren't a language's own, there to be injected by name, each as a `grammar` |
-| `pages` | bool | its code makes pages of its language's files: see [Pages](pages.md) |
+| `views` | list | its views of its languages' files, each showing pages or blocks: see below |
+| `pages` | bool | its code makes pages of its language's files: see [Pages](pages.md). A view of `pages` says so too |
 | `only_pages` | bool | its files aren't text: they open as pages, read-only. Needs `pages` |
 | `pages_at_own_size` | bool | pages are never shown bigger than they are |
 | `highlights` | bool | its code colors its language, instead of a grammar |
-| `panel` | object | a panel beside its files: see below |
+| `panel` | object | what its view of blocks asks the server: see below |
 | `access` | object | what its code may reach: see below |
 
 ## The plugin's own language
@@ -75,15 +76,42 @@ A language can't have both a `grammar` and `highlights`.
 | `roots` | list | files that mark the folder it's started in, nearest the file up; else the project's |
 | `configured_by_code` | bool | its code says what it starts with and answers its settings: see [Configuring servers](servers.md). Needs `code` |
 
-## Panel
+## Views
+
+A plugin's views of files of its own languages, each a place that takes the keys as the editor's views do. The editor knows no plugin's view but by what's said here: each shows a kind of thing the editor knows how to draw.
+
+```json
+"views": [
+  { "name": "pages", "title": "Pages", "shows": "pages", "place": "tab", "key": "space v" },
+  { "name": "goals", "title": "Goals", "shows": "blocks", "place": "beside", "key": "space g" }
+]
+```
 
 | Field | Type | What it is |
 | --- | --- | --- |
-| `title` | string | its title; the plugin's name if not given |
+| `name` | string | **Required.** Letters, digits, `-` and `_`. What `"in"` in its `keys`, your [`"keys"`](../configuration/keys.md#keys-for-one-view) and `focus_view` call it. Not one of the editor's (`code`, `files`, `terminal`, `debugger`) |
+| `title` | string | what the mode line (`NOR · goals`) and the cheatsheet call it; its name if not given |
+| `shows` | string | **Required.** `pages`, which its code makes ([Pages](pages.md)), or `blocks`, its panel's ([Beside a file](panels.md)) |
+| `place` | string | `tab`, a tab of its own for the file in view, or `beside`, right of the code. For now pages are a tab and blocks are beside, which is what it is if not given |
+| `key` | string | `space` and a letter that goes there, opening it, and again back to the code |
+
+A plugin has one view of each kind. Each kind has its own keys in the view ([pages](../keys/pages.md), [blocks](../keys/aside.md)), and the plugin's `keys` with `"in"` and its name go over them. Its view applies to its own languages' files: on any other, its key says so.
+
+A key the editor has is the editor's. Two plugins' views can share a key if they have the same name (a `pages` view of one file type and another's), and `focus_view` goes to the one for the file in front; otherwise the plugin installed first has it. A view whose key is taken has none: that's said when the plugin is installed (before `:plugin install!`), when the editor starts, and in `:plugins`, and you can give it one of yours: `"space p": "focus_view goals"`.
+
+A plugin from before views were declared has views anyway: `"pages": true` is a view `pages` titled Pages on `space v`, and a `"panel"` is a view `aside`, titled as the panel is, on `space g`. A kind a plugin makes but declares no view of gets the same.
+
+## Panel
+
+What its view of blocks asks the file's server.
+
+| Field | Type | What it is |
+| --- | --- | --- |
+| `title` | string | the heading at its top; its view's title if not given |
 | `requests` | list | requests to the server about the cursor |
 | `notifications` | list | the server's notifications the panel hears of |
 
-Needs `code`, and at least one language. See [Beside a file](panels.md).
+Needs `code`, and at least one language. A view of `blocks` is a panel even if there's no `"panel"` (it asks nothing). See [Beside a file](panels.md).
 
 ## Access
 
@@ -111,7 +139,7 @@ What code may reach beyond what it's handed. Nothing, to begin with. All of it i
   "version": "1.0.0",
   "api": 1,
   "code": "typst.wasm",
-  "pages": true,
+  "views": [{ "name": "pages", "title": "Pages", "shows": "pages", "place": "tab", "key": "space v" }],
   "extensions": ["typ"],
   "comment": "//",
   "pairs": ["$$"],
@@ -136,8 +164,9 @@ A manifest is checked when it's read, and a plugin that breaks a rule isn't load
 
 - it has a `name`, and the names it uses are letters, digits, `-` and `_`;
 - with `code` or a grammar, it says which `api` it was built for, and that's the editor's;
-- `commands`, `events`, `pages`, `panel` and `configured_by_code` need `code`;
+- `commands`, `events`, `pages`, `panel`, `views` and `configured_by_code` need `code`;
 - `only_pages` needs `pages`;
+- a view shows `pages` or `blocks`, in the place it can be, with a key that's `space` and a letter; no two have the same name or show the same kind, and none has an editor's view's name;
 - a grammar and `highlights` aren't both there;
 - a language with a grammar says which files are in it;
 - every scope in `tokens` is one the editor knows;

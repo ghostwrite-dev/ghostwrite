@@ -1,14 +1,109 @@
-//! The keys of the views that aren't the code. Each view's own keys are a layer of
-//! the keymap over the code's ([`super::keymap::VIEWS`]): `j` is a row down in Files,
-//! Enter opens the file a line names on the terminal, Esc goes back to the code.
+//! The views plugins declare, and the keys of the views that aren't the code. Each
+//! view's own keys are a layer of the keymap over the code's ([`super::keymap::VIEWS`],
+//! and for a plugin's, what it shows: [`super::keymap::SHOWS`]): `j` is a row down in
+//! Files, Enter opens the file a line names on the terminal, Esc goes back to the code.
 //!
-//! A view with no text (Files, what's beside a file) has nothing for the code's
-//! keys to move through: there, only its own keys and those that work anywhere
+//! A view with no text (Files, the debugger, what's beside a file) has nothing for the
+//! code's keys to move through: there, only its own keys and those that work anywhere
 //! (`:`, and most under `space`) do something, and the rest are swallowed.
 
 use super::command::Command;
 use super::keymap::{Bound, Found};
 use super::{Effect, Key, Modal, Mode, Outcome, Pending, Review, TreeCommand, ViewKind};
+
+/// A plugin's view: which plugin's, what it's called, and what it shows. A plugin
+/// declares it in its manifest, and the editor knows no view of a plugin's but by this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ViewId {
+    pub plugin: &'static str,
+    /// As the config, `focus_view` and a plugin's keys (`"in"`) call it: `pages`, `goals`.
+    pub name: &'static str,
+    pub shows: Shows,
+}
+
+/// What a plugin's view shows: a kind of content the editor knows how to draw, and the
+/// keys that go with it. More can be added: each says what it's called in a manifest,
+/// where it goes, and its keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Shows {
+    /// A file's pages, from the plugin's renderer: drawn, with the cursor on them, a
+    /// click going to the text, and zoom.
+    Pages,
+    /// What the plugin's panel says, kept up to date from the file's language server:
+    /// headings, code, lines.
+    Blocks,
+}
+
+impl Shows {
+    pub const ALL: [Shows; 2] = [Shows::Pages, Shows::Blocks];
+
+    /// Its name, as a manifest's `"shows"` says it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Shows::Pages => "pages",
+            Shows::Blocks => "blocks",
+        }
+    }
+
+    pub fn named(name: &str) -> Option<Shows> {
+        Shows::ALL.into_iter().find(|shows| shows.name() == name)
+    }
+
+    /// Where a view of it can go: for now, pages are a tab and blocks are beside the code.
+    pub fn place(self) -> ViewPlace {
+        match self {
+            Shows::Pages => ViewPlace::Tab,
+            Shows::Blocks => ViewPlace::Beside,
+        }
+    }
+
+    /// Whether there's no text for the code's keys to move through: on pages there's
+    /// the text they're of.
+    pub fn without_text(self) -> bool {
+        self == Shows::Blocks
+    }
+}
+
+/// Where a plugin's view is on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViewPlace {
+    /// A tab of its own, in a pane as the code is, for the file in view (beside it, in the
+    /// other pane of a split, if you ask).
+    Tab,
+    /// Right of the code.
+    Beside,
+}
+
+impl ViewPlace {
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewPlace::Tab => "tab",
+            ViewPlace::Beside => "beside",
+        }
+    }
+
+    pub fn named(name: &str) -> Option<ViewPlace> {
+        [ViewPlace::Tab, ViewPlace::Beside].into_iter().find(|place| place.name() == name)
+    }
+}
+
+/// A view a plugin declares, for files of its own languages:
+/// `{ "name": "goals", "title": "Goals", "shows": "blocks", "place": "beside", "key": "space g" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PluginView {
+    pub id: ViewId,
+    /// What the mode line and the cheatsheet call it.
+    pub title: &'static str,
+    pub place: ViewPlace,
+    /// `space` and a letter that goes there and back, if it has one.
+    pub key: Option<&'static str>,
+}
+
+impl PluginView {
+    pub fn kind(self) -> ViewKind {
+        ViewKind::Plugin(self.id)
+    }
+}
 
 impl Modal {
     /// A key in a view with no text. Tab during a review accepts, as it does
@@ -33,6 +128,10 @@ impl Modal {
                 Outcome::Handled
             }
             Found::Bound(Bound::Command(command)) => self.run_in_view(*command),
+            Found::Bound(Bound::View(name)) => {
+                (self.count, self.pending) = (None, None);
+                Outcome::Effect(Effect::FocusView(name))
+            }
             Found::Bound(Bound::Typed(line)) if !self.mode.reviewing() => {
                 self.count = None;
                 Outcome::Effect(Effect::Run(line))

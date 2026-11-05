@@ -68,7 +68,10 @@ impl Editor {
             Command::Debug(line) => self.start_debugging(&line, cx)?,
             Command::DebuggerGo(how) => self.debugger_go(how, cx)?,
             Command::StopDebugging => self.stop_debugging(cx)?,
-            Command::Plugins => self.project.say(crate::plugins::list()),
+            Command::Plugins => {
+                let clashes: Vec<String> = self.modal.keymap().clashes().iter().map(|clash| clash.said()).collect();
+                self.project.say(crate::plugins::list(&clashes))
+            }
             Command::FromPlugin { name, args } => self.run_plugin_command(&name, args, cx),
             Command::ManagePlugins(what) => self.manage_plugins(what, cx)?,
             Command::Split => self.split_right(cx)?,

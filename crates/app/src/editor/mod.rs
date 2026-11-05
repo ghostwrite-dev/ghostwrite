@@ -9,7 +9,7 @@
 //! and prompts, runs background work, and decides when to switch tabs.
 //!
 //! Every key goes through [`Editor::key_down`] as a modal [`Key`], to the
-//! [`views`] that has the keys: the code, Files, the terminal, a plugin's view.
+//! [`views`] that has the keys: the code, Files, the terminal, the debugger, a plugin's view.
 //! The modes are the same in each. In the code, the completion menu gets first
 //! say in insert mode, then the mode decides: normal, select and insert mode
 //! edit the active document, and AI mode reviews a story, with the review keys.
@@ -176,6 +176,9 @@ pub struct Editor {
     /// Where the catalog of plugins to install is, and where it's kept: what's suggested
     /// for a file no plugin handles.
     catalog: Option<(String, PathBuf)>,
+    /// The plugins as the keymap was made for them ([`ghostwrite_plugin::changes`]), to
+    /// make it again when they change: none if it was given as it is.
+    keys_made_for: Option<u64>,
     _watching_links: Option<gpui::Task<()>>,
     /// Breakpoints, and what's being debugged.
     debug: debug::DebugPane,
@@ -339,6 +342,7 @@ impl Editor {
             plugins_at: if cfg!(test) { None } else { crate::plugins::folder() },
             staged_plugin: None,
             catalog: if cfg!(test) { None } else { crate::plugins::catalog() },
+            keys_made_for: None,
             _watching_links: None,
             debug: Default::default(),
             measured: Measured::default(),
@@ -348,23 +352,49 @@ impl Editor {
             _watcher: watcher,
             _subscriptions: subscriptions,
         };
-        // A test has the default keys, not those of whoever runs it.
-        if !cfg!(test) {
-            let config = crate::config::get();
-            editor.use_keys(&config.keymap, &config.problems);
-        }
+        editor.make_keys(&ghostwrite_plugin::views(), true);
         editor.start_recovery(cx);
         editor.check_for_update(false, cx);
         editor.watch_linked_plugins(cx);
         editor
     }
 
-    /// Keys looked up in `keymap` from now on (yours, from the config), and
-    /// what's wrong with those that couldn't be bound said.
+    /// Keys looked up in `keymap` from now on, as it is, and what's wrong with those
+    /// that couldn't be bound said.
+    #[cfg(test)]
     fn use_keys(&mut self, keymap: &'static ghostwrite_core::Keymap, problems: &[String]) {
         self.modal.set_keymap(keymap);
+        self.keys_made_for = None;
         if !problems.is_empty() {
             self.project.say(format!("config.json \"keys\": {}", problems.join("; ")));
+        }
+    }
+
+    /// Make the keymap: the editor's keys, those of the plugins' `views` where they're
+    /// free, and yours (a test has none: not those of whoever runs it). With `say`,
+    /// what's wrong with yours, and the views whose keys are taken, are said.
+    fn make_keys(&mut self, views: &[ghostwrite_core::PluginView], say: bool) {
+        let (keymap, problems) = keymap_for(views);
+        let mut said = vec![];
+        if !problems.is_empty() {
+            said.push(format!("config.json \"keys\": {}", problems.join("; ")));
+        }
+        let clashes: Vec<String> = keymap.clashes().iter().map(|clash| clash.said()).collect();
+        if !clashes.is_empty() {
+            said.push(format!("plugins' keys: {}", clashes.join("; ")));
+        }
+        if say && !said.is_empty() {
+            self.project.say(said.join(" · "));
+        }
+        self.modal.set_keymap(Box::leak(Box::new(keymap)));
+        self.keys_made_for = Some(ghostwrite_plugin::changes());
+    }
+
+    /// The keymap made again if the plugins have changed since it was made, by this
+    /// window or another, unless it was given as it is.
+    fn keep_keys(&mut self) {
+        if self.keys_made_for.is_some_and(|made_for| made_for != ghostwrite_plugin::changes()) {
+            self.make_keys(&ghostwrite_plugin::views(), false);
         }
     }
 
@@ -714,6 +744,7 @@ impl Editor {
     }
 
     fn mode_key_here(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.keep_keys();
         self.settle_view(cx);
         if self.in_code() && self.cursor_key(key, cx) {
             return true;
@@ -772,7 +803,8 @@ impl Editor {
         };
         let pending = self.modal.pending_keys();
         let typed = if pending.is_empty() { name } else { format!("{pending} {name}") };
-        // Those for the code are for a tab of its pages too, which is in a pane as the code is.
+        // Those for the code are for a tab of its pages too, which is in a pane as the code is;
+        // those in a plugin's view, there (`"in"`, by its name).
         let view = self.modal.view;
         let here = |binding: &&ghostwrite_plugin::Binding| binding.view == view || binding.view == ViewKind::Code && self.in_code();
         ghostwrite_plugin::keys(self.active_language()).into_iter().filter(here).find(|binding| binding.keys == typed).map(|binding| binding.command)
@@ -871,8 +903,8 @@ impl Editor {
                 | Effect::Terminal
                 | Effect::Files
                 | Effect::FocusCode
-                | Effect::Pages
-                | Effect::Aside
+                | Effect::FocusView(_)
+                | Effect::Debugger
                 | Effect::TypeInTerminal => {}
                 _ => self.focus_on(ViewKind::Code, cx),
             }
@@ -886,8 +918,8 @@ impl Editor {
             Effect::Files if self.modal.view == ViewKind::Files => self.focus_on(ViewKind::Code, cx),
             Effect::Files => self.enter_files(cx),
             Effect::FocusCode => self.focus_on(ViewKind::Code, cx),
-            Effect::Pages => self.toggle_pages(cx),
-            Effect::Aside => self.toggle_aside(cx),
+            Effect::FocusView(name) => self.focus_view(name, cx),
+            Effect::Debugger => self.toggle_debugger(cx),
             Effect::TypeInTerminal => self.type_in_terminal(cx),
             Effect::Scroll { by, pages } => self.scroll_view(by, pages, cx),
             Effect::Zoom(by) => {
@@ -944,6 +976,12 @@ impl Editor {
             | Effect::SelectRegex => self.cursors(effect, window, cx),
         }
     }
+}
+
+/// The keymap: the editor's keys, those of the plugins' `views` where they're free, and
+/// yours (a test has none: not those of whoever runs it); and what's wrong with yours.
+fn keymap_for(views: &[ghostwrite_core::PluginView]) -> (ghostwrite_core::Keymap, Vec<String>) {
+    if cfg!(test) { (ghostwrite_core::Keymap::default().with_views(views), vec![]) } else { crate::config::get().keymap(views) }
 }
 
 /// What a key is for the document: the key, or a command run as if one were bound to it.
