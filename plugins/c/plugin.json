@@ -1,0 +1,20 @@
+{
+  "name": "c",
+  "version": "0.1.0",
+  "api": 2,
+  "languages": [
+    {
+      "name": "c",
+      "extensions": ["c", "h"],
+      "comment": "//",
+      "grammar": { "name": "c", "wasm": "tree-sitter-c.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" }
+    },
+    {
+      "name": "cpp",
+      "extensions": ["cc", "cpp", "cxx", "hpp", "hh", "hxx"],
+      "comment": "//",
+      "grammar": { "name": "cpp", "wasm": "tree-sitter-cpp.wasm", "query": ["highlights-cpp.scm", "highlights.scm"], "textobjects": "textobjects-cpp.scm" }
+    }
+  ],
+  "servers": [{ "name": "clangd", "command": ["clangd"] }]
+}

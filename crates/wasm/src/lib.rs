@@ -7,19 +7,19 @@
 //! all it can do is answer; what more its manifest asks for (`Access`) is mounted
 //! or checked here. It's stopped if it runs too long or asks for too much memory,
 //! and starts afresh the next time. Grammars are tree-sitter's own WebAssembly builds,
-//! which tree-sitter runs. What's compiled is kept on disk between runs.
+//! which tree-sitter runs: `ghostwrite_core` does the rest (highlights, text objects).
+//! What's compiled is kept on disk between runs.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use ghostwrite_core::language::Highlighter as OwnHighlighter;
-use ghostwrite_core::syntax::{Highlights, Span, highlights};
+use ghostwrite_core::syntax::Load;
 use ghostwrite_page::{Bitmap, Pages, Place, Region, Renderer, Size};
 use ghostwrite_plugin::manifest::Access;
-use ghostwrite_plugin::{Action, Code, Context, Event, Reply};
-use tree_sitter_highlight::Highlighter;
+use ghostwrite_plugin::{Action, Block, Code, Context, Event, Reply, Shown};
+use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Cache, CacheConfig, Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -134,6 +134,8 @@ struct State {
     table: ResourceTable,
     limits: StoreLimits,
     network: Vec<String>,
+    /// The PATH it's been given, if it has.
+    path: Option<String>,
 }
 
 impl WasiView for State {
@@ -155,6 +157,15 @@ impl wit_host::Host for State {
         let mut response = agent.get(&url).call().map_err(|e| e.to_string())?;
         response.body_mut().with_config().limit(MOST_DOWNLOADED).read_to_vec().map_err(|e| e.to_string())
     }
+
+    fn which(&mut self, program: String) -> Option<String> {
+        // A name, not a path to somewhere else.
+        if program.is_empty() || program.contains(['/', '\\']) || program.starts_with('.') {
+            return None;
+        }
+        let found = ghostwrite_project::platform::on_path(&program, std::ffi::OsStr::new(self.path.as_deref()?))?;
+        Some(found.to_string_lossy().into_owned())
+    }
 }
 
 /// A plugin running.
@@ -166,8 +177,9 @@ struct Live {
 }
 
 impl Live {
-    /// Start the plugin called `name`, with `project` mounted if it's for pages of one.
-    fn start(name: &str, path: &Path, access: &Access, project: Option<&Path>) -> Result<Self, String> {
+    /// Start the plugin called `name`, with `project` mounted if it's for pages of one
+    /// or its servers, and of `env`, what its access lists.
+    fn start(name: &str, path: &Path, access: &Access, project: Option<&Path>, env: &[(String, String)]) -> Result<Self, String> {
         let engine = plugin_engine()?;
         let component = component(path)?;
         let mut linker = Linker::new(engine);
@@ -175,6 +187,10 @@ impl Live {
         bindings::Plugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state).map_err(|e| e.to_string())?;
         // By default no files, sockets or environment, and its output goes nowhere.
         let mut wasi = WasiCtxBuilder::new();
+        let shown: Vec<&(String, String)> = env.iter().filter(|(key, _)| access.env.contains(key)).collect();
+        for (key, value) in &shown {
+            wasi.env(key, value);
+        }
         let mut mount = |folder: &Path, at: &str, writes: bool| {
             let perms = if writes { FsPerms::ReadWrite } else { FsPerms::ReadOnly };
             wasi.preopened_dir(folder, at, perms).map(drop).map_err(|e| format!("couldn't give it {}: {e}", folder.display()))
@@ -207,6 +223,7 @@ impl Live {
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new().memory_size(bytes).build(),
             network: access.network.clone(),
+            path: shown.iter().rev().find(|(key, _)| key == "PATH").map(|(_, value)| value.clone()),
         };
         let ticks = access.seconds * 1000 / TICK.as_millis() as u64;
         let mut store = Store::new(engine, state);
@@ -236,28 +253,30 @@ struct WasmCode {
 }
 
 impl WasmCode {
-    /// Ask it something, starting it if it's not running. If it fails it's let go,
-    /// so that the next call starts it afresh.
-    fn ask(&self, call: impl FnOnce(&mut Live) -> wasmtime::Result<Result<Vec<wit::Action>, String>>) -> Reply {
+    /// Call it, starting it if it's not running. If it fails it's let go, so that the
+    /// next call starts it afresh.
+    fn call<T>(&self, call: impl FnOnce(&mut Live) -> wasmtime::Result<T>) -> Result<T, String> {
         let mut held = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if held.is_none() {
-            *held = Some(Live::start(&self.name, &self.path, &self.access, None)?);
+            *held = Some(Live::start(&self.name, &self.path, &self.access, None, &[])?);
         }
         let live = held.as_mut().expect("just started");
         live.store.set_epoch_deadline(live.ticks);
-        match call(live) {
-            Ok(reply) => reply.map(|actions| actions.into_iter().map(action).collect()),
-            Err(trap) => {
-                *held = None;
-                Err(why_stopped(&trap))
-            }
-        }
+        call(live).map_err(|trap| {
+            *held = None;
+            why_stopped(&trap)
+        })
+    }
+
+    /// Ask it what to do.
+    fn ask(&self, call: impl FnOnce(&mut Live) -> wasmtime::Result<Result<Vec<wit::Action>, String>>) -> Reply {
+        self.call(call)?.map(|actions| actions.into_iter().map(action).collect())
     }
 }
 
 impl Code for WasmCode {
     fn check(&self) -> Result<(), String> {
-        Live::start(&self.name, &self.path, &self.access, None).map(drop)
+        Live::start(&self.name, &self.path, &self.access, None, &[]).map(drop)
     }
 
     fn run(&self, name: &str, args: &[String], context: &Context) -> Reply {
@@ -276,25 +295,10 @@ impl Code for WasmCode {
     }
 
     fn highlight(&self, text: &str) -> Vec<(std::ops::Range<usize>, String)> {
-        let mut held = self.live.lock().unwrap_or_else(|e| e.into_inner());
-        if held.is_none() {
-            let Ok(started) = Live::start(&self.name, &self.path, &self.access, None) else { return vec![] };
-            *held = Some(started);
-        }
-        let live = held.as_mut().expect("just started");
-        live.store.set_epoch_deadline(live.ticks);
-        match live.plugin.call_highlight(&mut live.store, text) {
-            Ok(spans) => {
-                // It's only asked about this text: what's outside it isn't colored.
-                let inside =
-                    |span: &wit::Span| span.start <= span.end && text.is_char_boundary(span.start as usize) && text.is_char_boundary(span.end as usize);
-                spans.into_iter().filter(inside).map(|span| (span.start as usize..span.end as usize, span.scope)).collect()
-            }
-            Err(_) => {
-                *held = None;
-                vec![]
-            }
-        }
+        let Ok(spans) = self.call(|live| live.plugin.call_highlight(&mut live.store, text)) else { return vec![] };
+        // It's only asked about this text: what's outside it isn't colored.
+        let inside = |span: &wit::Span| span.start <= span.end && text.is_char_boundary(span.start as usize) && text.is_char_boundary(span.end as usize);
+        spans.into_iter().filter(inside).map(|span| (span.start as usize..span.end as usize, span.scope)).collect()
     }
 
     fn renderer(&self, root: &Path, path: &Path) -> Result<Box<dyn Renderer>, String> {
@@ -309,6 +313,51 @@ impl Code for WasmCode {
             file: relative.to_string_lossy().replace('\\', "/"),
             live: Arc::new(Mutex::new(None)),
         }))
+    }
+
+    fn server_env(&self, server: &str, project: &Path, root: &Path, env: &[(String, String)]) -> Result<Vec<(String, String)>, String> {
+        let (project_said, root_said) = (project.to_string_lossy(), root.to_string_lossy());
+        self.about_servers(project, env, |live| live.plugin.call_server_env(&mut live.store, server, &project_said, &root_said))
+    }
+
+    fn server_settings(&self, server: &str, project: &Path, root: &Path, env: &[(String, String)], section: &str) -> Result<Value, String> {
+        let (project_said, root_said) = (project.to_string_lossy(), root.to_string_lossy());
+        let said = self.about_servers(project, env, |live| live.plugin.call_server_settings(&mut live.store, server, &project_said, &root_said, section))?;
+        said.map_or(Ok(Value::Null), |json| serde_json::from_str(&json).map_err(|e| format!("its settings aren't JSON: {e}")))
+    }
+
+    fn panel_open(&self, language: &str) -> Result<Shown, String> {
+        self.call(|live| live.plugin.call_panel_open(&mut live.store, language)).map(shown)
+    }
+
+    fn panel_answered(&self, state: &str, answers: &[Option<Value>]) -> Result<Shown, String> {
+        let answers: Vec<Option<String>> = answers.iter().map(|answer| answer.as_ref().map(Value::to_string)).collect();
+        self.call(|live| live.plugin.call_panel_answered(&mut live.store, state, &answers)).map(shown)
+    }
+
+    fn panel_notification(&self, state: &str, method: &str, params: &Value) -> Result<(Shown, bool), String> {
+        let params = params.to_string();
+        let (panel, again) = self.call(|live| live.plugin.call_panel_notification(&mut live.store, state, method, &params))?;
+        Ok((shown(panel), again))
+    }
+}
+
+/// A panel as its code says it is.
+fn shown(panel: wit::Panel) -> Shown {
+    let block = |block: wit::Block| match block {
+        wit::Block::Heading(text) => Block::Heading(text),
+        wit::Block::Code(wit::CodeBlock { text, stands_out }) => Block::Code { text, stands_out },
+        wit::Block::Good(text) => Block::Good(text),
+        wit::Block::Muted(text) => Block::Muted(text),
+    };
+    Shown { state: panel.state, blocks: panel.blocks.into_iter().map(block).collect(), working_on: panel.working_on }
+}
+
+impl WasmCode {
+    /// Ask it about its servers, started afresh for this project, with what of `env` it may see.
+    fn about_servers<T>(&self, project: &Path, env: &[(String, String)], call: impl FnOnce(&mut Live) -> wasmtime::Result<T>) -> Result<T, String> {
+        let mut live = Live::start(&self.name, &self.path, &self.access, Some(project), env)?;
+        call(&mut live).map_err(|trap| why_stopped(&trap))
     }
 }
 
@@ -326,7 +375,7 @@ impl Renderer for WasmRenderer {
     fn render(&mut self, text: &str) -> Result<Arc<dyn Pages>, String> {
         let mut held = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if held.is_none() {
-            let mut started = Live::start(&self.name, &self.path, &self.access, Some(&self.root))?;
+            let mut started = Live::start(&self.name, &self.path, &self.access, Some(&self.root), &[])?;
             let offset = chrono::Local::now().offset().local_minus_utc() / 60;
             let Live { store, plugin, .. } = &mut started;
             plugin.call_open_pages(store, &self.file, offset).map_err(|trap| why_stopped(&trap))??;
@@ -458,21 +507,41 @@ fn action(action: wit::Action) -> Action {
     }
 }
 
-/// A grammar loaded, with what parses with it: only one file at a time.
-struct Grammar {
-    highlighter: Highlighter,
-    highlights: Highlights,
+/// A grammar compiled to WebAssembly: tree-sitter loads it, and its parsers run it.
+struct WasmGrammar {
+    name: String,
+    path: PathBuf,
 }
 
-impl Grammar {
-    fn load(name: &str, path: &Path, query: &str) -> Result<Self, String> {
-        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        let mut store = tree_sitter::WasmStore::new(grammar_engine()?).map_err(|e| format!("{e:?}"))?;
-        let language = store.load_language(name, &bytes).map_err(|e| format!("{e:?}"))?;
-        let mut highlighter = Highlighter::new();
-        highlighter.parser.set_wasm_store(store).map_err(|e| format!("{e:?}"))?;
-        let highlights = highlights(name, language, query).ok_or("its highlight query doesn't fit it")?;
-        Ok(Self { highlighter, highlights })
+impl Load for WasmGrammar {
+    /// Loaded once however many languages use it, until it changes.
+    fn language(&self) -> Result<tree_sitter::Language, String> {
+        static LOADED: Mutex<Option<HashMap<PathBuf, (std::time::SystemTime, tree_sitter::Language)>>> = Mutex::new(None);
+        // What loads them, kept for as long as they're used.
+        static LOADER: OnceLock<Result<Mutex<tree_sitter::WasmStore>, String>> = OnceLock::new();
+        let changed = std::fs::metadata(&self.path).and_then(|file| file.modified()).map_err(|e| e.to_string())?;
+        let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
+        let loaded = loaded.get_or_insert_default();
+        if let Some((when, language)) = loaded.get(&self.path)
+            && *when == changed
+        {
+            return Ok(language.clone());
+        }
+        let loader = LOADER
+            .get_or_init(|| tree_sitter::WasmStore::new(grammar_engine()?).map(Mutex::new).map_err(|e| format!("{e:?}")))
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let bytes = std::fs::read(&self.path).map_err(|e| e.to_string())?;
+        let language = loader.lock().unwrap_or_else(|e| e.into_inner()).load_language(&self.name, &bytes).map_err(|e| format!("{e:?}"))?;
+        loaded.insert(self.path.clone(), (changed, language.clone()));
+        Ok(language)
+    }
+
+    fn parser(&self) -> Result<tree_sitter::Parser, String> {
+        let mut parser = tree_sitter::Parser::new();
+        let store = tree_sitter::WasmStore::new(grammar_engine()?).map_err(|e| format!("{e:?}"))?;
+        parser.set_wasm_store(store).map_err(|e| format!("{e:?}"))?;
+        Ok(parser)
     }
 }
 
@@ -484,21 +553,8 @@ impl ghostwrite_plugin::Runtime for Runtime {
         Box::new(WasmCode { name: name.to_string(), path: path.to_path_buf(), access: access.clone(), live: Mutex::new(None) })
     }
 
-    fn grammar(&self, name: &str, path: &Path, query: &str) -> &'static OwnHighlighter {
-        let (name, path, query) = (name.to_string(), path.to_path_buf(), query.to_string());
-        let grammar: OnceLock<Option<Mutex<Grammar>>> = OnceLock::new();
-        Box::leak(Box::new(move |text: &str| -> Vec<Span> {
-            let loaded = grammar
-                .get_or_init(|| Grammar::load(&name, &path, &query).inspect_err(|e| eprintln!("the {name} grammar can't be used: {e}")).ok().map(Mutex::new));
-            let Some(grammar) = loaded else { return vec![] };
-            let mut grammar = grammar.lock().unwrap_or_else(|e| e.into_inner());
-            let Grammar { highlighter, highlights } = &mut *grammar;
-            highlights.spans(highlighter, text)
-        }))
-    }
-
-    fn check_grammar(&self, name: &str, path: &Path, query: &str) -> Result<(), String> {
-        Grammar::load(name, path, query).map(drop)
+    fn grammar(&self, name: &str, path: &Path) -> Box<dyn Load> {
+        Box::new(WasmGrammar { name: name.to_string(), path: path.to_path_buf() })
     }
 }
 
@@ -514,6 +570,7 @@ mod tests {
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new().build(),
             network: vec!["allowed.invalid".into()],
+            path: None,
         };
         for (url, why) in [
             ("https://elsewhere.invalid/x", "isn't a host"),

@@ -1,5 +1,5 @@
 //! A small language-server client. [`Registry`] starts one server per
-//! language per project on first use; a [`Document`] keeps one open file in
+//! language per project on first use, of those plugins add ([`registry::Spec`]); a [`Document`] keeps one open file in
 //! sync with its server and asks it things; [`convert`] turns the answers
 //! into byte offsets and plain text. Diagnostics arrive as [`Event`]s.
 //!
@@ -10,7 +10,6 @@
 pub mod client;
 pub mod convert;
 pub mod document;
-mod python;
 pub mod registry;
 mod shell;
 

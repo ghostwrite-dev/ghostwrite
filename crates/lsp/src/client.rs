@@ -142,7 +142,7 @@ impl Client {
                     (Some(0), None) => {
                         *capabilities.lock().unwrap() = message["result"]["capabilities"].clone();
                         send(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
-                        // Pyright reads settings when told they changed.
+                        // Some servers read their settings only when told they've changed.
                         send(json!({ "jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": { "settings": {} } }));
                         let mut queue = queue.lock().unwrap();
                         ready.store(true, Ordering::SeqCst);
@@ -449,8 +449,8 @@ fn read_message(reader: &mut impl std::io::BufRead) -> Read {
     }
 }
 
-/// `\uD83D` escapes without their other half (a JavaScript server cutting a
-/// string inside an emoji), which JSON parsers refuse, as `�`.
+/// `\uD83D` escapes without their other half (a server that counts in UTF-16
+/// cutting a string inside an emoji), which JSON parsers refuse, as `�`.
 fn mend_surrogates(body: &[u8]) -> Vec<u8> {
     let hex = |at: usize| body.get(at..at + 4).and_then(|h| u16::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
     let escape = |at: usize| (body.get(at..at + 2) == Some(b"\\u")).then(|| hex(at + 2)).flatten();

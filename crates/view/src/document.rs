@@ -273,7 +273,7 @@ impl Document {
         }
         self.dirty = false;
         if let Some(lsp) = self.lsp.as_ref().filter(|_| self.path.as_deref() == Some(path)) {
-            // rust-analyzer and friends check the project on save.
+            // Many servers check the project on save.
             lsp.saved();
         }
         Ok(())

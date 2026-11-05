@@ -12,13 +12,12 @@ ghostwrite-plugin.workspace = true
 ghostwrite-project.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ureq.workspace = true
+serde_json.workspace = true
 tree-sitter = { workspace = true, features = ["wasm"] }
-tree-sitter-highlight.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 
 [dev-dependencies]
 ghostwrite-lsp.workspace = true
 futures.workspace = true
-serde_json.workspace = true
 image = { workspace = true, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }

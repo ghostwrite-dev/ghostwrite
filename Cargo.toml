@@ -3,15 +3,14 @@
 # Layered like helix (and zed): pure crates at the bottom, the gpui app on
 # top. Nothing below `app` knows about the UI.
 #
-#   core     text, selections, motions, text objects, modal keys, syntax
+#   core     text, selections, motions, text objects, modal keys, syntax over any grammar
 #   project  files, search, file operations, persisted state
 #   terminal the user's shell, emulated: its screen, to draw and to read
 #   page     what a document's pages are: their sizes, pages drawn
 #   plugin   what a plugin can add, the plugins there are, and installing them
 #   plugin-api what a plugin written in Rust compiles against, and the interface itself
 #   wasm     (optional) runs plugins compiled to WebAssembly, sandboxed, and their grammars
-#   lsp      language-server client
-#   lean     (a plugin) Lean: its language, its server, its goals
+#   lsp      language-server client (the servers are plugins')
 #   model    a local model: llama.cpp, in a process of its own
 #   ai       the model: prompts, reply parsing, backends, the review story
 #   view     the editor's state: documents, tabs, the project, search, registers, jumps
@@ -19,7 +18,7 @@
 [workspace]
 exclude = ["examples", "plugins", "crates/wasm/tests/fixture"]
 resolver = "3"
-members = ["crates/core", "crates/project", "crates/terminal", "crates/page", "crates/lsp", "crates/dap", "crates/plugin", "crates/plugin-api", "crates/wasm", "crates/lean", "crates/model", "crates/ai", "crates/view", "crates/app"]
+members = ["crates/core", "crates/project", "crates/terminal", "crates/page", "crates/lsp", "crates/dap", "crates/plugin", "crates/plugin-api", "crates/wasm", "crates/model", "crates/ai", "crates/view", "crates/app"]
 default-members = ["crates/app"]
 
 [workspace.package]
@@ -42,7 +41,6 @@ ghostwrite-dap = { path = "crates/dap" }
 ghostwrite-page = { path = "crates/page" }
 ghostwrite-wasm = { path = "crates/wasm" }
 ghostwrite-plugin = { path = "crates/plugin" }
-ghostwrite-lean = { path = "crates/lean" }
 ghostwrite-model = { path = "crates/model", default-features = false }
 ghostwrite-ai = { path = "crates/ai" }
 ghostwrite-view = { path = "crates/view" }
@@ -70,20 +68,8 @@ ureq = { version = "3", features = ["json"] }
 
 tree-sitter = "0.27"
 tree-sitter-highlight = "0.27"
-tree-sitter-bash = "0.23"
-tree-sitter-c = "0.24"
-tree-sitter-cpp = "0.23"
-tree-sitter-css = "0.23"
-tree-sitter-go = "0.23"
-tree-sitter-html = "0.23"
-tree-sitter-javascript = "0.23"
-tree-sitter-json = "0.24"
-tree-sitter-md = "0.5"
-tree-sitter-python = "0.23"
+# Only for core's own tests: the editor's grammars are plugins' (`plugins/*/grammars.txt`).
 tree-sitter-rust = "0.24"
-tree-sitter-toml-ng = "0.7"
-tree-sitter-typescript = "0.23"
-tree-sitter-yaml = "0.7"
 
 [profile.dev]
 debug = "line-tables-only"

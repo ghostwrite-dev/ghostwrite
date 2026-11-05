@@ -1,7 +1,7 @@
 {
   "name": "image",
   "version": "0.1.0",
-  "api": 1,
+  "api": 2,
   "code": "image.wasm",
   "pages": true,
   "only_pages": true,

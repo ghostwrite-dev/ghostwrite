@@ -6,8 +6,11 @@
 //! what it adds, and maybe code in WebAssembly and grammars, run by a [`Runtime`]
 //! and installed with [`install`]. It adds any of these, all optional:
 //!
-//! - languages ([`Language`]): files, highlighting, abbreviations, comments;
-//! - language servers ([`Spec`]), and the kinds of token they name;
+//! - languages ([`Language`]): files, grammars and highlighting, text objects,
+//!   abbreviations, comments, indentation;
+//! - grammars on their own ([`Grammar`]), for what's inside a language;
+//! - language servers ([`Spec`]), what they start with and their settings, and
+//!   the kinds of token they name;
 //! - a [`Renderer`]: a file's pages, in a tab of their own (`:preview`);
 //! - a [`Panel`]: something beside a file, kept up to date from its server;
 //! - key bindings ([`Binding`]), for the files they're about;
@@ -22,6 +25,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock, RwLock};
 
 pub use ghostwrite_core::Language;
+use ghostwrite_core::syntax::Grammar;
 use ghostwrite_lsp::registry::Spec;
 pub use ghostwrite_page::{Bitmap, Renderer};
 use serde_json::Value;
@@ -122,6 +126,11 @@ pub trait Plugin: Send + Sync {
         vec![]
     }
 
+    /// Grammars that aren't a language's, for what's inside one (a markup language's inline text, say).
+    fn grammars(&self) -> Vec<&'static Grammar> {
+        vec![]
+    }
+
     fn servers(&self) -> Vec<&'static Spec> {
         vec![]
     }
@@ -194,11 +203,8 @@ pub trait Runtime: Send + Sync {
     /// The code at `path`, ready to be asked (it's loaded when it's first needed),
     /// with what its manifest says it may have.
     fn code(&self, name: &str, path: &Path, access: &manifest::Access) -> Box<dyn Code>;
-    /// What highlights with the grammar `name` at `path` and the query `query`
-    /// (it's loaded when it's first needed).
-    fn grammar(&self, name: &str, path: &Path, query: &str) -> &'static ghostwrite_core::language::Highlighter;
-    /// Whether that grammar can be used, or what's wrong with it.
-    fn check_grammar(&self, name: &str, path: &Path, query: &str) -> Result<(), String>;
+    /// What loads the grammar `name` at `path`, and parses with it.
+    fn grammar(&self, name: &str, path: &Path) -> Box<dyn ghostwrite_core::syntax::Load>;
 }
 
 /// A plugin's code, as a [`Runtime`] runs it.
@@ -211,6 +217,27 @@ pub trait Code: Send + Sync {
     fn renderer(&self, root: &Path, path: &Path) -> Result<Box<dyn Renderer>, String>;
     /// What it colors in `text`, in order, and each's scope; nothing if it can't.
     fn highlight(&self, text: &str) -> Vec<(Range<usize>, String)>;
+    /// What its language server `server` starts with, in the project at `project`, started
+    /// in `root`: variables over `env` (what it would have), of which it's shown what its
+    /// access lists.
+    fn server_env(&self, server: &str, project: &Path, root: &Path, env: &[(String, String)]) -> Result<Vec<(String, String)>, String>;
+    /// Its answer to `server`'s `workspace/configuration` for `section`.
+    fn server_settings(&self, server: &str, project: &Path, root: &Path, env: &[(String, String)], section: &str) -> Result<Value, String>;
+    /// Its panel beside a file of `language`, before anything's been asked.
+    fn panel_open(&self, language: &str) -> Result<Shown, String>;
+    /// The panel kept as `state`, with the server's answers to its requests.
+    fn panel_answered(&self, state: &str, answers: &[Option<Value>]) -> Result<Shown, String>;
+    /// The panel kept as `state`, after a notification of its server's; and whether to ask again.
+    fn panel_notification(&self, state: &str, method: &str, params: &Value) -> Result<(Shown, bool), String>;
+}
+
+/// A panel as a plugin's code says it is: what it shows, and what it keeps about its
+/// file (`state`, the code's own), which is held here and handed back with the next call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Shown {
+    pub state: String,
+    pub blocks: Vec<Block>,
+    pub working_on: Option<u32>,
 }
 
 /// What runs plugins' code and grammars from now on (only the first call counts).
@@ -235,6 +262,7 @@ pub fn install(plugins: impl FnOnce() -> Vec<Box<dyn Plugin>>) {
 pub fn add(plugin: Box<dyn Plugin>) {
     let plugin: &'static dyn Plugin = Box::leak(plugin);
     plugin.languages().into_iter().for_each(Language::register);
+    plugin.grammars().into_iter().for_each(Grammar::register);
     plugin.servers().into_iter().for_each(ghostwrite_lsp::registry::register);
     plugin.tokens().iter().for_each(|(token, scope)| ghostwrite_lsp::convert::register_token(token, scope));
     PLUGINS.write().unwrap_or_else(|e| e.into_inner()).push(plugin);
@@ -248,6 +276,7 @@ pub fn remove(name: &str) {
         let keep = plugin.name() != name;
         if !keep {
             plugin.languages().into_iter().for_each(Language::unregister);
+            plugin.grammars().into_iter().for_each(Grammar::unregister);
             plugin.servers().into_iter().for_each(ghostwrite_lsp::registry::unregister);
         }
         keep

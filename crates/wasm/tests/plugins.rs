@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use ghostwrite_core::Language;
 use ghostwrite_plugin::manifest::Manifest;
-use ghostwrite_plugin::{Action, Context, Event, Plugin as _, install};
+use ghostwrite_plugin::{Action, Block, Context, Event, Plugin as _, install};
 
 /// The folder of the crate at `path`, relative to this one, with its `.wasm` built.
 fn built(crate_path: &str, wasm: &str) -> Option<PathBuf> {
@@ -48,13 +48,18 @@ fn example() -> Option<PathBuf> {
 
 const COMMANDS: &[&str] = &["calls", "spin", "panic", "hoard", "read", "write", "list", "environment", "connect", "nothing"];
 
-/// The plugin that misbehaves.
-fn misbehaving() -> Option<Manifest> {
+/// The folder of the plugin that misbehaves.
+fn misbehaving_folder() -> Option<PathBuf> {
     start();
     static BUILT: OnceLock<Option<PathBuf>> = OnceLock::new();
-    let folder = BUILT.get_or_init(|| built("tests/fixture", "misbehaving.wasm")).clone()?;
+    BUILT.get_or_init(|| built("tests/fixture", "misbehaving.wasm")).clone()
+}
+
+/// The plugin that misbehaves.
+fn misbehaving() -> Option<Manifest> {
+    let folder = misbehaving_folder()?;
     let commands: Vec<String> = COMMANDS.iter().map(|name| format!(r#"{{ "name": "{name}" }}"#)).collect();
-    let json = format!(r#"{{ "name": "misbehaving", "api": 1, "code": "misbehaving.wasm", "commands": [{}] }}"#, commands.join(","));
+    let json = format!(r#"{{ "name": "misbehaving", "api": 2, "code": "misbehaving.wasm", "commands": [{}] }}"#, commands.join(","));
     Some(Manifest::parse_in(&json, Some(&folder)).unwrap())
 }
 
@@ -139,6 +144,50 @@ fn a_plugin_that_runs_away_is_stopped_and_starts_afresh() {
 }
 
 #[test]
+fn its_code_says_what_its_servers_start_with_and_sees_only_what_its_given() {
+    let folder = needs_the_target!(misbehaving_folder());
+    let json = r#"{ "name": "configuring", "api": 2, "code": "misbehaving.wasm",
+        "servers": [{ "name": "configured", "command": ["configured-ls"], "roots": ["marker.toml"], "configured_by_code": true },
+                    { "name": "plain", "command": ["plain-ls", "--stdio"] }],
+        "access": { "project": true, "env": ["PATH", "SHOWN"] } }"#;
+    let plugin = Manifest::parse_in(json, Some(&folder)).unwrap();
+    let [configured, plain] = plugin.servers()[..] else { panic!("two servers") };
+    assert_eq!((configured.command, configured.roots), (&["configured-ls"][..], &["marker.toml"][..]));
+    assert!(plain.env.is_none() && plain.settings.is_none(), "one the code doesn't configure isn't asked");
+    assert!(plugin.describe().contains("reads $PATH, $SHOWN as its servers have them"), "{}", plugin.describe());
+
+    let project = ghostwrite_project::scratch_dir("configured-project");
+    std::fs::write(project.join("a.txt"), "").unwrap();
+    let tools = ghostwrite_project::scratch_dir("tools");
+    std::fs::write(tools.join("tool"), "").unwrap();
+    let env: Vec<(String, String)> =
+        [("PATH", tools.display().to_string()), ("SHOWN", "yes".into()), ("SECRET", "no".into())].map(|(k, v)| (k.to_string(), v)).to_vec();
+    let root = project.join("sub");
+    let seen: std::collections::HashMap<String, String> = (configured.env.unwrap())(&project, &root, &env).into_iter().collect();
+    assert_eq!(seen["SHOWN"], "yes");
+    assert!(!seen.contains_key("SECRET"), "only what its access lists: {seen:?}");
+    assert_eq!(
+        (seen["server"].as_str(), seen["project"].clone(), seen["root"].clone()),
+        ("configured", project.display().to_string(), root.display().to_string())
+    );
+    assert_eq!(seen["listed"], "1", "the project, mounted");
+    assert_eq!(seen["which"], tools.join("tool").display().to_string(), "a program on the PATH it was given");
+    assert_eq!(seen["elsewhere"], "", "by its name, not a path");
+
+    let settings = configured.settings.unwrap();
+    assert_eq!(settings(&project, &project, &env, "x"), serde_json::json!({ "server": "configured", "section": "x" }));
+    assert_eq!(settings(&project, &project, &env, "broken"), serde_json::Value::Null, "what isn't JSON is no settings");
+
+    // Asking for nothing, it's shown nothing.
+    let json = r#"{ "name": "unconfigured", "api": 2, "code": "misbehaving.wasm",
+        "servers": [{ "name": "configured", "command": ["configured-ls"], "configured_by_code": true }] }"#;
+    let plugin = Manifest::parse_in(json, Some(&folder)).unwrap();
+    let seen: std::collections::HashMap<String, String> = (plugin.servers()[0].env.unwrap())(&project, &project, &env).into_iter().collect();
+    assert!(!seen.contains_key("PATH") && !seen.contains_key("SHOWN"), "{seen:?}");
+    assert_eq!((seen["listed"].as_str(), seen["which"].as_str()), ("nothing", ""));
+}
+
+#[test]
 fn a_grammar_highlights_its_files() {
     start();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixture");
@@ -146,7 +195,7 @@ fn a_grammar_highlights_its_files() {
     for file in ["grammar.wasm", "highlights.scm"] {
         std::fs::copy(fixture.join(file), folder.join(file)).unwrap();
     }
-    let json = r#"{ "name": "grammar-test", "api": 1, "extensions": ["grammartest"],
+    let json = r#"{ "name": "grammar-test", "api": 2, "extensions": ["grammartest"],
         "grammar": { "name": "json", "wasm": "grammar.wasm", "query": "highlights.scm" } }"#;
     std::fs::write(folder.join("plugin.json"), json).unwrap();
     let plugin = Manifest::in_own_folder(&folder).unwrap();
@@ -163,4 +212,44 @@ fn a_grammar_highlights_its_files() {
     std::fs::write(folder.join("highlights.scm"), "(number) @number").unwrap();
     std::fs::write(folder.join("grammar.wasm"), "not webassembly").unwrap();
     assert!(Manifest::in_own_folder(&folder).unwrap().check().is_err(), "so is what isn't a grammar");
+}
+
+#[test]
+fn its_code_says_whats_in_a_panel_beside_its_files_and_the_editor_keeps_its_state() {
+    let folder = needs_the_target!(misbehaving_folder());
+    let json = r#"{ "name": "panelled", "api": 2, "code": "misbehaving.wasm", "extensions": ["panelled"],
+        "panel": { "title": "Told", "requests": ["$/first", "$/second"], "notifications": ["$/progress"] } }"#;
+    let plugin = Manifest::parse_in(json, Some(&folder)).unwrap();
+    let language = plugin.languages()[0];
+    assert!(plugin.panel(&Language::DEFAULT).is_none(), "only beside its own files");
+    assert!(plugin.describe().contains("shows Told beside its files"), "{}", plugin.describe());
+    let mut panel = plugin.panel(language).expect("a panel");
+    assert_eq!((panel.title(), panel.requests()), ("Told", &["$/first", "$/second"][..]));
+    assert_eq!(panel.blocks(), [Block::Muted("nothing yet, in panelled".into())], "before anything's asked");
+
+    panel.answered(vec![Some(serde_json::json!({ "goal": 1 })), None]);
+    let code = |text: &str| Block::Code { text: text.into(), stands_out: Some('⊢') };
+    assert_eq!(panel.blocks(), [Block::Heading("told 1".into()), code("{\"goal\":1}\nnone"), Block::Good("ok".into())], "the answers, as JSON");
+    panel.answered(vec![None, Some(serde_json::json!("x"))]);
+    assert_eq!(panel.blocks()[0], Block::Heading("told 2".into()), "what it keeps is handed back");
+
+    // Only the notifications it hears of reach it.
+    assert!(!panel.notification("$/elsewhere", &serde_json::json!({})));
+    assert_eq!(panel.blocks()[0], Block::Heading("told 2".into()));
+    assert!(!panel.notification("$/progress", &serde_json::json!({ "line": 3 })), "still going");
+    assert_eq!((panel.working_on(), panel.blocks()), (Some(3), vec![Block::Muted("$/progress".into())]));
+    assert!(panel.notification("$/progress", &serde_json::json!({})), "done: ask again");
+    assert_eq!(panel.working_on(), None);
+
+    // When it fails, it says so, and starts afresh with what it kept.
+    panel.answered(vec![Some(serde_json::json!("panic"))]);
+    let [Block::Muted(why)] = &panel.blocks()[..] else { panic!("{:?}", panel.blocks()) };
+    assert!(why.starts_with("Told: it failed"), "{why}");
+    panel.answered(vec![None]);
+    assert_eq!(panel.blocks()[0], Block::Heading("told 3".into()), "kept by the editor, not the plugin");
+    assert!(plugin.panel(language).unwrap().blocks()[0] == Block::Muted("nothing yet, in panelled".into()), "and each file has its own");
+
+    let wrong = |json: &str| Manifest::parse_in(json, Some(&folder)).err().unwrap_or_default();
+    assert!(wrong(r#"{ "name": "a", "extensions": ["a"], "panel": {} }"#).contains("no `code`"));
+    assert!(wrong(r#"{ "name": "a", "api": 2, "code": "misbehaving.wasm", "panel": {} }"#).contains("it has none"));
 }

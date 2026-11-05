@@ -1,0 +1,10 @@
+{
+  "name": "bash",
+  "version": "0.1.0",
+  "api": 2,
+  "id": "shellscript",
+  "extensions": ["sh", "bash", "zsh"],
+  "files": [".bashrc", ".zshrc", ".profile"],
+  "comment": "#",
+  "grammar": { "name": "bash", "wasm": "tree-sitter-bash.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" }
+}

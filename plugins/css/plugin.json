@@ -1,0 +1,7 @@
+{
+  "name": "css",
+  "version": "0.1.0",
+  "api": 2,
+  "extensions": ["css"],
+  "grammar": { "name": "css", "wasm": "tree-sitter-css.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" }
+}

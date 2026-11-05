@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::ops::Range as Bytes;
 
-use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator as _, Tree};
+use tree_sitter::{Node, Query, QueryCursor, StreamingIterator as _, Tree};
 
 use crate::language::Language;
 use crate::next_char;
@@ -17,7 +17,7 @@ use crate::selection::Range;
 
 thread_local! {
     /// The last tree parsed: its language, the text it's of, and the tree.
-    static PARSED: RefCell<Option<(&'static str, String, Tree)>> = const { RefCell::new(None) };
+    static PARSED: RefCell<Option<(&'static Language, String, Tree)>> = const { RefCell::new(None) };
 }
 
 /// `text`'s syntax tree, if `language` has a grammar.
@@ -25,16 +25,14 @@ pub fn tree(language: &'static Language, text: &str) -> Option<Tree> {
     let grammar = language.grammar?;
     PARSED.with(|parsed| {
         let mut parsed = parsed.borrow_mut();
-        if let Some((name, was, tree)) = parsed.as_ref()
-            && *name == language.name
+        if let Some((was_of, was, tree)) = parsed.as_ref()
+            && std::ptr::eq(*was_of, language)
             && was == text
         {
             return Some(tree.clone());
         }
-        let mut parser = Parser::new();
-        parser.set_language(&grammar()).ok()?;
-        let tree = parser.parse(text, None)?;
-        *parsed = Some((language.name, text.to_string(), tree.clone()));
+        let tree = grammar.parse(text)?;
+        *parsed = Some((language, text.to_string(), tree.clone()));
         Some(tree)
     })
 }
@@ -176,22 +174,9 @@ fn captured(language: &'static Language, tree: &Tree, text: &str, names: &[Strin
     found
 }
 
-/// The language's text-object query, compiled once.
+/// The language's text-object query.
 fn query(language: &'static Language) -> Option<&'static Query> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static COMPILED: OnceLock<Mutex<HashMap<&'static str, Option<&'static Query>>>> = OnceLock::new();
-    if language.textobjects.is_empty() {
-        return None;
-    }
-    let grammar = language.grammar?;
-    let mut compiled = COMPILED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-    *compiled.entry(language.name).or_insert_with(|| {
-        Query::new(&grammar(), language.textobjects)
-            .inspect_err(|e| eprintln!("the {} text-object query doesn't load: {e}", language.name))
-            .ok()
-            .map(|query| &*Box::leak(Box::new(query)))
-    })
+    language.grammar?.textobjects()
 }
 
 /// `mi`/`ma` with a syntax object (`f` function, `t` type, `a` argument, `c` comment,
@@ -236,6 +221,7 @@ mod tests {
     use super::*;
 
     fn rust() -> &'static Language {
+        crate::language::testing::install();
         Language::for_path(std::path::Path::new("a.rs")).unwrap()
     }
 
@@ -302,12 +288,8 @@ mod tests {
     }
 
     #[test]
-    fn every_languages_query_loads() {
-        for language in Language::all() {
-            if language.grammar.is_some() && !language.textobjects.is_empty() {
-                assert!(query(language).is_some(), "{}'s text objects", language.name);
-            }
-        }
+    fn the_text_object_query_loads() {
+        assert!(query(rust()).is_some());
     }
 
     #[test]

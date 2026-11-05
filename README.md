@@ -21,7 +21,7 @@ scripts/install-windows.ps1     # Windows: installs for this user, with a Start 
 ```
 
 Building needs Rust; on macOS the Metal toolchain, on Linux the packages named at the top of
-its script, and on Windows the MSVC toolchain. `--no-default-features --features lean,wasm-plugins`
+its script, and on Windows the MSVC toolchain. `--no-default-features --features wasm-plugins`
 builds without local models, and without needing `cmake` and a C++ compiler for llama.cpp.
 
 **How far each system has come.** macOS is what it's used on every day. Windows and Linux
@@ -86,7 +86,7 @@ bracket matching the one at the cursor is marked.
 | `f` `t` `F` `T`, `alt-.` | find a char, over lines too (Enter: a line's end, Tab: a tab); `alt-.` finds again (`mi`, `]p` too) |
 | `]p` `[p`, `] space` `[ space`, `g.` | the next and previous paragraph; blank lines below and above; where the last change was |
 | `alt-o` `alt-i`, `alt-n` `alt-p`, `alt-a` `alt-I`, `alt-e` `alt-b` | by the syntax tree, as in helix: out to the node around the selection and back in; the next and previous node beside it; a cursor on each node beside it, or inside it; to the end or start of the node it's in |
-| `maf` `mif`, `]f` `[f` | a function, all of it or inside; the next and previous one. Likewise `t` a type, `a` an argument, `c` a comment, `T` a test, `e` an entry, from helix's queries (in `crates/core/queries`) |
+| `maf` `mif`, `]f` `[f` | a function, all of it or inside; the next and previous one. Likewise `t` a type, `a` an argument, `c` a comment, `T` a test, `e` an entry, from helix's queries (each language's `textobjects.scm`, in `plugins/`) |
 | `space /`, `:grep` | search the project and go through the matches |
 | `space k`, `space d` | docs for what's under the cursor; go through the file's diagnostics, one note at a time |
 | `gr`, `space r`, `space .`, `space s` | the language server: go through the references, rename everywhere, its code actions here, pick one of the file's symbols |
@@ -132,7 +132,7 @@ and `⌘⌥←` and `⌘⌥→` (or dragging) move them. The model reads the one
 `<tool>` blocks, which Ghostwrite runs in the background.
 
 `:preview` (or `space v`) opens a Typst file's pages in a tab of their own, as a PDF has, compiled
-as you type, saved or not, and goes back to the file from there. Typst is built in:
+as you type, saved or not, and goes back to the file from there. Typst comes as a plugin:
 the project's files and fonts are used as they are, and packages come from
 Typst's cache, downloaded the first time. The cursor and the selection show
 on the pages too, on the glyphs they're on, and clicking a glyph puts the
@@ -148,10 +148,10 @@ Colors come from the grammar, and from the language server over them where
 it has its own (semantic tokens): it knows what each name is, a local, a
 type, a constant. While you type, its last colors stay, moved past the
 edit, until it sends new ones. Lean has no grammar that parses it well (its
-syntax grows with every `notation`), so it's colored by its tokens until
+syntax grows with every `notation`), so its plugin colors it by its tokens until
 Lean's own colors arrive.
 
-A Lean file shows its goals beside it, as Lean's infoview does: the proof
+A Lean file shows its goals beside it (`plugins/lean`), as Lean's infoview does: the proof
 state at the cursor (or the type expected there), the messages on the
 cursor's line (`#eval`'s output among them), and how far Lean has got
 checking the file (`:preview` hides them too). Lean runs through `lake
@@ -205,27 +205,26 @@ and nothing below `app` knows about the UI.
 
 | Crate | What's in it |
 | --- | --- |
-| `core` | text, selections, motions, text objects, the modal keymap, the languages (what's particular about each), syntax, abbreviations |
+| `core` | text, selections, motions, text objects, the modal keymap, what a language can be (plain text, built in, is none), syntax over any grammar (highlights, text objects, the tree), abbreviations |
 | `project` | files, search, the file tree model, shell runs and their stops, watching the disk, saved state |
 | `terminal` | the user's shell on a pseudo-terminal, emulated by alacritty: its screen, to draw and to read |
 | `page` | what a document's pages are, whoever lays them out: their sizes, and pages drawn |
-| `lsp` | the language-server client |
+| `lsp` | the language-server client, and starting the servers plugins add |
 | `plugin` | what a plugin can add, the plugins there are, and installing them |
 | `plugin-api` | what a plugin written in Rust compiles against, and the interface itself |
-| `wasm` | runs plugins compiled to WebAssembly, sandboxed, and their grammars |
-| `lean` | a plugin: Lean's language, `lake serve`, its abbreviations, and its goals beside a file |
+| `wasm` | runs plugins compiled to WebAssembly, sandboxed, and the grammars they bring |
 | `model` | a local model: llama.cpp, in a process of its own, and the memory it may use |
 | `ai` | the model: the reply format, prompts, backends, the review story, placing steps, its notes kept per project |
 | `view` | the editor's state, without drawing: documents, tabs, the project, search, registers, jumps, `:` commands, and the story under review |
 | `app` | the application (binary `ghostwrite`) |
 
-The editor knows no file type in particular. What's particular to one is a plugin:
-a crate implementing `ghostwrite_plugin::Plugin`, which can add languages, language
-servers, a `Renderer` (a file's pages in a tab), a `Panel` (something beside a file,
-from its server), key bindings (a key sequence running a `:`
-command, shown under "Plugin keys" in `space ?`), and rules for the prompt.
-`crates/app/src/plugins.rs` is the one place that lists them, each behind a cargo
-feature, and a test keeps every other crate from naming them.
+The editor knows no file type in particular: built in, a file is plain text. What's
+particular to one is a plugin, every language included: a folder in `plugins/` (see
+Plugins, below), which can add languages, language servers, a file's pages in a tab,
+a panel beside a file (from its server), key bindings (a key sequence running a `:`
+command, shown under "Plugin keys" in `space ?`), and rules for the prompt. None is
+built in: `crates/app/src/plugins.rs` finds them in their folders, and a test keeps
+every crate from naming them, or any language, and the build from building one in.
 
 Each module starts with a comment saying what it is; `crates/app/src/editor/mod.rs`
 is the way in to the editor.
@@ -274,10 +273,30 @@ and starts afresh next time. Installing says all it asks for. That doesn't cover
 a plugin names: that's a program that runs as you do, which is why installing says what it
 starts. Nor is a grammar stopped if it runs away: it can only hold up coloring.
 
-Typst, PDFs and images come with the app as such plugins (`plugins/typst`, `plugins/pdf`, `plugins/image`). Typst reads the project and the system's
+Every language comes with the app as such a plugin, in `plugins/`: Rust, Python, JavaScript,
+JSX, TypeScript and TSX (`plugins/javascript`), Bash, TOML, Markdown, JSON, YAML, Go, C and C++
+(`plugins/c`), CSS, Lean, and Typst; so do PDFs and images (`plugins/pdf`, `plugins/image`). Built
+in, the editor has only plain text. Most of them are no code at all: a `plugin.json`, a tree-sitter
+grammar compiled to WebAssembly, and its queries. Python's has a little code too, which starts its
+servers in the project's virtualenv (`.venv` or `venv`, in the project, or `$VIRTUAL_ENV`) and tells
+them its interpreter, so it reads the project. Lean's code colors it by its tokens and says what
+its goals panel shows; its abbreviations are a table its `plugin.json` names, and it reaches
+nothing at all. Typst reads the project and the system's
 fonts, keeps Typst's packages in Typst's own folders, and downloads from packages.typst.org and
-nowhere else. `scripts/build-plugins.sh` builds it. The first time, it takes some seconds to
-compile and to read the fonts; after that it starts at once.
+nowhere else. The first time, it takes some seconds to compile and to read the fonts; after that
+it starts at once.
+
+`scripts/build-plugins.sh` builds them all into `target/bundled-plugins`, which the installers
+copy: each one's code, if it has any, and the grammars its `grammars.txt` lists, as each grammar's
+project publishes them for the version listed (the versions Ghostwrite's highlighting was made
+with). They're downloaded once, into `target/grammars`, and checked against their sha256. A
+grammar runs in WebAssembly a little slower than compiled in: a 10,000-line Rust file parses in
+about 40 ms rather than 26, and is colored (which is redone after each change) in about 62 ms
+rather than 47.
+The highlight queries are the grammars' own, unchanged. The text-object queries (`textobjects.scm`)
+are helix's (`runtime/queries/*/textobjects.scm` at https://github.com/helix-editor/helix), with
+the files each inherits from put in it, and as such are under the Mozilla Public License 2.0
+(https://mozilla.org/MPL/2.0/), unlike the rest of Ghostwrite.
 
 ### Writing one
 
@@ -307,7 +326,7 @@ register!(WordCount);
 ```
 
 ```json
-{ "name": "word-count", "version": "0.1.0", "api": 1, "code": "word_count.wasm",
+{ "name": "word-count", "version": "0.1.0", "api": 2, "code": "word_count.wasm",
   "commands": [{ "name": "word-count", "what": "count the words in the file" }],
   "events": ["saved"] }
 ```
@@ -324,20 +343,60 @@ open a file of the project. It can hear `opened`, `saved` and `closed`. The edit
 can't be replaced. `crates/plugin-api/wit/plugin.wit` is the whole interface, and `"api"` is its
 version: a plugin built for another version is refused, and says so.
 
-For highlighting, add a grammar and a query. A grammar is what `tree-sitter build --wasm` makes
-(tree-sitter 0.22 or later: older ones aren't read), and many projects publish theirs:
+### Adding a language
+
+A language is a plugin with no code: a folder with a `plugin.json`, a grammar and its queries. A
+grammar is what `tree-sitter build --wasm` makes (tree-sitter 0.22 or later: older ones aren't
+read), and many projects publish theirs with each release. `highlights.scm` says how it's colored,
+in the names helix or nvim-treesitter use (theirs work as they are), and `textobjects.scm` what
+`maf`, `]f` and the rest select (helix's, say):
 
 ```json
-{ "name": "json5", "api": 1, "extensions": ["json5"],
-  "grammar": { "name": "json5", "wasm": "json5.wasm", "query": "highlights.scm" } }
+{ "name": "zig", "api": 2, "extensions": ["zig", "zon"], "comment": "//",
+  "grammar": { "name": "zig", "wasm": "tree-sitter-zig.wasm", "query": "highlights.scm",
+               "textobjects": "textobjects.scm" },
+  "servers": [{ "name": "zls", "command": ["zls"], "roots": ["build.zig"] }] }
 ```
+
+Besides `extensions`, a language can have `files` (whole names: `Makefile`), an `id` (what servers
+call it, if not its name), `indent_after` (what a line ends with when the next goes in a level:
+brackets unless it says, `"{[(:"`), `pairs` and `unpaired`. Several languages can share a plugin,
+under `"languages": [...]`, each written the same way, and its servers serve them all unless one
+names its own (`"servers": ["clangd"]`); `plugins/javascript` and `plugins/c` do. A grammar's
+`"query"` can be several files, read in order, the last winning where two color the same thing;
+`"injections"` says what other languages are inside it, by name (a code block's), and
+`"grammars": [...]` are grammars only there to be injected (`plugins/markdown`'s inline text). A
+server is started in the folder nearest the file with one of its `roots`, else the project; with
+`"configured_by_code": true`, the plugin's code says what it starts with and its settings
+(`server_env` and `server_settings`, with `"access": { "project": true, "env": ["PATH"] }` to
+look in the project and see the server's PATH), as `plugins/python` does.
+
+To bundle it with the app, put the folder in `plugins/`, with a `grammars.txt` saying where its
+grammar is published and its sha256, instead of the `.wasm`: `scripts/build-plugins.sh` does the rest.
 
 A plugin can color files itself instead (`"highlights": true`), and make a file's pages for a tab
 of their own (`"pages": true`), as Typst's does. Pages are drawn by one call, `draw`, for any
 region of a page at any scale: the whole page is the region as big as it, and zoomed in the
 editor asks for the tiles on screen. `ghostwrite_page::check_regions` tests that a plugin's pieces
 meet as its whole pages do. Asking for more is under `"access"`, in
-`crates/plugin/src/manifest.rs`. A file type that isn't text says `"only_pages": true`, as PDFs do. Panels still take a crate built into the editor, as Lean's does.
+`crates/plugin/src/manifest.rs`. A file type that isn't text says `"only_pages": true`, as PDFs do.
+
+A panel beside a file is a plugin's too, as Lean's goals are. Its `plugin.json` says what to ask
+the file's server about the cursor, asked again as it moves or the text changes, and which of the
+server's notifications it hears of; its code (`panel_open`, `panel_answered` and
+`panel_notification`) says what to show of the answers, as headings, code, and lines good or muted,
+and what it keeps about each file, which the editor holds and hands back with the next call:
+
+```json
+{ "panel": { "title": "Lean", "requests": ["$/lean/plainGoal", "$/lean/plainTermGoal"],
+             "notifications": ["$/lean/fileProgress"] },
+  "abbreviations": "abbreviations.tsv",
+  "tokens": { "leanSorryLike": "constant.builtin" } }
+```
+
+`"abbreviations"` is a table of lines, an abbreviation, a tab and its symbol, so that a backslash
+types one (`\alpha` is `α`), with no code. `"tokens"` are the kinds of semantic token a plugin's
+servers name that the editor doesn't know, and the scope each is colored as.
 
 ## Two panes
 

@@ -1,20 +1,17 @@
-//! The languages Ghostwrite knows, one entry each: which files are in it,
-//! how it's highlighted (see [`syntax`](crate::syntax)), which language
-//! servers can serve it, and what's particular about editing it. Adding a
-//! language means adding an entry here, or a plugin registering one; nothing
-//! else asks a language's name.
+//! What's particular about a language: which files are in it, how it's
+//! highlighted (see [`syntax`](crate::syntax)), which language servers can
+//! serve it, and what's particular about editing it. The editor has none of
+//! its own: a file of none is plain text, and every language is a plugin's,
+//! registered as it's added. Nothing else asks a language's name.
 
 use std::path::Path;
 use std::sync::RwLock;
 
 use crate::abbreviation::Abbreviations;
-use crate::syntax::{Highlights, Span, highlights, with_injections};
+use crate::syntax::{Grammar, Span};
 
 /// Highlights a file by whatever means it has (a grammar a plugin brought, say).
 pub type Highlighter = dyn Fn(&str) -> Vec<Span> + Send + Sync;
-
-/// Spans of text and their scopes' names.
-pub type Lex = fn(&str) -> Vec<(std::ops::Range<usize>, &'static str)>;
 
 pub struct Language {
     /// What the status line and Claude call it.
@@ -26,10 +23,9 @@ pub struct Language {
     /// The language servers that can serve it, most preferred first, by
     /// their names in `ghostwrite_lsp`'s registry.
     pub servers: &'static [&'static str],
-    /// The grammar and its highlight query, compiled.
-    pub load: fn() -> Option<Highlights>,
-    /// Highlights without a grammar.
-    pub lex: Option<Lex>,
+    /// Its grammar, which highlights it and selects by its syntax tree (`alt-o`,
+    /// `maf`: see [`nodes`](crate::nodes)).
+    pub grammar: Option<&'static Grammar>,
     /// Highlights that aren't the editor's to work out.
     pub highlighter: Option<&'static Highlighter>,
     /// Its files aren't text: what shows is the pages a plugin makes of them.
@@ -44,17 +40,11 @@ pub struct Language {
     pub pairs: &'static [(char, char)],
     /// What starts a line comment (`ctrl-c`), if there's such a thing.
     pub comment: Option<&'static str>,
-    /// What a line ends with when the next one goes in a level (Python's `:`).
+    /// What a line ends with when the next one goes in a level (a `:`, in some).
     pub indent_after: &'static [char],
-    /// Its grammar, for selecting by the syntax tree (`alt-o`, `maf`): see
-    /// [`nodes`](crate::nodes). `None` where it's highlighted another way.
-    pub grammar: Option<fn() -> tree_sitter::Language>,
-    /// Its text objects (`maf`, `]f`): a query capturing `function.around`,
-    /// `parameter.inside` and the like, as helix names them.
-    pub textobjects: &'static str,
 }
 
-/// Languages plugins added.
+/// The languages there are: those plugins added.
 static REGISTERED: RwLock<Vec<&'static Language>> = RwLock::new(Vec::new());
 
 impl Language {
@@ -64,8 +54,7 @@ impl Language {
         extensions: &[],
         file_names: &[],
         servers: &[],
-        load: || None,
-        lex: None,
+        grammar: None,
         highlighter: None,
         only_pages: false,
         pages_at_own_size: false,
@@ -74,8 +63,6 @@ impl Language {
         pairs: &[],
         comment: None,
         indent_after: &['{', '[', '('],
-        grammar: None,
-        textobjects: "",
     };
 
     /// The language of `path`, by its name or extension.
@@ -97,7 +84,7 @@ impl Language {
 
     /// Every language.
     pub fn all() -> Vec<&'static Language> {
-        LANGUAGES.iter().chain(REGISTERED.read().unwrap_or_else(|e| e.into_inner()).iter().copied()).collect()
+        REGISTERED.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Its LSP language id.
@@ -123,178 +110,56 @@ impl std::fmt::Debug for Language {
     }
 }
 
-const TYPESCRIPT_SERVERS: &[&str] = &["typescript-language-server"];
+#[cfg(test)]
+pub(crate) mod testing {
+    //! Languages for core's own tests, as a plugin would add them: one with a
+    //! grammar compiled in, one with only its comments and indentation.
 
-pub static LANGUAGES: [Language; 15] = [
-    Language {
-        name: "rust",
-        comment: Some("//"),
-        extensions: &["rs"],
-        servers: &["rust-analyzer"],
-        // `'a`: a lifetime, or a char that's closed by hand.
-        unpaired: &['\''],
-        load: || highlights("rust", tree_sitter_rust::LANGUAGE, tree_sitter_rust::HIGHLIGHTS_QUERY),
-        grammar: Some(|| tree_sitter_rust::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/rust.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "python",
-        comment: Some("#"),
-        extensions: &["py", "pyi"],
-        servers: &["basedpyright", "pyright", "pylsp"],
-        indent_after: &['{', '[', '(', ':'],
-        load: || highlights("python", tree_sitter_python::LANGUAGE, tree_sitter_python::HIGHLIGHTS_QUERY),
-        grammar: Some(|| tree_sitter_python::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/python.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "javascript",
-        comment: Some("//"),
-        extensions: &["js", "mjs", "cjs"],
-        servers: TYPESCRIPT_SERVERS,
-        load: || highlights("javascript", tree_sitter_javascript::LANGUAGE, tree_sitter_javascript::HIGHLIGHT_QUERY),
-        grammar: Some(|| tree_sitter_javascript::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/javascript.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "jsx",
-        comment: Some("//"),
-        id: "javascriptreact",
-        extensions: &["jsx"],
-        servers: TYPESCRIPT_SERVERS,
-        load: || {
-            let query = [tree_sitter_javascript::JSX_HIGHLIGHT_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY].join("\n");
-            highlights("jsx", tree_sitter_javascript::LANGUAGE, &query)
-        },
-        grammar: Some(|| tree_sitter_javascript::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/jsx.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "typescript",
-        comment: Some("//"),
-        extensions: &["ts", "mts", "cts"],
-        servers: TYPESCRIPT_SERVERS,
-        load: || {
-            let query = [tree_sitter_typescript::HIGHLIGHTS_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY].join("\n");
-            highlights("typescript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT, &query)
-        },
-        grammar: Some(|| tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        textobjects: include_str!("../queries/textobjects/typescript.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "tsx",
-        comment: Some("//"),
-        id: "typescriptreact",
-        extensions: &["tsx"],
-        servers: TYPESCRIPT_SERVERS,
-        load: || {
-            let query =
-                [tree_sitter_typescript::HIGHLIGHTS_QUERY, tree_sitter_javascript::JSX_HIGHLIGHT_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY].join("\n");
-            highlights("tsx", tree_sitter_typescript::LANGUAGE_TSX, &query)
-        },
-        grammar: Some(|| tree_sitter_typescript::LANGUAGE_TSX.into()),
-        textobjects: include_str!("../queries/textobjects/tsx.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "bash",
-        comment: Some("#"),
-        id: "shellscript",
-        extensions: &["sh", "bash", "zsh"],
-        file_names: &[".bashrc", ".zshrc", ".profile"],
-        load: || highlights("bash", tree_sitter_bash::LANGUAGE, tree_sitter_bash::HIGHLIGHT_QUERY),
-        grammar: Some(|| tree_sitter_bash::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/bash.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "toml",
-        comment: Some("#"),
-        extensions: &["toml"],
-        file_names: &["Cargo.lock"],
-        load: || highlights("toml", tree_sitter_toml_ng::LANGUAGE, tree_sitter_toml_ng::HIGHLIGHTS_QUERY),
-        grammar: Some(|| tree_sitter_toml_ng::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/toml.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "markdown",
-        extensions: &["md", "markdown"],
-        load: || {
-            // Inline text is a node with children (its words): the injection takes them all in.
-            let injections = tree_sitter_md::INJECTION_QUERY_BLOCK.replace(
-                r#"(#set! injection.language "markdown_inline")"#,
-                r#"(#set! injection.language "markdown_inline") (#set! injection.include-children)"#,
-            );
-            with_injections("markdown", tree_sitter_md::LANGUAGE, tree_sitter_md::HIGHLIGHT_QUERY_BLOCK, &injections)
-        },
-        grammar: Some(|| tree_sitter_md::LANGUAGE.into()),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "json",
-        extensions: &["json"],
-        load: || highlights("json", tree_sitter_json::LANGUAGE, tree_sitter_json::HIGHLIGHTS_QUERY),
-        grammar: Some(|| tree_sitter_json::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/json.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "yaml",
-        comment: Some("#"),
-        extensions: &["yaml", "yml"],
-        load: || highlights("yaml", tree_sitter_yaml::LANGUAGE, tree_sitter_yaml::HIGHLIGHTS_QUERY),
-        grammar: Some(|| tree_sitter_yaml::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/yaml.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "go",
-        comment: Some("//"),
-        extensions: &["go"],
-        servers: &["gopls"],
-        load: || highlights("go", tree_sitter_go::LANGUAGE, tree_sitter_go::HIGHLIGHTS_QUERY),
-        grammar: Some(|| tree_sitter_go::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/go.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "c",
-        comment: Some("//"),
-        extensions: &["c", "h"],
-        servers: &["clangd"],
-        load: || highlights("c", tree_sitter_c::LANGUAGE, tree_sitter_c::HIGHLIGHT_QUERY),
-        grammar: Some(|| tree_sitter_c::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/c.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "cpp",
-        comment: Some("//"),
-        extensions: &["cc", "cpp", "cxx", "hpp", "hh", "hxx"],
-        servers: &["clangd"],
-        load: || {
-            let query = [tree_sitter_cpp::HIGHLIGHT_QUERY, tree_sitter_c::HIGHLIGHT_QUERY].join("\n");
-            highlights("cpp", tree_sitter_cpp::LANGUAGE, &query)
-        },
-        grammar: Some(|| tree_sitter_cpp::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/cpp.scm"),
-        ..Language::DEFAULT
-    },
-    Language {
-        name: "css",
-        extensions: &["css"],
-        load: || highlights("css", tree_sitter_css::LANGUAGE, tree_sitter_css::HIGHLIGHTS_QUERY),
-        grammar: Some(|| tree_sitter_css::LANGUAGE.into()),
-        textobjects: include_str!("../queries/textobjects/css.scm"),
-        ..Language::DEFAULT
-    },
-];
+    use super::*;
+    use crate::syntax::Load;
+
+    struct CompiledIn(tree_sitter::Language);
+
+    impl Load for CompiledIn {
+        fn language(&self) -> Result<tree_sitter::Language, String> {
+            Ok(self.0.clone())
+        }
+
+        fn parser(&self) -> Result<tree_sitter::Parser, String> {
+            Ok(tree_sitter::Parser::new())
+        }
+    }
+
+    /// A grammar compiled in, with its highlights and these text objects and injections.
+    pub fn grammar(name: &str, language: tree_sitter::Language, highlights: &str, injections: &str, textobjects: &str) -> &'static Grammar {
+        Box::leak(Box::new(Grammar::new(name, Box::new(CompiledIn(language)), highlights, injections, textobjects)))
+    }
+
+    /// `.rs` files, as the bundled plugin has them; `.py` files, without a grammar.
+    pub fn install() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let textobjects = include_str!("../../../plugins/rust/textobjects.scm");
+            let rust = grammar("rust", tree_sitter_rust::LANGUAGE.into(), tree_sitter_rust::HIGHLIGHTS_QUERY, "", textobjects);
+            Language::register(Box::leak(Box::new(Language {
+                name: "rust",
+                comment: Some("//"),
+                extensions: &["rs"],
+                unpaired: &['\''],
+                grammar: Some(rust),
+                ..Language::DEFAULT
+            })));
+            Language::register(Box::leak(Box::new(Language {
+                name: "python",
+                comment: Some("#"),
+                extensions: &["py"],
+                file_names: &["SConstruct"],
+                indent_after: &['{', '[', '(', ':'],
+                ..Language::DEFAULT
+            })));
+        });
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -302,15 +167,16 @@ mod tests {
 
     #[test]
     fn finds_languages_by_name_and_extension() {
+        testing::install();
         let id = |path: &str| Language::for_path(Path::new(path)).map(Language::id);
         assert_eq!(id("src/main.rs"), Some("rust"));
-        assert_eq!(id("App.tsx"), Some("typescriptreact"));
-        assert_eq!(id("Cargo.lock"), Some("toml"));
+        assert_eq!(id("SConstruct"), Some("python"));
         assert_eq!(id("notes.txt"), None);
     }
 
     #[test]
     fn comment_leaders_are_as_written() {
+        testing::install();
         let rust = Language::for_path(Path::new("a.rs")).unwrap();
         assert_eq!(rust.comment_leader("    // x"), Some("//"));
         assert_eq!(rust.comment_leader("/// docs"), Some("///"));
@@ -318,5 +184,23 @@ mod tests {
         assert_eq!(rust.comment_leader("let x; // y"), None);
         let python = Language::for_path(Path::new("a.py")).unwrap();
         assert_eq!(python.comment_leader("## x"), Some("#"));
+    }
+
+    #[test]
+    fn a_grammar_there_only_to_be_injected_is_found_by_its_name() {
+        // Comments that are code, colored as such by a grammar registered on its own.
+        let inner = testing::grammar("in-comments", tree_sitter_rust::LANGUAGE.into(), tree_sitter_rust::HIGHLIGHTS_QUERY, "", "");
+        Grammar::register(inner);
+        let injections = r#"((line_comment) @injection.content (#set! injection.language "in-comments"))"#;
+        let outer = testing::grammar("outer", tree_sitter_rust::LANGUAGE.into(), "", injections, "");
+        static OUTER: std::sync::OnceLock<Language> = std::sync::OnceLock::new();
+        let language = OUTER.get_or_init(|| Language { name: "outer", grammar: Some(outer), ..Language::DEFAULT });
+        let text = "let a = 1; // fn b() {}\n";
+        let keyword = crate::syntax::scope_named("keyword");
+        let spans = language.highlight(text);
+        assert!(spans.iter().any(|s| &text[s.range.clone()] == "fn" && Some(s.scope) == keyword), "{spans:?}");
+        assert!(!spans.iter().any(|s| &text[s.range.clone()] == "let"), "only what's injected is colored: {spans:?}");
+        Grammar::unregister(inner);
+        assert!(language.highlight(text).is_empty(), "and once it's gone, nothing is");
     }
 }

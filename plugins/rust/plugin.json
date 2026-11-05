@@ -1,0 +1,10 @@
+{
+  "name": "rust",
+  "version": "0.1.0",
+  "api": 2,
+  "extensions": ["rs"],
+  "comment": "//",
+  "unpaired": ["'"],
+  "grammar": { "name": "rust", "wasm": "tree-sitter-rust.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" },
+  "servers": [{ "name": "rust-analyzer", "command": ["rust-analyzer"] }]
+}

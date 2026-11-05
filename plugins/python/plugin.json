@@ -1,0 +1,16 @@
+{
+  "name": "python",
+  "version": "0.1.0",
+  "api": 2,
+  "code": "python.wasm",
+  "extensions": ["py", "pyi"],
+  "comment": "#",
+  "indent_after": "{[(:",
+  "grammar": { "name": "python", "wasm": "tree-sitter-python.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" },
+  "servers": [
+    { "name": "basedpyright", "command": ["basedpyright-langserver", "--stdio"], "configured_by_code": true },
+    { "name": "pyright", "command": ["pyright-langserver", "--stdio"], "configured_by_code": true },
+    { "name": "pylsp", "command": ["pylsp"], "configured_by_code": true }
+  ],
+  "access": { "project": true, "env": ["PATH", "VIRTUAL_ENV"] }
+}

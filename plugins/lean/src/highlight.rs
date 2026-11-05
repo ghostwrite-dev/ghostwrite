@@ -169,34 +169,3 @@ fn name_end(text: &str, at: usize) -> usize {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn scope_of<'a>(spans: &[(Range<usize>, &'a str)], text: &str, word: &str) -> Option<&'a str> {
-        let at = text.find(word).unwrap();
-        spans.iter().find(|(r, _)| r.contains(&at)).map(|(_, s)| *s)
-    }
-
-    #[test]
-    fn lexes_lean() {
-        let text = "/-- doc -/\ntheorem add_zero' (n : Nat) : n + 0 = n := by\n  simp -- done\n#eval s!\"{1}\" ++ 'x'.toString\n@[simp] def f := ∀ x, x = 0x1F";
-        let spans = highlight(text);
-        let at = |word| scope_of(&spans, text, word);
-        assert_eq!(at("doc"), Some("comment.doc"));
-        assert_eq!(at("theorem"), Some("keyword"));
-        assert_eq!(at("add_zero'"), Some("function"));
-        assert_eq!(at("Nat"), Some("type"));
-        assert_eq!(at("simp"), Some("function.builtin"));
-        assert_eq!(at("done"), Some("comment"));
-        assert_eq!(at("#eval"), Some("keyword"));
-        assert_eq!(at("{1}"), Some("string"));
-        assert_eq!(at("'x'"), Some("string.special"));
-        assert_eq!(at("@[simp]"), Some("attribute"));
-        assert_eq!(at("∀"), Some("keyword"));
-        assert_eq!(at("0x1F"), Some("number"));
-        assert_eq!(at(":="), Some("operator"));
-        assert_eq!(scope_of(&spans, text, "n :"), None, "a variable's just text");
-    }
-}

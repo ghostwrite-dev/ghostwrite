@@ -34,8 +34,8 @@ pub mod bindings {
     });
 }
 
-pub use bindings::ghostwrite::plugin::host::fetch;
-pub use bindings::ghostwrite::plugin::types::{Action, Context, Drawing, Edit, Event, Glyph, Page, Region, Span};
+pub use bindings::ghostwrite::plugin::host::{fetch, which};
+pub use bindings::ghostwrite::plugin::types::{Action, Block, CodeBlock, Context, Drawing, Edit, Event, Glyph, Page, Panel, Region, Span};
 
 /// What a plugin answers: what to do, or what went wrong, for the status bar.
 pub type Reply = Result<Vec<Action>, String>;
@@ -74,6 +74,39 @@ pub trait Plugin {
     fn draw(_key_high: u64, _key_low: u64, _region: Region) -> Option<Drawing> {
         None
     }
+
+    /// What `server` starts with, if its manifest says this plugin configures it:
+    /// environment variables over those it would have. `project` is the project's
+    /// folder (mounted at `/project` if its manifest asks) and `root` the folder in it
+    /// the server's started in, as the editor knows them; what `access.env` lists is
+    /// in `std::env`, as the server would have it.
+    fn server_env(_server: String, _project: String, _root: String) -> Vec<(String, String)> {
+        vec![]
+    }
+
+    /// Its answer to that server's `workspace/configuration` for `section`, as JSON.
+    fn server_settings(_server: String, _project: String, _root: String, _section: String) -> Option<String> {
+        None
+    }
+
+    /// The panel beside a file of `language`, as its manifest's `"panel"` says it has,
+    /// before its server's been asked anything. What it keeps about the file goes in
+    /// its `state`, which comes back with each call about that panel.
+    fn panel_open(_language: String) -> Panel {
+        Panel { state: String::new(), blocks: vec![], working_on: None }
+    }
+
+    /// The server's answers to the panel's `requests`, in that order, as JSON, each
+    /// unless it failed or was empty.
+    fn panel_answered(state: String, _answers: Vec<Option<String>>) -> Panel {
+        Panel { state, blocks: vec![], working_on: None }
+    }
+
+    /// A notification of the server's about the file that the panel's `notifications`
+    /// lists, its params as JSON; and whether to ask its requests again.
+    fn panel_notification(state: String, _method: String, _params: String) -> (Panel, bool) {
+        (Panel { state, blocks: vec![], working_on: None }, false)
+    }
 }
 
 /// Make `$plugin`, which implements [`Plugin`], what this `.wasm` runs.
@@ -105,6 +138,26 @@ macro_rules! register {
 
             fn draw(key_high: u64, key_low: u64, region: $crate::Region) -> Option<$crate::Drawing> {
                 <$plugin as $crate::Plugin>::draw(key_high, key_low, region)
+            }
+
+            fn server_env(server: String, project: String, root: String) -> Vec<(String, String)> {
+                <$plugin as $crate::Plugin>::server_env(server, project, root)
+            }
+
+            fn server_settings(server: String, project: String, root: String, section: String) -> Option<String> {
+                <$plugin as $crate::Plugin>::server_settings(server, project, root, section)
+            }
+
+            fn panel_open(language: String) -> $crate::Panel {
+                <$plugin as $crate::Plugin>::panel_open(language)
+            }
+
+            fn panel_answered(state: String, answers: Vec<Option<String>>) -> $crate::Panel {
+                <$plugin as $crate::Plugin>::panel_answered(state, answers)
+            }
+
+            fn panel_notification(state: String, method: String, params: String) -> ($crate::Panel, bool) {
+                <$plugin as $crate::Plugin>::panel_notification(state, method, params)
             }
         }
 

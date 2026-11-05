@@ -1,14 +1,14 @@
-//! Syntax highlighting with tree-sitter: the highlighted spans of a
-//! [`Language`]'s text, in scopes the themes know.
+//! Syntax with tree-sitter: a language's [`Grammar`], however it's run (a plugin's,
+//! compiled to WebAssembly), its syntax tree, and the highlighted spans of its
+//! text, in scopes the themes know.
 
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, RwLock};
 
+use tree_sitter::{Parser, Query, Tree};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
 use crate::language::Language;
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// The scopes spans are tagged with; themes color them by name, falling
 /// back to the part before the last dot (`function.method` → `function`).
@@ -94,11 +94,6 @@ pub struct Span {
     pub scope: usize,
 }
 
-/// A language's highlight query, compiled.
-pub struct Highlights {
-    config: HighlightConfiguration,
-}
-
 /// The capture names every query is set up with (ours, and what other
 /// editors call them), and the scope each shows as. All share them, so an
 /// injected language's highlights mean the same as its host's.
@@ -111,27 +106,130 @@ fn names() -> &'static (Vec<&'static str>, Vec<Option<usize>>) {
     })
 }
 
-/// Compile `query` for `grammar`; `None` (and a complaint) if it doesn't load.
-pub fn highlights(name: &str, grammar: impl Into<tree_sitter::Language>, query: &str) -> Option<Highlights> {
-    with_injections(name, grammar, query, "")
+/// What loads a grammar, and parses with it. A plugin's runtime has one for the
+/// grammars it brings, compiled to WebAssembly.
+pub trait Load: Send + Sync {
+    /// The grammar itself.
+    fn language(&self) -> Result<tree_sitter::Language, String>;
+    /// A parser that can parse with it.
+    fn parser(&self) -> Result<Parser, String>;
 }
 
-/// [`highlights`], with other languages inside it (`injections`, a query:
-/// Markdown's code blocks and inline text) highlighted as themselves.
-pub fn with_injections(name: &str, grammar: impl Into<tree_sitter::Language>, query: &str, injections: &str) -> Option<Highlights> {
-    let mut config = HighlightConfiguration::new(grammar.into(), name, query, injections, "")
-        .inspect_err(|e| eprintln!("the {name} highlight query doesn't load: {e}"))
-        .ok()?;
-    // Report only the captures that show as something, each as itself.
-    // tree-sitter matches a capture to the longest of these it starts with (`keyword.control` → `keyword`).
-    config.configure(&names().0);
-    Some(Highlights { config })
+/// A grammar, with its queries: what colors a language (`highlights`), the other
+/// languages inside it (`injections`: a code block's, say), and its text objects
+/// (`textobjects`: what `maf` and `]f` select, as helix names them). It's loaded,
+/// and its queries compiled, when it's first needed.
+pub struct Grammar {
+    pub name: String,
+    load: Box<dyn Load>,
+    highlights: String,
+    injections: String,
+    textobjects: String,
+    loaded: OnceLock<Result<Loaded, String>>,
 }
 
-/// Markdown's inline grammar (emphasis, code, links), injected into its blocks.
-fn markdown_inline() -> Option<&'static Highlights> {
-    static INLINE: OnceLock<Option<Highlights>> = OnceLock::new();
-    INLINE.get_or_init(|| highlights("markdown_inline", tree_sitter_md::INLINE_LANGUAGE, tree_sitter_md::HIGHLIGHT_QUERY_INLINE)).as_ref()
+struct Loaded {
+    language: tree_sitter::Language,
+    highlights: HighlightConfiguration,
+    textobjects: Option<Query>,
+    /// Highlighters and parsers not in use, to use again: making one can take a while.
+    highlighters: Mutex<Vec<Highlighter>>,
+    parsers: Mutex<Vec<Parser>>,
+}
+
+/// Grammars there to be injected only (a markup language's inline text, say), not a language's own.
+static GRAMMARS: RwLock<Vec<&'static Grammar>> = RwLock::new(Vec::new());
+
+impl Grammar {
+    pub fn new(name: &str, load: Box<dyn Load>, highlights: &str, injections: &str, textobjects: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            load,
+            highlights: highlights.to_string(),
+            injections: injections.to_string(),
+            textobjects: textobjects.to_string(),
+            loaded: OnceLock::new(),
+        }
+    }
+
+    /// Add a grammar that's injected by its name, and isn't a language's.
+    pub fn register(grammar: &'static Grammar) {
+        GRAMMARS.write().unwrap_or_else(|e| e.into_inner()).push(grammar);
+    }
+
+    pub fn unregister(grammar: &'static Grammar) {
+        GRAMMARS.write().unwrap_or_else(|e| e.into_inner()).retain(|known| !std::ptr::eq(*known, grammar));
+    }
+
+    fn loaded(&self) -> Result<&Loaded, &str> {
+        let loaded = self.loaded.get_or_init(|| {
+            let language = self.load.language()?;
+            let mut highlights = HighlightConfiguration::new(language.clone(), &self.name, &self.highlights, &self.injections, "")
+                .map_err(|e| format!("its highlight query doesn't fit it: {e}"))?;
+            // Report only the captures that show as something, each as itself.
+            // tree-sitter matches a capture to the longest of these it starts with (`keyword.control` → `keyword`).
+            highlights.configure(&names().0);
+            let textobjects = (!self.textobjects.is_empty())
+                .then(|| Query::new(&language, &self.textobjects).map_err(|e| format!("its text-object query doesn't fit it: {e}")))
+                .transpose()?;
+            Ok(Loaded { language, highlights, textobjects, highlighters: Mutex::default(), parsers: Mutex::default() })
+        });
+        loaded.as_ref().map_err(|e| {
+            static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+            let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+            if !said.contains(&self.name) {
+                eprintln!("the {} grammar can't be used: {e}", self.name);
+                said.push(self.name.clone());
+            }
+            e.as_str()
+        })
+    }
+
+    /// Whether it loads, its queries fit it and it parses, or what's wrong.
+    pub fn check(&self) -> Result<(), String> {
+        self.loaded()?;
+        self.parse("").map(drop).ok_or_else(|| "it doesn't parse".to_string())
+    }
+
+    /// `text`'s syntax tree.
+    pub fn parse(&self, text: &str) -> Option<Tree> {
+        let loaded = self.loaded().ok()?;
+        let parser = loaded.parsers.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        let mut parser = match parser {
+            Some(parser) => parser,
+            None => {
+                let mut parser = self.load.parser().inspect_err(|e| eprintln!("the {} grammar can't parse: {e}", self.name)).ok()?;
+                parser.set_language(&loaded.language).ok()?;
+                parser
+            }
+        };
+        let tree = parser.parse(text, None);
+        loaded.parsers.lock().unwrap_or_else(|e| e.into_inner()).push(parser);
+        tree
+    }
+
+    /// Its text-object query, if it has one.
+    pub fn textobjects(&self) -> Option<&Query> {
+        self.loaded().ok()?.textobjects.as_ref()
+    }
+
+    /// The spans of `text`, innermost scope wins, in order.
+    pub fn highlight(&self, text: &str) -> Vec<Span> {
+        let Ok(loaded) = self.loaded() else { return vec![] };
+        let highlighter = loaded.highlighters.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        let mut highlighter = match highlighter {
+            Some(highlighter) => highlighter,
+            None => {
+                let Ok(parser) = self.load.parser() else { return vec![] };
+                let mut highlighter = Highlighter::new();
+                highlighter.parser = parser;
+                highlighter
+            }
+        };
+        let spans = spans(&loaded.highlights, &mut highlighter, text);
+        loaded.highlighters.lock().unwrap_or_else(|e| e.into_inner()).push(highlighter);
+        spans
+    }
 }
 
 /// The scope a capture shows as: its name, or what it's an alias of, or
@@ -200,21 +298,15 @@ pub fn follow_edit(spans: &[Span], old: &str, new: &str) -> Vec<Span> {
         .collect()
 }
 
-/// A language's highlights, compiled the first time they're needed.
-fn loaded(language: &Language) -> Option<&'static Highlights> {
-    static LOADED: OnceLock<Mutex<HashMap<&'static str, &'static Option<Highlights>>>> = OnceLock::new();
-    let mut all = LOADED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-    all.entry(language.name).or_insert_with(|| Box::leak(Box::new((language.load)()))).as_ref()
-}
-
-/// What's injected into a language: Markdown's inline text, or a code
-/// block's language by its name (`rust`, `py`, `typescript`…).
+/// What's injected into a language, by its name: a code block's language
+/// (by its name, extension or id), or a grammar there only to be injected.
 fn injected<'a>(name: &str) -> Option<&'a HighlightConfiguration> {
-    if name == "markdown_inline" {
-        return markdown_inline().map(|h| &h.config);
-    }
-    let language = Language::all().into_iter().find(|l| l.name == name || l.extensions.contains(&name) || l.id() == name)?;
-    loaded(language).map(|h| &h.config)
+    let language = Language::all().into_iter().find(|l| l.grammar.is_some() && (l.name == name || l.extensions.contains(&name) || l.id() == name));
+    let grammar = match language {
+        Some(language) => language.grammar?,
+        None => *GRAMMARS.read().unwrap_or_else(|e| e.into_inner()).iter().find(|grammar| grammar.name == name)?,
+    };
+    grammar.loaded().ok().map(|loaded| &loaded.highlights)
 }
 
 impl Language {
@@ -223,41 +315,35 @@ impl Language {
         if text.len() > MAX_HIGHLIGHT {
             return vec![];
         }
-        if let Some(lex) = self.lex {
-            return lex(text).into_iter().filter_map(|(range, name)| Some(Span { range, scope: scope(name)? })).collect();
-        }
         if let Some(highlighter) = self.highlighter {
             return highlighter(text);
         }
-        let Some(highlights) = loaded(self) else { return vec![] };
-        highlights.spans(&mut Highlighter::new(), text)
+        self.grammar.map_or_else(Vec::new, |grammar| grammar.highlight(text))
     }
 }
 
-impl Highlights {
-    /// The spans of `text`, innermost scope wins, in order, parsed by `highlighter`
-    /// (whose parser is set up for this grammar).
-    pub fn spans(&self, highlighter: &mut Highlighter, text: &str) -> Vec<Span> {
-        let scopes = &names().1;
-        let Ok(events) = highlighter.highlight(&self.config, text.as_bytes(), None, None, injected) else { return vec![] };
-        let mut spans = vec![];
-        let mut stack: Vec<Option<usize>> = vec![];
-        for event in events {
-            match event {
-                Ok(HighlightEvent::HighlightStart(h)) => stack.push(scopes[h.0]),
-                Ok(HighlightEvent::HighlightEnd) => {
-                    stack.pop();
-                }
-                Ok(HighlightEvent::Source { start, end }) => {
-                    if let Some(&Some(scope)) = stack.last() {
-                        spans.push(Span { range: start..end, scope });
-                    }
-                }
-                Err(_) => return vec![],
+/// The spans of `text`, innermost scope wins, in order, parsed by `highlighter`
+/// (whose parser can parse with `config`'s grammar).
+fn spans(config: &HighlightConfiguration, highlighter: &mut Highlighter, text: &str) -> Vec<Span> {
+    let scopes = &names().1;
+    let Ok(events) = highlighter.highlight(config, text.as_bytes(), None, None, injected) else { return vec![] };
+    let mut spans = vec![];
+    let mut stack: Vec<Option<usize>> = vec![];
+    for event in events {
+        match event {
+            Ok(HighlightEvent::HighlightStart(h)) => stack.push(scopes[h.0]),
+            Ok(HighlightEvent::HighlightEnd) => {
+                stack.pop();
             }
+            Ok(HighlightEvent::Source { start, end }) => {
+                if let Some(&Some(scope)) = stack.last() {
+                    spans.push(Span { range: start..end, scope });
+                }
+            }
+            Err(_) => return vec![],
         }
-        spans
     }
+    spans
 }
 
 #[cfg(test)]
@@ -266,15 +352,9 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn every_query_loads() {
-        for language in crate::language::LANGUAGES.iter().filter(|l| l.lex.is_none()) {
-            assert!((language.load)().is_some(), "{}", language.name);
-        }
-    }
-
     /// The scope at each of `at` in `text`, highlighted as `path`.
     fn scopes_at(path: &str, text: &str, at: &[usize]) -> Vec<Option<&'static str>> {
+        crate::language::testing::install();
         let spans = Language::for_path(Path::new(path)).unwrap().highlight(text);
         at.iter().map(|&at| spans.iter().find(|s| s.range.contains(&at)).map(|s| SCOPES[s.scope])).collect()
     }
@@ -306,16 +386,6 @@ mod tests {
         assert_eq!(moved, spans(&[(0..3, 1), (4..5, 2), (14..15, 3)]));
         assert_eq!(follow_edit(&spans(&[(4..5, 2)]), old, "let xb = b;"), spans(&[]), "the edit touched it");
         assert_eq!(follow_edit(&spans(&[(4..5, 2)]), old, "let ab = b;"), spans(&[(4..5, 2)]), "typing on after it leaves it be");
-    }
-
-    #[test]
-    fn markdown_highlights_inline_text_and_code_blocks() {
-        let text = "# Title\n\nsome **bold** and `code`\n\n```rust\nfn main() {}\n```\n";
-        let at = [text.find("bold").unwrap(), text.find("code").unwrap(), text.find("fn").unwrap()];
-        let [bold, code, keyword] = scopes_at("notes.md", text, &at)[..] else { unreachable!() };
-        assert_eq!(bold, Some("text.strong"));
-        assert_eq!(code, Some("text.literal"));
-        assert_eq!(keyword, Some("keyword"), "the code block is Rust");
     }
 
     #[test]

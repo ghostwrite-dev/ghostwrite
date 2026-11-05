@@ -1,7 +1,8 @@
 //! The editing model, with no UI: a [`Buffer`] of text with undo history,
 //! helix-style [`Range`] selections, the motions and text objects that move
-//! them, the [`modal`] key handling that drives it all, the [`language`]s it
-//! knows, their [`syntax`] highlighting and [`abbreviation`]s.
+//! them, the [`modal`] key handling that drives it all, what's particular to a
+//! [`language`] (it has none of its own: plugins add them), and [`syntax`] over
+//! any grammar, its highlights and text objects, and [`abbreviation`]s.
 //!
 //! Every offset is a byte offset into the text, always on a char boundary.
 

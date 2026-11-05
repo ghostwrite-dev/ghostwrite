@@ -1,0 +1,49 @@
+{
+  "name": "javascript",
+  "version": "0.1.0",
+  "api": 2,
+  "languages": [
+    {
+      "name": "javascript",
+      "extensions": ["js", "mjs", "cjs"],
+      "comment": "//",
+      "grammar": { "name": "javascript", "wasm": "tree-sitter-javascript.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" }
+    },
+    {
+      "name": "jsx",
+      "id": "javascriptreact",
+      "extensions": ["jsx"],
+      "comment": "//",
+      "grammar": {
+        "name": "javascript",
+        "wasm": "tree-sitter-javascript.wasm",
+        "query": ["highlights-jsx.scm", "highlights.scm"],
+        "textobjects": "textobjects-jsx.scm"
+      }
+    },
+    {
+      "name": "typescript",
+      "extensions": ["ts", "mts", "cts"],
+      "comment": "//",
+      "grammar": {
+        "name": "typescript",
+        "wasm": "tree-sitter-typescript.wasm",
+        "query": ["highlights-typescript.scm", "highlights.scm"],
+        "textobjects": "textobjects-typescript.scm"
+      }
+    },
+    {
+      "name": "tsx",
+      "id": "typescriptreact",
+      "extensions": ["tsx"],
+      "comment": "//",
+      "grammar": {
+        "name": "tsx",
+        "wasm": "tree-sitter-tsx.wasm",
+        "query": ["highlights-typescript.scm", "highlights-jsx.scm", "highlights.scm"],
+        "textobjects": "textobjects-tsx.scm"
+      }
+    }
+  ],
+  "servers": [{ "name": "typescript-language-server", "command": ["typescript-language-server", "--stdio"] }]
+}

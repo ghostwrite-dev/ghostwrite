@@ -43,6 +43,7 @@ impl Session {
 
     /// The same, in the language of files named like `path`.
     fn in_file(text: &str, path: &str) -> Self {
+        crate::language::testing::install();
         Self { language: crate::Language::for_path(std::path::Path::new(path)), ..Self::new(text) }
     }
 
@@ -398,7 +399,7 @@ fn a_language_has_pairs_of_its_own() {
 }
 
 /// A language that types symbols with backslashes, with a real table of them.
-static TABLE: crate::abbreviation::Abbreviations = crate::abbreviation::Abbreviations::new(include_str!("../../../lean/src/abbreviations.tsv"));
+static TABLE: crate::abbreviation::Abbreviations = crate::abbreviation::Abbreviations::new(include_str!("../../../../plugins/lean/abbreviations.tsv"));
 static ABBREVIATING: crate::Language = crate::Language { name: "abbreviating", abbreviations: Some(&TABLE), unpaired: &['`'], ..crate::Language::DEFAULT };
 
 /// Unicode input, typed a char at a time as the editor types.

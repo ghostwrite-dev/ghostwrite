@@ -1,0 +1,9 @@
+{
+  "name": "go",
+  "version": "0.1.0",
+  "api": 2,
+  "extensions": ["go"],
+  "comment": "//",
+  "grammar": { "name": "go", "wasm": "tree-sitter-go.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" },
+  "servers": [{ "name": "gopls", "command": ["gopls"] }]
+}

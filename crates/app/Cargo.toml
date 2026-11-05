@@ -17,7 +17,6 @@ ghostwrite-terminal.workspace = true
 ghostwrite-plugin.workspace = true
 ghostwrite-view.workspace = true
 ghostwrite-wasm = { workspace = true, optional = true }
-ghostwrite-lean = { workspace = true, optional = true }
 
 futures.workspace = true
 gpui.workspace = true
@@ -29,10 +28,9 @@ serde_json.workspace = true
 unicode-width.workspace = true
 
 [features]
-default = ["lean", "local-models", "wasm-plugins"]
+default = ["local-models", "wasm-plugins"]
 local-models = ["ghostwrite-model/llama"]
 wasm-plugins = ["dep:ghostwrite-wasm"]
-lean = ["dep:ghostwrite-lean"]
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

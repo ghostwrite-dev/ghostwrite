@@ -1,0 +1,22 @@
+# What Python's language servers start with, as a plugin built for WebAssembly:
+# scripts/build-plugins.sh.
+[package]
+name = "ghostwrite-python-plugin"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ghostwrite-plugin-api = { path = "../../crates/plugin-api" }
+wit-bindgen = "0.57"
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+[workspace]

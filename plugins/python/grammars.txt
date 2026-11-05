@@ -1,0 +1,4 @@
+# The grammars this plugin uses, as each project publishes them for the version
+# Ghostwrite's highlighting was made with: scripts/build-plugins.sh downloads
+# each and checks it's this. sha256, then where it is.
+8c93692fb368e288a5824cee55773c9b3602804f513bda48c97661e52e9c2da2 https://github.com/tree-sitter/tree-sitter-python/releases/download/v0.23.6/tree-sitter-python.wasm

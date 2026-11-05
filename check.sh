@@ -8,4 +8,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 scripts/build-plugins.sh
 cargo test --workspace
 # Without local models, as it can be built without a C++ compiler.
-cargo check -p ghostwrite --no-default-features --features lean,wasm-plugins
+cargo check -p ghostwrite --no-default-features --features wasm-plugins

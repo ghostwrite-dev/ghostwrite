@@ -49,7 +49,7 @@ impl IndentUnit {
 
 /// The indent for a line opened after `before` (a line, or the part of
 /// one before the cursor): its indent, and a level more if it ends with
-/// something in `opens` (an open bracket, Python's `:`). Helix asks the
+/// something in `opens` (an open bracket, or a `:` in some languages). Helix asks the
 /// syntax tree; this is the heuristic insert mode's Enter has always used.
 pub fn for_newline(before: &str, opens: &[char], unit: &IndentUnit) -> String {
     let indent = &before[..before.len() - before.trim_start_matches([' ', '\t']).len()];

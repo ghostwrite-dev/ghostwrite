@@ -241,7 +241,7 @@ impl Modal {
 
 /// Enter: a new line, as helix opens one. Spaces before the cursor go; the
 /// new line has this one's indent (a level more after an opening bracket, or
-/// Python's `:`), and goes on with a line comment this one starts with.
+/// what else its language says: a `:`, in some), and goes on with a line comment this one starts with.
 /// Between brackets the cursor gets a line of its own. With only indent
 /// before the cursor, the line moves down as it is.
 fn newline(t: &mut Target) {

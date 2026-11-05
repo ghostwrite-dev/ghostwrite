@@ -1,6 +1,8 @@
-// What a plugin and the editor say to each other. Once released, version 1 only
-// grows in ways plugins built against it can't notice; anything else is version 2.
-package ghostwrite:plugin@1.0.0;
+// What a plugin and the editor say to each other. Once released, version 2 only
+// grows in ways plugins built against it can't notice; anything else is version 3.
+// Version 2 added what a plugin's language servers start with (`server-env`,
+// `server-settings`, `which`), and panels beside a file (`panel-open` and the rest).
+package ghostwrite:plugin@2.0.0;
 
 interface types {
     // The file a plugin is asked about, as it is now. Offsets are bytes into `text`.
@@ -82,16 +84,43 @@ interface types {
         height: u32,
         bgra: list<u8>,
     }
+
+    // In the code's font; lines starting `stands-out`, if anything, stand out.
+    record code-block {
+        text: string,
+        stands-out: option<char>,
+    }
+
+    // A part of what a panel shows.
+    variant block {
+        heading(string),
+        code(code-block),
+        // Something good, in a word.
+        good(string),
+        muted(string),
+    }
+
+    // A panel beside a file, as it is now. `state` is what the plugin keeps about it,
+    // as it likes: the editor holds it for that file, and hands it back with the
+    // next call about its panel.
+    record panel {
+        state: string,
+        blocks: list<block>,
+        // The first line its server is still working on, if it's said.
+        working-on: option<u32>,
+    }
 }
 
 // What the editor does for a plugin, as far as its manifest says it may.
 interface host {
     // Download from a host its `access.network` lists, over https.
     fetch: func(url: string) -> result<list<u8>, string>;
+    // Where a program is, on the PATH it's been given (`access.env`), if it's there.
+    which: func(program: string) -> option<string>;
 }
 
 world plugin {
-    use types.{context, event, action, span, page, region, drawing};
+    use types.{context, event, action, span, page, region, drawing, panel};
 
     import host;
 
@@ -108,4 +137,21 @@ world plugin {
     export make-pages: func(text: string) -> result<list<page>, string>;
     // Draw `region` of the page with this key, of the last pages made or the ones before.
     export draw: func(key-high: u64, key-low: u64, region: region) -> option<drawing>;
+    // What a server of its own starts with, if its manifest says the plugin's code
+    // configures it: environment variables, over those it would have. `project` is the
+    // project's folder (at /project, if `access.project` says so) and `root` the folder
+    // in it the server's started in, both as the editor knows them. The variables
+    // `access.env` lists are as the server would have them.
+    export server-env: func(server: string, project: string, root: string) -> list<tuple<string, string>>;
+    // Its answer to that server's `workspace/configuration` for `section`, as JSON, if any.
+    export server-settings: func(server: string, project: string, root: string, section: string) -> option<string>;
+    // The panel beside a file of `language`, if its manifest's `"panel"` says it has
+    // one, before its server's been asked anything.
+    export panel-open: func(language: string) -> panel;
+    // The server's answers to the panel's `requests` about the cursor, in that order,
+    // as JSON, each unless it failed or was empty.
+    export panel-answered: func(state: string, answers: list<option<string>>) -> panel;
+    // A notification of the server's about the file, one the panel's `notifications`
+    // lists, its params as JSON. `true`: ask its requests again.
+    export panel-notification: func(state: string, method: string, params: string) -> tuple<panel, bool>;
 }

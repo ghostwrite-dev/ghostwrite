@@ -1,4 +1,4 @@
-//! What language servers and the built-in Typst add: moving a file to another server, Lean's goals, formatting and renaming, a PDF, a Typst file's pages. Most need the server installed, and are ignored otherwise.
+//! What language servers and plugins add: moving a file to another server, Lean's goals, formatting and renaming, a PDF, a Typst file's pages. Most need the server installed, and are ignored otherwise.
 
 use super::*;
 use ghostwrite_core::Mode;

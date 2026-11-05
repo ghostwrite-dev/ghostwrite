@@ -1,4 +1,4 @@
-//! The servers Ghostwrite knows, and the ones running for a project.
+//! The servers plugins have added, and the ones running for a project.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,42 +9,37 @@ use futures::channel::mpsc;
 use serde_json::Value;
 
 use crate::client::{Client, Event, Launch};
-use crate::{python, shell};
+use crate::shell;
 
-/// A language server Ghostwrite knows how to start. Which languages each
-/// serves is in `ghostwrite_core`'s language table, by `name`; what's
-/// particular to a server is here, as its hooks.
+/// What a server starts with besides the login shell's environment: given the
+/// project's root, the folder it's started in and that environment, the
+/// variables to set over it.
+pub type Env = dyn Fn(&Path, &Path, &[(String, String)]) -> Vec<(String, String)> + Send + Sync;
+
+/// A server's answer to `workspace/configuration` for a section, given the
+/// project's root, the folder it's started in and the environment it has.
+pub type Settings = dyn Fn(&Path, &Path, &[(String, String)], &str) -> Value + Send + Sync;
+
+/// A language server, as a plugin says how to start it. Which languages each
+/// serves is theirs to say, by `name`; what's particular to a server is here,
+/// as its hooks.
 pub struct Spec {
     pub name: &'static str,
     pub command: &'static [&'static str],
     /// Files that mark the folder it's started in, nearest the file up
     /// (a build tool's, say); without them, or none found, the project's.
     pub roots: &'static [&'static str],
-    /// Environment variables it starts with, for the folder it's started
-    /// in, over the login shell's.
-    pub env: fn(&Path) -> Vec<(String, String)>,
-    /// Its answer to `workspace/configuration` for a section, in that folder.
-    pub settings: fn(&str, &Path) -> Value,
+    /// Environment variables it starts with, over the login shell's.
+    pub env: Option<&'static Env>,
+    /// Its answers to `workspace/configuration`; without this, it has none.
+    pub settings: Option<&'static Settings>,
 }
 
 impl Spec {
-    pub const DEFAULT: Spec = Spec { name: "", command: &[], roots: &[], env: |_| vec![], settings: |_, _| Value::Null };
+    pub const DEFAULT: Spec = Spec { name: "", command: &[], roots: &[], env: None, settings: None };
 }
 
-/// Python's servers see the project's virtualenv, and are told its interpreter.
-const PYTHON: Spec = Spec { env: python::server_env, settings: python::settings, ..Spec::DEFAULT };
-
-const SPECS: &[Spec] = &[
-    Spec { name: "rust-analyzer", command: &["rust-analyzer"], ..Spec::DEFAULT },
-    Spec { name: "basedpyright", command: &["basedpyright-langserver", "--stdio"], ..PYTHON },
-    Spec { name: "pyright", command: &["pyright-langserver", "--stdio"], ..PYTHON },
-    Spec { name: "pylsp", command: &["pylsp"], ..PYTHON },
-    Spec { name: "typescript-language-server", command: &["typescript-language-server", "--stdio"], ..Spec::DEFAULT },
-    Spec { name: "gopls", command: &["gopls"], ..Spec::DEFAULT },
-    Spec { name: "clangd", command: &["clangd"], ..Spec::DEFAULT },
-];
-
-/// Servers plugins added.
+/// The servers there are: those plugins added.
 static REGISTERED: RwLock<Vec<&'static Spec>> = RwLock::new(Vec::new());
 
 /// Add a server a plugin knows.
@@ -59,7 +54,7 @@ pub fn unregister(spec: &'static Spec) {
 
 /// Every server.
 fn specs() -> Vec<&'static Spec> {
-    SPECS.iter().chain(REGISTERED.read().unwrap_or_else(|e| e.into_inner()).iter().copied()).collect()
+    REGISTERED.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Where each server's binary is, looked up once.
@@ -131,31 +126,22 @@ impl Registry {
         self.clients
             .entry(key)
             .or_insert_with(|| {
-                let (settings, settings_root) = (spec.settings, root.clone());
+                let shells = shell::env();
+                let own = spec.env.map_or_else(Vec::new, |env| env(&self.root, &root, shells));
+                // Its own come after the shell's, so they win.
+                let env = [shells.to_vec(), own].concat();
+                let (project, started_in, has) = (self.root.clone(), root.clone(), env.clone());
+                let settings = spec.settings;
                 let launch = Launch {
                     name: spec.name,
                     binary: installed()[spec.name].clone(),
                     args: &spec.command[1..],
                     root: &root,
-                    env: [shell::env().to_vec(), (spec.env)(&root)].concat(),
-                    settings: Box::new(move |section| settings(section, &settings_root)),
+                    env,
+                    settings: Box::new(move |section| settings.map_or(Value::Null, |settings| settings(&project, &started_in, &has, section))),
                 };
                 Client::start(launch, self.events.clone()).inspect_err(|e| eprintln!("couldn't start {}: {e}", spec.name)).ok()
             })
             .clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_language_server_is_known() {
-        for language in &ghostwrite_core::language::LANGUAGES {
-            for server in language.servers {
-                assert!(SPECS.iter().any(|s| s.name == *server), "{} names {server}", language.name);
-            }
-        }
     }
 }
