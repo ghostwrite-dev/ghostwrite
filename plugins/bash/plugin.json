@@ -1,7 +1,7 @@
 {
   "name": "bash",
-  "version": "0.1.0",
-  "api": 2,
+  "version": "1.0.0",
+  "api": 1,
   "id": "shellscript",
   "extensions": ["sh", "bash", "zsh"],
   "files": [".bashrc", ".zshrc", ".profile"],

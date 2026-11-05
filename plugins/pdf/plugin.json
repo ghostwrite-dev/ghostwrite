@@ -1,7 +1,7 @@
 {
   "name": "pdf",
-  "version": "0.1.0",
-  "api": 2,
+  "version": "1.0.0",
+  "api": 1,
   "code": "pdf.wasm",
   "pages": true,
   "only_pages": true,

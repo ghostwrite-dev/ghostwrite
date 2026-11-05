@@ -1,7 +1,7 @@
 {
   "name": "lean",
-  "version": "0.1.0",
-  "api": 2,
+  "version": "1.0.0",
+  "api": 1,
   "code": "lean.wasm",
   "extensions": ["lean"],
   "comment": "--",

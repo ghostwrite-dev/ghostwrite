@@ -1,8 +1,6 @@
-// What a plugin and the editor say to each other. Once released, version 2 only
-// grows in ways plugins built against it can't notice; anything else is version 3.
-// Version 2 added what a plugin's language servers start with (`server-env`,
-// `server-settings`, `which`), and panels beside a file (`panel-open` and the rest).
-package ghostwrite:plugin@2.0.0;
+// What a plugin and the editor say to each other. Once released, version 1 only
+// grows in ways plugins built against it can't notice; anything else is version 2.
+package ghostwrite:plugin@1.0.0;
 
 interface types {
     // The file a plugin is asked about, as it is now. Offsets are bytes into `text`.

@@ -182,7 +182,7 @@ fn a_language_plugin_needs_no_code() {
         std::fs::copy(bundled().join("json").join(file), folder.join(file)).unwrap();
     }
     std::fs::write(folder.join("mine.scm"), "(number) @keyword\n").unwrap();
-    let json = r#"{ "name": "data", "api": 2,
+    let json = r#"{ "name": "data", "api": 1,
         "languages": [
           { "name": "data", "id": "data-files", "extensions": ["data"], "files": ["Datafile"], "comment": "//", "indent_after": "{[",
             "grammar": { "name": "json", "wasm": "tree-sitter-json.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" } },

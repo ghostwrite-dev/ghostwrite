@@ -343,7 +343,7 @@ register!(WordCount);
 ```
 
 ```json
-{ "name": "word-count", "version": "0.1.0", "api": 2, "code": "word_count.wasm",
+{ "name": "word-count", "version": "0.1.0", "api": 1, "code": "word_count.wasm",
   "commands": [{ "name": "word-count", "what": "count the words in the file" }],
   "events": ["saved"] }
 ```
@@ -369,7 +369,7 @@ in the names helix or nvim-treesitter use (theirs work as they are), and `textob
 `maf`, `]f` and the rest select (helix's, say):
 
 ```json
-{ "name": "zig", "api": 2, "extensions": ["zig", "zon"], "comment": "//",
+{ "name": "zig", "api": 1, "extensions": ["zig", "zon"], "comment": "//",
   "grammar": { "name": "zig", "wasm": "tree-sitter-zig.wasm", "query": "highlights.scm",
                "textobjects": "textobjects.scm" },
   "servers": [{ "name": "zls", "command": ["zls"], "roots": ["build.zig"] }] }

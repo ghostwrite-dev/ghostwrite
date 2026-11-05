@@ -59,7 +59,7 @@ fn misbehaving_folder() -> Option<PathBuf> {
 fn misbehaving() -> Option<Manifest> {
     let folder = misbehaving_folder()?;
     let commands: Vec<String> = COMMANDS.iter().map(|name| format!(r#"{{ "name": "{name}" }}"#)).collect();
-    let json = format!(r#"{{ "name": "misbehaving", "api": 2, "code": "misbehaving.wasm", "commands": [{}] }}"#, commands.join(","));
+    let json = format!(r#"{{ "name": "misbehaving", "api": 1, "code": "misbehaving.wasm", "commands": [{}] }}"#, commands.join(","));
     Some(Manifest::parse_in(&json, Some(&folder)).unwrap())
 }
 
@@ -146,7 +146,7 @@ fn a_plugin_that_runs_away_is_stopped_and_starts_afresh() {
 #[test]
 fn its_code_says_what_its_servers_start_with_and_sees_only_what_its_given() {
     let folder = needs_the_target!(misbehaving_folder());
-    let json = r#"{ "name": "configuring", "api": 2, "code": "misbehaving.wasm",
+    let json = r#"{ "name": "configuring", "api": 1, "code": "misbehaving.wasm",
         "servers": [{ "name": "configured", "command": ["configured-ls"], "roots": ["marker.toml"], "configured_by_code": true },
                     { "name": "plain", "command": ["plain-ls", "--stdio"] }],
         "access": { "project": true, "env": ["PATH", "SHOWN"] } }"#;
@@ -179,7 +179,7 @@ fn its_code_says_what_its_servers_start_with_and_sees_only_what_its_given() {
     assert_eq!(settings(&project, &project, &env, "broken"), serde_json::Value::Null, "what isn't JSON is no settings");
 
     // Asking for nothing, it's shown nothing.
-    let json = r#"{ "name": "unconfigured", "api": 2, "code": "misbehaving.wasm",
+    let json = r#"{ "name": "unconfigured", "api": 1, "code": "misbehaving.wasm",
         "servers": [{ "name": "configured", "command": ["configured-ls"], "configured_by_code": true }] }"#;
     let plugin = Manifest::parse_in(json, Some(&folder)).unwrap();
     let seen: std::collections::HashMap<String, String> = (plugin.servers()[0].env.unwrap())(&project, &project, &env).into_iter().collect();
@@ -195,7 +195,7 @@ fn a_grammar_highlights_its_files() {
     for file in ["grammar.wasm", "highlights.scm"] {
         std::fs::copy(fixture.join(file), folder.join(file)).unwrap();
     }
-    let json = r#"{ "name": "grammar-test", "api": 2, "extensions": ["grammartest"],
+    let json = r#"{ "name": "grammar-test", "api": 1, "extensions": ["grammartest"],
         "grammar": { "name": "json", "wasm": "grammar.wasm", "query": "highlights.scm" } }"#;
     std::fs::write(folder.join("plugin.json"), json).unwrap();
     let plugin = Manifest::in_own_folder(&folder).unwrap();
@@ -217,7 +217,7 @@ fn a_grammar_highlights_its_files() {
 #[test]
 fn its_code_says_whats_in_a_panel_beside_its_files_and_the_editor_keeps_its_state() {
     let folder = needs_the_target!(misbehaving_folder());
-    let json = r#"{ "name": "panelled", "api": 2, "code": "misbehaving.wasm", "extensions": ["panelled"],
+    let json = r#"{ "name": "panelled", "api": 1, "code": "misbehaving.wasm", "extensions": ["panelled"],
         "panel": { "title": "Told", "requests": ["$/first", "$/second"], "notifications": ["$/progress"] } }"#;
     let plugin = Manifest::parse_in(json, Some(&folder)).unwrap();
     let language = plugin.languages()[0];
@@ -251,5 +251,5 @@ fn its_code_says_whats_in_a_panel_beside_its_files_and_the_editor_keeps_its_stat
 
     let wrong = |json: &str| Manifest::parse_in(json, Some(&folder)).err().unwrap_or_default();
     assert!(wrong(r#"{ "name": "a", "extensions": ["a"], "panel": {} }"#).contains("no `code`"));
-    assert!(wrong(r#"{ "name": "a", "api": 2, "code": "misbehaving.wasm", "panel": {} }"#).contains("it has none"));
+    assert!(wrong(r#"{ "name": "a", "api": 1, "code": "misbehaving.wasm", "panel": {} }"#).contains("it has none"));
 }

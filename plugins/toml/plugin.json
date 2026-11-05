@@ -1,7 +1,7 @@
 {
   "name": "toml",
-  "version": "0.1.0",
-  "api": 2,
+  "version": "1.0.0",
+  "api": 1,
   "extensions": ["toml"],
   "files": ["Cargo.lock"],
   "comment": "#",

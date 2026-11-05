@@ -1,7 +1,7 @@
 {
   "name": "word-count",
   "version": "0.1.0",
-  "api": 2,
+  "api": 1,
   "code": "word_count.wasm",
   "commands": [
     { "name": "word-count", "what": "count the words in the file" },

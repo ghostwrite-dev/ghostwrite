@@ -24,7 +24,7 @@
 //! {
 //!   "name": "words",
 //!   "version": "0.1.0",
-//!   "api": 2,
+//!   "api": 1,
 //!   "code": "words.wasm",
 //!   "commands": [{ "name": "word-count", "what": "count the file's words" }],
 //!   "events": ["saved"],
@@ -49,7 +49,7 @@
 //! ```json
 //! {
 //!   "name": "ocaml",
-//!   "api": 2,
+//!   "api": 1,
 //!   "languages": [
 //!     { "name": "ocaml", "extensions": ["ml"],
 //!       "grammar": { "name": "ocaml", "wasm": "tree-sitter-ocaml.wasm",
@@ -130,7 +130,7 @@ use serde_json::Value;
 use crate::{Binding, Block, Code, Context, Event, Panel, Plugin, PluginCommand, Renderer, Reply, Shown};
 
 /// The version of the plugin interface this editor has.
-pub const API: u64 = 2;
+pub const API: u64 = 1;
 /// What a plugin in a folder of its own says what it adds with.
 pub const FILE: &str = "plugin.json";
 
@@ -897,15 +897,15 @@ mod tests {
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(parent.join("secret"), "out of reach").unwrap();
         let parse = |json: &str| Manifest::parse_in(json, Some(&folder)).err().unwrap_or_default();
-        assert!(parse(r#"{ "name": "a", "api": 2, "code": "../secret" }"#).contains("isn't in its folder"));
-        assert!(parse(r#"{ "name": "a", "api": 2, "code": "/etc/hosts" }"#).contains("isn't in its folder"));
+        assert!(parse(r#"{ "name": "a", "api": 1, "code": "../secret" }"#).contains("isn't in its folder"));
+        assert!(parse(r#"{ "name": "a", "api": 1, "code": "/etc/hosts" }"#).contains("isn't in its folder"));
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(parent.join("secret"), folder.join("link")).unwrap();
-            assert!(parse(r#"{ "name": "a", "api": 2, "code": "link" }"#).contains("isn't in its folder"), "nor by way of a link");
+            assert!(parse(r#"{ "name": "a", "api": 1, "code": "link" }"#).contains("isn't in its folder"), "nor by way of a link");
         }
         assert!(parse(r#"{ "name": "a", "code": "x.wasm" }"#).contains("doesn't say which `api`"));
-        assert!(parse(r#"{ "name": "a", "api": 1, "code": "x.wasm" }"#).contains("built for version 1"));
+        assert!(parse(r#"{ "name": "a", "api": 2, "code": "x.wasm" }"#).contains("built for version 2"));
         assert!(parse(r#"{ "name": "../a" }"#).contains("isn't a name"));
         for bad in [
             r#""read": ["/etc"]"#,
@@ -918,7 +918,7 @@ mod tests {
             assert!(!parse(&format!(r#"{{ "name": "a", "access": {{ {bad} }} }}"#)).is_empty(), "{bad}");
         }
         assert!(parse(r#"{ "name": "a", "commands": [{ "name": "go" }] }"#).contains("no `code`"));
-        let no_folder = Manifest::parse(r#"{ "name": "a", "api": 2, "code": "x.wasm" }"#).err().unwrap_or_default();
+        let no_folder = Manifest::parse(r#"{ "name": "a", "api": 1, "code": "x.wasm" }"#).err().unwrap_or_default();
         assert!(no_folder.contains("a folder of its own"), "{no_folder}");
     }
 }

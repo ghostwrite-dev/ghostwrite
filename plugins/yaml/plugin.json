@@ -1,7 +1,7 @@
 {
   "name": "yaml",
-  "version": "0.1.0",
-  "api": 2,
+  "version": "1.0.0",
+  "api": 1,
   "extensions": ["yaml", "yml"],
   "comment": "#",
   "grammar": { "name": "yaml", "wasm": "tree-sitter-yaml.wasm", "query": "highlights.scm", "textobjects": "textobjects.scm" }
