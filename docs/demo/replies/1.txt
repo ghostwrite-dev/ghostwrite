@@ -1,0 +1,6 @@
+<run>
+python3 -m unittest
+</run>
+<say>
+First, see what fails.
+</say>

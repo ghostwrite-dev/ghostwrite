@@ -189,7 +189,7 @@ fn saved(backend: &Backend) -> Option<String> {
     match backend {
         Backend::Api { model, .. } | Backend::ClaudeCode { model } => Some(format!("claude\n{model}\n")),
         Backend::Local { model, label } => Some(format!("local\n{model}\n{label}\n")),
-        Backend::Scripted(_) => None,
+        Backend::Scripted(_) | Backend::Demo(_) => None,
     }
 }
 

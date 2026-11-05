@@ -9,6 +9,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod actions;
+#[cfg(feature = "demo")]
+mod demo;
 use ghostwrite_state::config;
 mod editor;
 mod keys;
@@ -64,7 +66,9 @@ fn main() {
         cx.on_action(|_: &actions::NewWindow, cx| {
             workspace::open_window(vec![], cx);
         });
-        workspace::open_window(paths, cx).expect("the window opens");
+        let _window = workspace::open_window(paths, cx).expect("the window opens");
+        #[cfg(feature = "demo")]
+        demo::play(_window.into(), cx);
         cx.spawn(async move |cx| {
             while let Some(paths) = open_rx.next().await {
                 cx.update(|cx| workspace::open_anywhere(paths, cx)).ok();

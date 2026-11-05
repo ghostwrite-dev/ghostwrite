@@ -1,0 +1,12 @@
+<file>
+cart.py
+</file>
+<at>
+    subtotal = sum(price for price, _ in items)
+</at>
+<say>
+Then the code is wrong: each item counts as many times as it was bought.
+</say>
+<new>
+    subtotal = sum(price * quantity for price, quantity in items)
+</new>

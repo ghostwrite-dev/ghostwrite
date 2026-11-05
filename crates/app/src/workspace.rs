@@ -29,6 +29,11 @@ pub fn open_window(paths: Vec<PathBuf>, cx: &mut App) -> Option<WindowHandle<Wor
     let step = px(24. * cx.windows().len() as f32);
     let mut bounds = Bounds::centered(None, size(px(1100.), px(780.)), cx);
     bounds.origin += point(step, step);
+    // The demo's window fits above the Dock, wherever the screen's middle is.
+    #[cfg(feature = "demo")]
+    if std::env::var_os("GHOSTWRITE_DEMO").is_some() {
+        bounds = Bounds::new(point(px(80.), px(60.)), size(px(1000.), px(640.)));
+    }
     let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
     cx.open_window(options, |window, cx| {
         crate::theme::observe(window);

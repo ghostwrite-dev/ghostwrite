@@ -1,0 +1,19 @@
+# The story in the README's GIF: ask, run, redirect a step, accept, run again.
+wait 1800
+keys space a
+type make the tests pass
+wait 400
+keys enter
+wait 2200
+keys tab
+wait 3200
+keys enter
+type fix the code, not the test
+wait 400
+keys enter
+wait 2600
+keys tab
+wait 2000
+keys tab
+wait 3500
+quit

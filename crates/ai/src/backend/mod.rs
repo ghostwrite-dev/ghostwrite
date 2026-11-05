@@ -45,6 +45,9 @@ pub enum Backend {
     Local { model: String, label: String },
     /// Replies with these texts in turn, the last one from then on (for tests).
     Scripted(Vec<String>),
+    /// [`Scripted`](Backend::Scripted), streamed in at a reading pace and called
+    /// "the model": what the demo in the README is recorded with.
+    Demo(Vec<String>),
 }
 
 /// What a running request reports.
@@ -79,6 +82,7 @@ impl Backend {
             }
             Backend::Local { label, .. } => label,
             Backend::Scripted(_) => "the script",
+            Backend::Demo(_) => "the model",
         }
     }
 
@@ -87,6 +91,7 @@ impl Backend {
         match self {
             Backend::Api { model, .. } | Backend::ClaudeCode { model } | Backend::Local { model, .. } => model.clone(),
             Backend::Scripted(_) => "the script".into(),
+            Backend::Demo(_) => "demo".into(),
         }
     }
 
@@ -126,7 +131,7 @@ impl Backend {
                 let startup = Startup::new(model, root, session, false);
                 std::thread::spawn(move || start_ahead(startup));
             }
-            Backend::Api { .. } | Backend::Scripted(_) => {}
+            Backend::Api { .. } | Backend::Scripted(_) | Backend::Demo(_) => {}
         }
     }
 
@@ -155,6 +160,18 @@ impl Backend {
             Backend::Scripted(replies) => {
                 let round = req.followups.len().min(replies.len().saturating_sub(1));
                 listener.text(replies.get(round).map_or("", String::as_str));
+                Ok(())
+            }
+            Backend::Demo(replies) => {
+                let round = req.followups.len().min(replies.len().saturating_sub(1));
+                let reply: Vec<char> = replies.get(round).map_or(vec![], |r| r.chars().collect());
+                for chunk in reply.chunks(6) {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    listener.text(&chunk.iter().collect::<String>());
+                    std::thread::sleep(std::time::Duration::from_millis(12));
+                }
                 Ok(())
             }
         }

@@ -7,6 +7,7 @@ each needs. The full guide is the docs'
 
 ```sh
 ./check.sh      # formatting, clippy, the plugins, the tests: what CI runs on all three, and what has to pass
+scripts/record-demo.sh  # records the README's GIF from docs/demo (macOS, with Screen Recording allowed)
 ```
 
 A change comes with a test that fails without it. The model is never asked in a test:

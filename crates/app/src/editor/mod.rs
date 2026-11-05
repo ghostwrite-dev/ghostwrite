@@ -106,7 +106,11 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { language_servers: true, asides: true, backend: Backend::available() }
+        #[cfg(feature = "demo")]
+        let backend = crate::demo::backend().or_else(Backend::available);
+        #[cfg(not(feature = "demo"))]
+        let backend = Backend::available();
+        Self { language_servers: true, asides: true, backend }
     }
 }
 

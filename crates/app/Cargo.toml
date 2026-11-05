@@ -31,6 +31,8 @@ unicode-width.workspace = true
 default = ["local-models", "wasm-plugins"]
 local-models = ["ghostwrite-model/llama"]
 wasm-plugins = ["dep:ghostwrite-wasm"]
+# Plays the README's demo (`scripts/record-demo.sh`).
+demo = []
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

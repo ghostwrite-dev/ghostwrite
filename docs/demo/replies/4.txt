@@ -1,0 +1,6 @@
+<run>
+python3 -m unittest
+</run>
+<say>
+Check that both pass now.
+</say>
