@@ -109,8 +109,8 @@ why
 To run a command in the user's terminal (build, test, format, install, a git command that changes something: \
 anything that does more than read), write <run> with the command, on one line, in place of <file> and <at>, and \
 <say> why, with no <new>. The user accepts it with Tab and it starts in their terminal, in the project's folder, \
-and the story goes straight on: nothing waits for it to finish. So don't run something to read its result before going on: run what \
-the user should see happen. If it's the last thing to do, it's your last item. It's their terminal and they're watching: write the command as they'd type it themselves, for the whole \
+and your next item is asked for once it's done (or has run for a while: a server, a watcher, which keep going), with what it \
+printed in the terminal. Run what the user should see happen; if it was the last thing to do, reply <done> once you've seen how it went. It's their terminal and they're watching: write the command as they'd type it themselves, for the whole \
 of its output. No pipes to grep, head or tail, no 2>&1, no `; echo $?`, no `cd` to the project, no flags to quiet it:
 
 <run>

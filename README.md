@@ -106,25 +106,37 @@ bracket matching the one at the cursor is marked.
 | `⌘=`, `⌘-`, `⌘0` | zoom the window in, out, and back to 100% |
 
 The model reads the terminal: what's on it (and some scrollback) goes with
-each request, and again in a follow-up when it's changed. It types into it
+each request, and in a follow-up, what's come since the last command was run in it,
+when that's changed. It types into it
 only what you accept: a command it proposes (to build, test, install) waits in
 the terminal as a step does in a file, grey at the prompt with its note above and
-its keys below, and Tab sets it going and goes straight on to the next step (or, if
-it was the last, ends the story): nothing waits for it to finish. It can
-ask for a new tab of the terminal to run it in, or to press Ctrl-C, which Tab does just the same. A command runs as you'd type it, for all of its output:
+its keys below, and Tab sets it going. The next step is asked for once it's done (the
+shell back at its prompt, and quiet), with what it printed, so the model sees how it went;
+meanwhile the corner says what's running. One that keeps going (a server, a watcher) is
+waited for half a minute, then the story goes on, the model told it's still running; Tab
+goes on sooner. A command is never typed into a program: with one running in the shell in
+front, Tab runs it in a new tab, as the corner says. What you'd typed on the shell's line is
+given up first (as Ctrl-C does), and the command goes in as a paste, so the shell's own
+plugins leave it be. The model can ask for a new tab of the terminal to run it in, or to press
+Ctrl-C (in the shell its command ran in, wherever you've been since), which Tab does just
+the same. A command runs as you'd type it, for all of its output:
 what a model adds to read less of it (`| tail`, `| grep`, `2>&1`, `; echo $?`) is taken off.
+The shells start with `PAGER` and `GIT_PAGER` set to `cat`, so `git log` prints all of it
+into the scrollback, to read (Esc Esc) and for the model, rather than waiting in `less`. A
+program that asks the terminal's colors is told the theme's.
 
 Esc Esc in the terminal doesn't leave it: the keys read it instead, in normal
 mode, as a file that can't be edited. Its scrollback and screen are the text: the
 motions, select mode, `x`, `/` and `n`, `y` all work as in a file, and the selection
 shows on the terminal. What's printed meanwhile comes in under it, the selection staying
 on its text. Enter (or `gf`, which works in files too) opens the file a line names, at
-its line and column (`src/main.rs:12:5`), and `space a` asks about what's selected. `i`,
+its line and column (`src/main.rs:12:5`), and `space a` asks about what's selected (from
+an empty tab of its own, whatever's in front: the code isn't what it's about). `i`,
 `a` or `o` go back to typing on the shell's line, and Esc goes back to the code. An Esc
 on its own still reaches the shell, a moment later; two in a row never do. A story's
 command is reviewed the same way, in AI mode: look through what's on the terminal with
-the motions, and Tab runs it; if that was the last thing to do, the keys stay on the
-terminal in normal mode, to read what it prints.
+the motions, and Tab runs it; if the story ends with it, the keys stay on the
+terminal in normal mode, to read what it printed.
 
 Hold ⌘ over a web address or a file the terminal printed (`src/main.rs:12:5`) and it's
 underlined: ⌘-click opens the address in your browser, or the file in the editor at that
@@ -132,7 +144,8 @@ line.
 
 The terminal has tabs too, a shell in each. In terminal mode the Mac's tab keys
 are about them: `⌘T` another, `⌘W` closes it, `⌘⇧[` and `⌘⇧]` go through them,
-and `⌘⌥←` and `⌘⌥→` (or dragging) move them. The model reads the one in front. To look around the project it writes
+and `⌘⌥←` and `⌘⌥→` (or dragging) move them. The model reads the one in front, or while a
+story's up, the one its command last ran in. To look around the project it writes
 `<tool>` blocks, which Ghostwrite runs in the background.
 
 `:preview` (or `space v`) opens a Typst file's pages in a tab of their own, as a PDF has, compiled

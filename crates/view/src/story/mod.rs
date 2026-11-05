@@ -1,7 +1,8 @@
 //! `space a`: ask the model about the lines at the cursor (or the selection),
 //! then review its reply one item at a time where it applies, across the
 //! project's files, and the terminal: a command the model proposes runs there
-//! when it's accepted, and the story goes on without waiting for it. Tab
+//! when it's accepted, and the next item is asked for once it's done, with what
+//! it printed (the app waits for it, see [`TerminalNow`]). Tab
 //! accepts (or reads on); there's no skipping: Enter
 //! says what you want instead, and the next item follows it. Esc stops. A
 //! file to create is shown in the file tree. An item that can't be found or
@@ -41,7 +42,7 @@ use ghostwrite_ai::{ItemId, Story};
 use ghostwrite_core::{Range, Review};
 
 use crate::{Autoscroll, DocId, Project};
-pub use request::{AskAhead, Event};
+pub use request::{AskAhead, Event, TerminalNow};
 use request::{Conversation, Used};
 pub use review::{Located, Show, Waiting};
 
@@ -143,6 +144,16 @@ impl StoryState {
         tab.view.selection = Range::new(span.start, end.max(span.start));
         let mut state = StoryState::new(tab.doc.id, lines, root);
         state.selection = kept;
+        Some(state)
+    }
+
+    /// About what's selected on the terminal (`quoted`), anchored in the tab in front,
+    /// which the app makes an empty one: the code isn't what it's about, so none of it is
+    /// marked, selected or shown as asked about.
+    pub fn about_terminal(project: &Project, quoted: String) -> Option<Self> {
+        let tab = project.tab()?;
+        let mut state = StoryState::new(tab.doc.id, 0..1, project.root.clone());
+        state.quoted = Some(quoted).filter(|quoted| !quoted.trim().is_empty());
         Some(state)
     }
 
@@ -255,7 +266,17 @@ impl StoryState {
     /// Accept the current item, carrying it out (its command, if it's one,
     /// the app has run). Whether it was: if not, it's said why.
     pub fn accept(&mut self, project: &mut Project) -> bool {
-        if let Err(e) = self.accept_item(project) {
+        self.accept_saying(project, None)
+    }
+
+    /// Accept the current item, a command the app ran as `ran` says (in a new tab, say,
+    /// rather than where it was proposed): the model is told what was done.
+    pub fn accept_command(&mut self, project: &mut Project, ran: &ghostwrite_ai::protocol::Run) -> bool {
+        self.accept_saying(project, Some(ran.done()))
+    }
+
+    fn accept_saying(&mut self, project: &mut Project, said: Option<String>) -> bool {
+        if let Err(e) = self.accept_item(project, said) {
             project.say(e);
             return false;
         }

@@ -1,5 +1,5 @@
 //! Where to look next. Wherever a story's step is shown (lines of code, a proposal in the file
-//! tree, a command in the terminal, or the model thinking, in the corner), it says where it is
+//! tree, a command in the terminal, or the model thinking, or a command running, in the corner), it says where it is
 //! on screen ([`Editor::seen`]). When the story moves on to a step, a light stretches from where
 //! it was to where it is now, its leading edge first and the rest catching up, and settles there,
 //! so the eye follows it without looking for it. `"animations": false` in the config turns
@@ -141,11 +141,17 @@ impl Editor {
             Mark::Thinking if let Some(path) = &state.asking_to_read => {
                 (format!("read {}? ⇥ yes · ⏎ no", ghostwrite_ai::tools::shown(path)), theme.foreground, Some(mark))
             }
+            // The story's command is running: what's next is asked once it's done.
+            Mark::Thinking if let Some(running) = &self.terminal.running => {
+                (format!("{}{}", running.doing, super::story_view::dots()), theme.muted_foreground, Some(mark))
+            }
             Mark::Thinking if story.error.is_some() => (super::story_view::waiting_hint(Some(story)), theme.danger, Some(mark)),
             Mark::Thinking => (super::story_view::waiting_hint(Some(story)), theme.muted_foreground, Some(mark)),
             Mark::Ready(_) => ("the next step's ready · ⇥ to go to it".to_string(), theme.foreground, Some(mark)),
             // Looked away from the step: Tab comes back to it.
             Mark::Item(_) if state.wandered => ("⇥ back to the step".to_string(), theme.muted_foreground, None),
+            // A command that can't go where it would (a program's running there): here, what Tab does instead.
+            Mark::Item(_) if let Some(elsewhere) = self.command_elsewhere() => (elsewhere, theme.foreground, Some(mark)),
             _ => return None,
         };
         // What it's thinking about, as the user said it, over what it's doing.

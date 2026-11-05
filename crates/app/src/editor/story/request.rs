@@ -171,11 +171,16 @@ impl Live {
 
 impl Editor {
     /// Send the story's request on a background thread; the reply streams in.
-    pub(super) fn send_request(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::editor) fn send_request(&mut self, cx: &mut Context<Self>) {
+        // The story's command is running: it's asked once that's done, with what it printed.
+        if let Some(running) = self.terminal.running.as_mut() {
+            running.ask = true;
+            return cx.notify();
+        }
         // The model reads the project from disk: let it see what's on screen.
         self.project.write_all();
         let Some(backend) = self.backend.clone() else { return };
-        let terminal = self.terminal_context();
+        let terminal = self.terminal_now();
         let Some(live) = self.story.as_mut() else { return };
         let Some(req) = live.state.to_send(&self.project, terminal) else { return };
         // Whatever was still coming is superseded, and what it asked goes unanswered (no).

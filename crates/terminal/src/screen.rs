@@ -147,7 +147,7 @@ fn color(color: ansi::Color, colors: &Colors) -> Color {
 }
 
 /// One of xterm's 256 colors: the sixteen, a 6×6×6 cube, then grays.
-fn indexed(i: u8) -> Color {
+pub(crate) fn indexed(i: u8) -> Color {
     let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
     match i {
         0..16 => Color::Ansi(i),

@@ -218,12 +218,16 @@ impl StoryState {
         }
     }
 
-    /// Accept the current item, carrying it out (a command, the app runs).
-    pub(super) fn accept_item(&mut self, project: &mut Project) -> Result<(), String> {
+    /// Accept the current item, carrying it out (a command, the app runs), and tell the
+    /// model `said` of it, if that's not what it would be told.
+    pub(super) fn accept_item(&mut self, project: &mut Project, said: Option<String>) -> Result<(), String> {
         let Some((id, item)) = self.story.as_ref().and_then(|s| Some((s.current()?, s.current_item()?))) else { return Ok(()) };
         self.apply(project, id, &item)?;
         if let Some(story) = self.story.as_mut() {
-            story.accept();
+            match said {
+                Some(said) => story.accept_saying(Some(said)),
+                None => story.accept(),
+            }
         }
         Ok(())
     }

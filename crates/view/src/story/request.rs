@@ -1,7 +1,7 @@
 //! What the model is asked, and what it says back. A request is the story so
 //! far, the file asked about and the others it's in, and what's around it in
-//! the editor; the terminal is told as it was when the story started, and
-//! again in a follow-up when it's changed. While an item is reviewed, the
+//! the editor; the terminal is told as it was when the story started, and in a
+//! follow-up, from the last command run in it on, when that's changed. While an item is reviewed, the
 //! next one is asked for ahead, assuming this one's accepted, in a fork of
 //! the Claude Code session.
 //!
@@ -38,25 +38,35 @@ pub(super) struct Conversation {
     session_from: Option<u64>,
 }
 
-/// Something about the editor the model is told as it was when the story
-/// started, and again in the newest turn whenever it's changed since.
+/// The terminal as a request goes out: its end, and what's come since the last
+/// command was entered there (from that command's line on), if one has been.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalNow {
+    pub text: String,
+    pub since_command: Option<String>,
+}
+
+/// The terminal, as the model is told it: as it was when the story started, and in
+/// the newest turn, from the last command on, whenever that's changed since. What's
+/// further up (a clock in an old prompt, lines scrolled away) isn't worth telling again.
 #[derive(Default)]
 struct Told {
     /// What the first request said: `None` until it's sent. Kept, so the
     /// conversation's start stays the same.
     first: Option<Option<String>>,
-    /// What the model was last told.
+    /// What the model was last told of it, from the last command on.
     last: Option<String>,
 }
 
 impl Told {
     /// It's `now` as a request goes out: what's changed since the model was
     /// last told, if anything (the first request is told it as it starts).
-    fn tell(&mut self, now: Option<String>) -> Option<String> {
-        let changed = self.first.is_some() && now != self.last;
-        self.last.clone_from(&now);
-        self.first.get_or_insert_with(|| now.clone());
-        now.filter(|_| changed)
+    fn tell(&mut self, now: Option<TerminalNow>) -> Option<String> {
+        let recent = now.as_ref().map(|now| now.since_command.clone().unwrap_or_else(|| now.text.clone()));
+        let changed = self.first.is_some() && recent != self.last;
+        self.last.clone_from(&recent);
+        self.first.get_or_insert_with(|| now.map(|now| now.text));
+        recent.filter(|_| changed)
     }
 
     /// What the conversation starts with.
@@ -140,7 +150,7 @@ impl StoryState {
     /// request says what's in the terminal; a follow-up, what it shows now. It's
     /// timed until there's something to look at, and what the model was still
     /// asking goes unanswered (no).
-    pub fn to_send(&mut self, project: &Project, terminal: Option<String>) -> Option<Request> {
+    pub fn to_send(&mut self, project: &Project, terminal: Option<TerminalNow>) -> Option<Request> {
         let seen = self.conversation.terminal.tell(terminal);
         if let (Some(terminal), Some(story)) = (seen, self.story.as_mut()) {
             story.saw_terminal(terminal);
@@ -363,7 +373,18 @@ impl Used {
 
 #[cfg(test)]
 mod used_tests {
-    use super::Used;
+    use super::{TerminalNow, Told, Used};
+
+    #[test]
+    fn a_follow_up_is_told_the_terminal_from_the_last_command_on_when_that_changes() {
+        let now = |text: &str, since: &str| Some(TerminalNow { text: text.into(), since_command: Some(since.into()) });
+        let mut told = Told::default();
+        assert_eq!(told.tell(now("12:00 $ ls\nsrc\n12:01 $ make\nok\n12:02 $", "12:01 $ make\nok\n12:02 $")), None, "the first request has it all");
+        assert_eq!(told.started().as_deref(), Some("12:00 $ ls\nsrc\n12:01 $ make\nok\n12:02 $"));
+        assert_eq!(told.tell(now("12:01 $ make\nok\n12:02 $", "12:01 $ make\nok\n12:02 $")), None, "only further up changed: nothing new");
+        let after = told.tell(now("… lots …\n12:02 $ cargo test\nall passed\n12:03 $", "12:02 $ cargo test\nall passed\n12:03 $"));
+        assert_eq!(after.as_deref(), Some("12:02 $ cargo test\nall passed\n12:03 $"), "a command ran: it, and what it printed");
+    }
 
     #[test]
     fn what_a_story_used_is_added_up_and_said() {

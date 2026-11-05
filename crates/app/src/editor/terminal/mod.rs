@@ -5,25 +5,33 @@
 //! and `cmd-j` hides it. Dragging the mouse selects (a double click a word,
 //! a triple click a line), and `cmd-c` copies it.
 //! The model is shown what's on it with every request (and, in a follow-up,
-//! again when it's changed); what it types there is only a command the
+//! what's come since the last command, when that's changed); what it types there is only a command the
 //! user accepted ([`Editor::run_in_terminal`]). A command waiting to be accepted
 //! shows here as a step does in a file: its note above the prompt, the command in
 //! grey at the cursor, and the keys under it. It may go in a new tab, or be a Ctrl-C.
-//! Tab sets it going and the story goes straight on: nothing waits for it to end. The shell
+//! Tab sets it going, and the story asks for what's next once it's done: once the
+//! shell is back at its prompt and quiet, or after a while ([`COMMAND_WAIT`]) for one
+//! that keeps going, a server say (Tab goes on sooner). Meanwhile the corner says
+//! what's running. It's never typed into a program: with one running in front,
+//! it goes in a new tab. The shell
 //! keeps running while it's hidden; when it exits, its tab closes, and with the
 //! last the pane. Its top edge drags to resize it, and the height is kept for
 //! next time.
 //!
 //! It has tabs of its own, each a shell of its own: in terminal mode, where
 //! only ⌘ keys are the app's, the keys for tabs mean these. The tabs show once
-//! there are two. The model reads the one in front; a story's Ctrl-C goes to the one
-//! its command ran in, wherever you've been since.
+//! there are two. The model reads the one in front, or while a story's up, the one
+//! its command last ran in; a story's Ctrl-C goes there too, wherever you've been since.
 //! [`super::terminal_view`] draws it.
 
+use std::time::Duration;
+
 use futures::StreamExt as _;
+use futures::channel::mpsc::UnboundedSender;
 use ghostwrite_ai::protocol::{Run, RunIn};
 use ghostwrite_core::Mode;
-use ghostwrite_terminal::{Button, LinkTo, Press, Terminal, link_in};
+use ghostwrite_terminal::{Button, LinkTo, Palette, Press, Terminal, Waited, link_in};
+use ghostwrite_view::story::TerminalNow;
 use gpui::{
     AnyElement, Context, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, Task, Window, div,
     prelude::*,
@@ -32,7 +40,7 @@ use gpui::{
 use super::Editor;
 use super::element::Metrics;
 use super::terminal_view::TerminalView;
-use crate::theme::{pt, theme};
+use crate::theme::{Theme, pt, theme};
 use crate::ui::pane::{Edge, Resizable};
 
 mod keys;
@@ -48,6 +56,12 @@ const MIN_HEIGHT: f32 = 60.;
 const ROOM_ABOVE: f32 = 120.;
 /// How long an Esc in the terminal waits for a second, which would leave, before it goes to the shell.
 const ESCAPE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long the shell has to have printed nothing, back at its prompt, to be done.
+const QUIET: Duration = Duration::from_millis(250);
+/// How long a story's command is waited for before the story goes on without it.
+pub(super) const COMMAND_WAIT: Duration = Duration::from_secs(30);
+/// How long a shell's prompt is waited for (a new one starting, or after a Ctrl-C) before typing anyway.
+const PROMPT_WAIT: Duration = Duration::from_secs(10);
 
 type Point = gpui::Point<Pixels>;
 
@@ -59,11 +73,11 @@ pub(super) struct TerminalPane {
     /// Which is in front.
     pub(super) active: usize,
     /// The number of the shell the story's command last ran in.
-    ran_in: Option<usize>,
+    pub(super) ran_in: Option<usize>,
     /// An Esc that hasn't gone to the shell yet: another straight after leaves
     /// terminal mode, and the shell never sees either (zsh would take the next key
     /// as Alt and it); anything else, or a moment, and it goes on its way.
-    held_escape: Option<(Vec<u8>, Task<()>)>,
+    pub(super) held_escape: Option<(Vec<u8>, Task<()>)>,
     /// Scrolling that hasn't added up to a line yet.
     scrolled: f32,
     /// Where its cells are on screen, as last drawn: the top left one, and a cell's size.
@@ -77,6 +91,23 @@ pub(super) struct TerminalPane {
     pub(super) reading: Option<super::reading::Reading>,
     /// The link under the mouse while ⌘ is held: underlined, and ⌘-click opens it.
     pub(super) link: Option<Link>,
+    /// The story's command that's running, until it's done.
+    pub(super) running: Option<Running>,
+    /// How long that's waited for ([`COMMAND_WAIT`]).
+    pub(super) command_wait: Duration,
+}
+
+/// A command the story set going: what's next is asked for once it's done.
+pub(super) struct Running {
+    /// The number of the shell it's in.
+    shell: usize,
+    /// What it's doing, as the corner says it: `running `cargo test``.
+    pub(super) doing: String,
+    /// It's been typed (or a Ctrl-C given): a command waits for the shell's prompt first.
+    typed: bool,
+    /// The request for what's next is waiting for it.
+    pub(super) ask: bool,
+    _task: Task<()>,
 }
 
 /// A link on the screen: on which row, across which columns, and to what.
@@ -92,6 +123,8 @@ pub(super) struct Shell {
     /// What its tab says: it keeps it when tabs move or others close.
     pub(super) number: usize,
     pub(super) terminal: Terminal,
+    /// Sends it round again as if it had printed: to read it once more, later.
+    poke: UnboundedSender<()>,
     _task: Task<()>,
 }
 
@@ -133,6 +166,8 @@ impl Default for TerminalPane {
             reporting: None,
             reading: None,
             link: None,
+            running: None,
+            command_wait: COMMAND_WAIT,
         }
     }
 }
@@ -144,7 +179,7 @@ impl TerminalPane {
     }
 
     /// Another shell is in front: what was going on in the last one stops here.
-    fn switch_to(&mut self, ix: usize) {
+    pub(super) fn switch_to(&mut self, ix: usize) {
         self.active = ix.min(self.shells.len().saturating_sub(1));
         self.held_escape = None;
         self.selecting = false;
@@ -188,27 +223,132 @@ impl Editor {
     }
 
     /// Do what the story's accepted `run` says in the terminal, as if typed there, and
-    /// show it: the command (what's on the command line is cleared first), in a new tab
-    /// if it says so, or a Ctrl-C. A shell is started if there's none. A command can't be
-    /// typed while a full-screen program has the terminal; a Ctrl-C can, it's the program's.
-    pub(super) fn run_in_terminal(&mut self, run: &Run, cx: &mut Context<Self>) -> Result<(), String> {
-        if self.terminal.shells.is_empty() || run.how == RunIn::NewTab {
-            self.start_shell(cx)?;
-        }
-        let Some(terminal) = self.terminal.current() else { return Err("the terminal has no shell".into()) };
+    /// show it: the command, in a new tab if it says so, or a Ctrl-C to the shell its
+    /// command last ran in. A command is never typed into a program: with one running in
+    /// front (or a full-screen one), it goes in a new tab. What the user had typed on the
+    /// line is given up first, and the command typed once the shell's at its prompt. A
+    /// shell is started if there's none. What was done, as it was done.
+    pub(super) fn run_in_terminal(&mut self, run: &Run, cx: &mut Context<Self>) -> Result<Run, String> {
+        let mut run = run.clone();
         if run.how == RunIn::Interrupt {
-            terminal.input(b"\x03".to_vec());
-        } else {
-            if terminal.modes().full_screen {
-                return Err("a program has the terminal: quit it, then ⇥ again".into());
+            let ix = match self.terminal.ran_in {
+                Some(number) => self.terminal.shells.iter().position(|shell| shell.number == number).ok_or("the shell its command ran in has closed")?,
+                None if self.terminal.shells.is_empty() => return Err("the terminal has no shell".into()),
+                None => self.terminal.active,
+            };
+            if ix != self.terminal.active {
+                self.terminal.switch_to(ix);
+                self.read_the_shell_in_front(cx);
             }
-            // The line typed so far goes, so the command runs on its own.
-            terminal.input(format!("{}{}\r", ghostwrite_terminal::CLEAR_LINE, run.command).into_bytes());
+            let terminal = &self.terminal.shells[ix].terminal;
+            let after = terminal.watch().changes();
+            terminal.input(b"\x03".to_vec());
+            self.watch_command(ix, &run, after, cx);
+        } else {
+            let busy = self.terminal.current().is_some_and(|terminal| terminal.modes().full_screen || terminal.busy() == Some(true));
+            if run.how == RunIn::Here && busy {
+                run.how = RunIn::NewTab;
+                let number = self.terminal.shells[self.terminal.active].number;
+                self.project.say(format!("shell {number} is busy: `{}` went in a new tab", run.command));
+            }
+            if self.terminal.shells.is_empty() || run.how == RunIn::NewTab {
+                self.start_shell(cx)?;
+                self.read_the_shell_in_front(cx);
+            }
+            let ix = self.terminal.active;
+            let terminal = &self.terminal.shells[ix].terminal;
+            // A new shell is typed into once its prompt's up; one with something typed on its
+            // line gives that up first, as Ctrl-C does it in vi mode and at a `dquote>` too.
+            let after = if terminal.typed() {
+                let after = terminal.watch().changes();
+                terminal.input(ghostwrite_terminal::ABANDON_LINE.to_vec());
+                after
+            } else {
+                0
+            };
+            self.watch_command(ix, &run, after, cx);
         }
-        self.terminal.ran_in = self.terminal.shells.get(self.terminal.active).map(|shell| shell.number);
+        self.terminal.ran_in = Some(self.terminal.shells[self.terminal.active].number);
         self.terminal.shown = true;
         cx.notify();
-        Ok(())
+        Ok(run)
+    }
+
+    /// Watch shell `ix` for `run`, which it's been given (a Ctrl-C), or is typed once the
+    /// shell's at its prompt (printed since the count of changes was `after`, and quiet);
+    /// once it's done, or [`COMMAND_WAIT`] has gone by, the story goes on.
+    fn watch_command(&mut self, ix: usize, run: &Run, after: u64, cx: &mut Context<Self>) {
+        let Some(shell) = self.terminal.shells.get(ix) else { return };
+        let (number, watch, wait) = (shell.number, shell.terminal.watch(), self.terminal.command_wait);
+        let command = (run.how != RunIn::Interrupt).then(|| run.command.clone());
+        let doing = if command.is_some() { format!("running `{}`", run.command) } else { format!("stopping {}", run.command) };
+        let task = cx.spawn(async move |this, cx| {
+            let done = match command {
+                Some(command) => {
+                    watch.until_idle(after, QUIET, PROMPT_WAIT).await.ok();
+                    match this.update(cx, |this, _| this.type_command(number, &command)) {
+                        Ok(Some(done)) => done,
+                        _ => return,
+                    }
+                }
+                None => watch.until_idle(after, QUIET, wait),
+            };
+            let waited = done.await.unwrap_or(Waited::Exited);
+            this.update(cx, |this, cx| this.command_done(waited, cx)).ok();
+        });
+        // A Ctrl-C has been given already; a command is typed once the prompt's up.
+        let typed = run.how == RunIn::Interrupt;
+        self.terminal.running = Some(Running { shell: number, doing, typed, ask: false, _task: task });
+    }
+
+    /// The story's command goes on shell `number`'s line (as a paste, if the shell takes
+    /// them, so what it does with typed keys, closing brackets say, leaves it be) and runs:
+    /// what's waited for, for it to be done.
+    fn type_command(&mut self, number: usize, command: &str) -> Option<futures::channel::oneshot::Receiver<Waited>> {
+        let terminal = &self.terminal.shells.iter().find(|shell| shell.number == number)?.terminal;
+        let command = command.replace(['\x1b', '\r', '\n'], " ");
+        let bytes = if terminal.modes().bracketed_paste { format!("\x1b[200~{command}\x1b[201~\r") } else { format!("{command}\r") };
+        let watch = terminal.watch();
+        let done = watch.until_idle(watch.changes(), QUIET, self.terminal.command_wait);
+        terminal.input(bytes.into_bytes());
+        if let Some(running) = self.terminal.running.as_mut() {
+            running.typed = true;
+        }
+        Some(done)
+    }
+
+    /// The story's command is done, or has run long enough (or Tab says to go on): what's
+    /// next is asked for, if it's waiting, the model told if it's still running.
+    pub(super) fn command_done(&mut self, waited: Waited, cx: &mut Context<Self>) {
+        let Some(running) = self.terminal.running.take() else { return };
+        let shell = self.terminal.shells.iter().find(|shell| shell.number == running.shell);
+        if waited != Waited::Exited && shell.is_some_and(|shell| shell.terminal.busy() == Some(true)) {
+            self.project.say(format!("still {}: the story goes on", running.doing));
+            if let Some(story) = self.story.as_mut().and_then(|live| live.state.story.as_mut()) {
+                story.tell(format!("it's still {} in the terminal; below is what it has printed so far", running.doing));
+            }
+        }
+        if running.ask
+            && let Some(live) = self.story.as_mut()
+        {
+            // Timed from here: what the model takes, not the command.
+            live.state.timer = None;
+            self.send_request(cx);
+        }
+        cx.notify();
+    }
+
+    /// Tab while the story waits on its command: it goes on without waiting more. Whether
+    /// it was waiting on one (not on the shell's prompt, to type it).
+    pub(super) fn go_on_without_the_command(&mut self, cx: &mut Context<Self>) -> bool {
+        match &self.terminal.running {
+            Some(running) if running.typed => {
+                self.command_done(Waited::StillRunning, cx);
+                true
+            }
+            Some(_) => true,
+            None => false,
+        }
     }
 
     /// The story is at a command: the terminal shows, at its prompt, starting a
@@ -227,18 +367,25 @@ impl Editor {
         }
         if let Some(terminal) = self.terminal.current() {
             terminal.scroll_to_bottom();
-            if !interrupt && terminal.modes().full_screen {
-                self.project.say("a program has the terminal: quit it to see the command");
-            }
         }
     }
 
     /// Whether the terminal is showing a command for the story to run. It can't
-    /// while it's hidden, or a full-screen program has it.
+    /// while it's hidden, or a program has it (a full-screen one; or for a command
+    /// to type, any: it goes in a new tab, and the corner says so).
     pub(super) fn command_proposed(&self) -> bool {
-        self.terminal.shown
-            && self.terminal.current().is_some_and(|terminal| !terminal.modes().full_screen)
-            && self.story.as_ref().is_some_and(|state| state.command_to_run().is_some())
+        let Some(run) = self.story.as_ref().and_then(|state| state.command_to_run()) else { return false };
+        let Some(terminal) = self.terminal.current().filter(|_| self.terminal.shown) else { return false };
+        !terminal.modes().full_screen && (run.how == RunIn::Interrupt || terminal.busy() != Some(true))
+    }
+
+    /// The story's command, when it can't be run where it would be: what Tab does instead.
+    pub(super) fn command_elsewhere(&self) -> Option<String> {
+        let run = self.story.as_ref()?.command_to_run().filter(|run| run.how != RunIn::Interrupt)?;
+        let shell = self.terminal.shells.get(self.terminal.active)?;
+        let modes = shell.terminal.modes();
+        (modes.full_screen || shell.terminal.busy() == Some(true))
+            .then(|| format!("shell {} is busy: ⇥ runs `{}` in a new tab · ⏎ redirect", shell.number, run.command))
     }
 
     /// The story's command is done: the shell it ran in comes to the front,
@@ -253,8 +400,10 @@ impl Editor {
     /// A new shell in a tab right of the one in front, and in front.
     fn start_shell(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let poke = tx.clone();
         // Sized for real when it's first drawn.
         let terminal = Terminal::start(&self.project.root, 80, 24, move || drop(tx.unbounded_send(())))?;
+        terminal.set_palette(palette(theme(cx)));
         let number = (1..).find(|n| self.terminal.shells.iter().all(|shell| shell.number != *n)).unwrap_or(1);
         let task = cx.spawn(async move |this, cx| {
             while rx.next().await.is_some() {
@@ -267,7 +416,7 @@ impl Editor {
             }
         });
         let ix = if self.terminal.shells.is_empty() { 0 } else { self.terminal.active + 1 };
-        self.terminal.shells.insert(ix, Shell { number, terminal, _task: task });
+        self.terminal.shells.insert(ix, Shell { number, terminal, poke, _task: task });
         self.terminal.switch_to(ix);
         Ok(())
     }
@@ -286,7 +435,11 @@ impl Editor {
         if ix >= self.terminal.shells.len() {
             return;
         }
-        self.terminal.shells.remove(ix);
+        let closed = self.terminal.shells.remove(ix);
+        // The story's command was running there: it's over.
+        if self.terminal.running.as_ref().is_some_and(|running| running.shell == closed.number) {
+            self.command_done(Waited::Exited, cx);
+        }
         let active = self.terminal.active;
         self.terminal.switch_to(if ix < active { active - 1 } else { active });
         if self.terminal.shells.is_empty() {
@@ -330,14 +483,15 @@ impl Editor {
 
     /// There's something new on shell `number`, or it exited (then its tab
     /// closes, and `false`: there's nothing more to come).
-    fn shell_changed(&mut self, number: usize, cx: &mut Context<Self>) -> bool {
+    pub(super) fn shell_changed(&mut self, number: usize, cx: &mut Context<Self>) -> bool {
         // Hidden, there's nothing to draw (the model reads it when it asks).
         if self.terminal.shown {
             cx.notify();
         }
         let Some(ix) = self.terminal.shells.iter().position(|shell| shell.number == number) else { return false };
         if !self.terminal.shells[ix].terminal.exited() {
-            self.read_again(number);
+            let poke = self.terminal.shells[ix].poke.clone();
+            self.printed(number, &poke);
             return true;
         }
         self.close_shell(ix, cx);
@@ -347,9 +501,25 @@ impl Editor {
         false
     }
 
-    /// What the model is told: the end of what's on the terminal, if there's a shell.
+    /// The shell the model reads: while a story's up, the one its command last ran in
+    /// (wherever you've been since), or else the one in front.
+    fn shell_read(&self) -> Option<&Terminal> {
+        let ran = self.story.as_ref().and(self.terminal.ran_in).and_then(|number| self.terminal.shells.iter().find(|shell| shell.number == number));
+        ran.or_else(|| self.terminal.shells.get(self.terminal.active)).map(|shell| &shell.terminal)
+    }
+
+    /// The end of what's on the terminal the model reads, if there's a shell.
+    #[cfg(test)]
     pub(super) fn terminal_context(&self) -> Option<String> {
-        self.terminal.current().map(|t| t.text(MAX_CONTEXT)).filter(|text| !text.trim().is_empty())
+        self.shell_read().map(|t| t.text(MAX_CONTEXT)).filter(|text| !text.trim().is_empty())
+    }
+
+    /// What the model is told of the terminal as a request goes out: its end, and what's
+    /// come since the last command there.
+    pub(super) fn terminal_now(&self) -> Option<TerminalNow> {
+        let terminal = self.shell_read()?;
+        let text = terminal.text(MAX_CONTEXT);
+        (!text.trim().is_empty()).then(|| TerminalNow { text, since_command: terminal.since_command(MAX_CONTEXT) })
     }
 
     /// A key in terminal mode: to the shell, unless it's the app's (cmd), a
@@ -652,6 +822,10 @@ impl Editor {
             return None;
         }
         let theme = theme(cx).clone();
+        // The theme may have changed: a program that asks is told the colors as they are.
+        for shell in &self.terminal.shells {
+            shell.terminal.set_palette(palette(&theme));
+        }
         let active = self.in_terminal();
         Some(
             div()
@@ -689,4 +863,13 @@ impl Editor {
                 .into_any_element(),
         )
     }
+}
+
+/// The theme's colors, as a program in the terminal is told them.
+fn palette(theme: &Theme) -> Palette {
+    let rgb = |color: gpui::Hsla| {
+        let color = gpui::Rgba::from(color);
+        [color.r, color.g, color.b].map(|c| (c * 255.).round() as u8)
+    };
+    Palette { foreground: rgb(theme.foreground), background: rgb(theme.background), cursor: rgb(theme.cursor_normal), ansi: theme.ansi.map(rgb) }
 }

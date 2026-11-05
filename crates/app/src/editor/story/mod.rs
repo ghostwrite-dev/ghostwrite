@@ -26,18 +26,24 @@ use ghostwrite_view::story::{Do, Show, StoryState};
 use gpui::{Context, Window};
 
 use super::attention::Panel;
-use super::{Editor, PromptKind};
+use super::{DocId, Editor, PromptKind};
 use request::Requests;
 
 /// The story that's up: its state, and the requests it has on their way.
 pub(super) struct Live {
     pub(super) state: StoryState,
     requests: Requests,
+    /// The last item accepted was a command: if the story ends there, the keys stay on
+    /// the terminal, to read what it prints.
+    ran: bool,
+    /// Asked about the terminal: the empty tab it was asked from, which goes with it if
+    /// it's still empty, and the tab that was in front before.
+    scratch: Option<(DocId, Option<DocId>)>,
 }
 
 impl Live {
     fn new(state: StoryState) -> Self {
-        Self { state, requests: Requests::default() }
+        Self { state, requests: Requests::default(), ran: false, scratch: None }
     }
 }
 
@@ -59,17 +65,20 @@ impl Editor {
     /// Open the prompt about the cursor's lines (or the selection's), with
     /// text typed in.
     pub(super) fn open_story(&mut self, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab().is_some_and(|t| t.doc.read_only()) {
+        self.open_story_about(None, typed, window, cx);
+    }
+
+    /// Open the prompt about the cursor's lines, or about `quoted`, what was selected on
+    /// the terminal: then the code isn't looked at, whatever's in front (pages, say). It's
+    /// asked from an empty tab, which goes with the story.
+    pub(super) fn open_story_about(&mut self, quoted: Option<String>, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if quoted.is_none() && self.tab().is_some_and(|t| t.doc.read_only()) {
             self.project.say("the model doesn't comment on this: ask in the file it's made from");
             return;
         }
         if self.backend.is_none() {
             self.project.say("to ask, give it a Claude API key (`:api-key ‹key›`), install Claude Code (`claude`), or choose a local model (`:model`)");
             return;
-        }
-        // Nothing open: ask from an empty tab, which stays while the story's up.
-        if self.tab().is_none() {
-            self.new_buffer(cx);
         }
         if let Some(backend) = &self.backend {
             backend.warm(Some(&self.project.root), None);
@@ -78,12 +87,25 @@ impl Editor {
         if self.story.is_some() {
             self.finish_story(cx);
         }
+        let was = self.tab().map(|tab| tab.doc.id);
+        // Nothing open, or about the terminal: ask from an empty tab, which stays while the story's up.
+        if self.tab().is_none() || quoted.is_some() && !self.tab().is_some_and(|tab| tab.doc.is_pristine()) {
+            self.new_buffer(cx);
+        }
         // The story is reviewed in AI mode, and afterwards it's back to where you were.
         self.leave_insert();
         self.modal.enter(Mode::Ai);
         let from_select = self.modal.entered_from() == Some(Mode::Select);
-        let Some(state) = StoryState::about_selection(&mut self.project, from_select) else { return };
+        let state = match quoted.clone() {
+            Some(quoted) => StoryState::about_terminal(&self.project, quoted),
+            None => StoryState::about_selection(&mut self.project, from_select),
+        };
+        let Some(state) = state else { return };
+        let doc = state.doc;
         self.begin_story(state);
+        if let Some(live) = self.story.as_mut().filter(|_| quoted.is_some()) {
+            live.scratch = Some((doc, was.filter(|was| *was != doc)));
+        }
         self.open_prompt(PromptKind::Ask, typed, window, cx);
     }
 
@@ -131,6 +153,8 @@ impl Editor {
     fn begin_story(&mut self, state: StoryState) {
         self.project.tabs.hold(Some(state.doc));
         self.story = Some(Live::new(state));
+        // The model reads the shell in front, until this story runs something.
+        self.terminal.ran_in = None;
     }
 
     /// Enter in the prompt: the first ask, or (while reviewing) something
@@ -200,24 +224,30 @@ impl Editor {
         if self.story.as_ref().is_some_and(|live| live.lost_its_tab(&self.project)) {
             return self.finish_story(cx);
         }
-        let Some(command) = self.story.as_ref().map(|live| live.command_to_run()) else { return };
-        if let Some(run) = &command
-            && let Err(e) = self.run_in_terminal(run, cx)
-        {
-            return self.project.say(e);
-        }
-        let Some(live) = self.story.as_mut() else { return };
-        if !live.state.accept(&mut self.project) {
+        // Waiting on the story's command, with nothing up: Tab goes on without it.
+        let nothing_up = self.story.as_ref().is_some_and(|live| live.story.as_ref().is_none_or(|story| story.current().is_none()));
+        if nothing_up && self.go_on_without_the_command(cx) {
             return;
         }
-        // A command is set going, and the story goes on without waiting for it.
-        self.settle_story(cx);
-        // It was the last thing to do: the keys stay on the terminal, in normal mode, to
-        // read what it prints.
-        if command.is_some() && self.story.is_none() {
-            self.modal.enter(Mode::Normal);
-            self.start_reading(false, cx);
+        let Some(command) = self.story.as_ref().map(|live| live.command_to_run()) else { return };
+        let ran = match &command {
+            Some(run) => match self.run_in_terminal(run, cx) {
+                Ok(ran) => Some(ran),
+                Err(e) => return self.project.say(e),
+            },
+            None => None,
+        };
+        let Some(live) = self.story.as_mut() else { return };
+        let accepted = match &ran {
+            Some(ran) => live.state.accept_command(&mut self.project, ran),
+            None => live.state.accept(&mut self.project),
+        };
+        if !accepted {
+            return;
         }
+        live.ran = ran.is_some();
+        // A command is set going: what's next is asked for once it's done.
+        self.settle_story(cx);
     }
 
     /// Tab in the terminal, at the story's command: it runs, and the story goes on
@@ -249,8 +279,9 @@ impl Editor {
         let model = self.backend.as_ref().map(|b| b.id()).unwrap_or_default();
         let Some(live) = self.story.as_mut() else { return };
         let show = live.state.settle(&mut self.project, &model);
-        // A command to run: the terminal it runs in shows (unless the user's looking elsewhere).
-        if show != Show::Ready && self.story.as_ref().is_some_and(|live| live.command_to_run().is_some()) {
+        // A command to run, just come up: the terminal it runs in shows (unless the user's
+        // looking elsewhere). Only then: more of the reply coming in leaves the terminal be.
+        if matches!(show, Show::Tab(_)) && self.story.as_ref().is_some_and(|live| live.command_to_run().is_some()) {
             self.show_terminal_for_command(cx);
         }
         let in_terminal = self.command_proposed();
@@ -339,11 +370,16 @@ impl Editor {
         self.attention.on = Panel::Code;
         self.story_left_the_terminal();
         self.forget_where_the_story_was();
-        if let Some(Live { state, requests }) = self.story.take() {
+        // What it set going isn't waited for any more.
+        self.terminal.running = None;
+        let mut ran = false;
+        if let Some(Live { state, requests, ran: ran_last, scratch }) = self.story.take() {
             requests.stop();
+            ran = ran_last;
             if let Some(undo) = state.close(&mut self.project) {
                 self.last_story = undo;
             }
+            self.close_scratch(scratch, cx);
         } else {
             self.project.tabs.hold(None);
             self.project.tree.propose(None);
@@ -354,6 +390,27 @@ impl Editor {
             // The ask field had the keys: the code gets them back.
             self.refocus = true;
         }
+        // It ended with a command: the keys stay on the terminal, in normal mode, to read what it prints.
+        if ran && self.terminal.shown && !self.terminal.shells.is_empty() {
+            self.back_to_the_command();
+            self.modal.enter(Mode::Normal);
+            self.start_reading(false, cx);
+        }
         cx.notify();
+    }
+
+    /// A story about the terminal is over: the empty tab it was asked from goes, if it's
+    /// still empty, and the tab that was in front comes back.
+    fn close_scratch(&mut self, scratch: Option<(DocId, Option<DocId>)>, cx: &mut Context<Self>) {
+        let Some((doc, was)) = scratch else { return };
+        let Some(ix) = self.project.tabs.index_of_id(doc).filter(|ix| self.project.tabs.get(*ix).is_some_and(|tab| tab.doc.is_pristine())) else {
+            return;
+        };
+        let front = self.project.tabs.active_index() == ix;
+        self.project.close(ix);
+        if let Some(ix) = was.and_then(|was| self.project.tabs.index_of_id(was)).filter(|_| front) {
+            self.activate(ix, cx);
+        }
+        self.tab_changed(cx);
     }
 }

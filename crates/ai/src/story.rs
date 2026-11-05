@@ -8,16 +8,17 @@
 //! While you review an item, the next ones are already being asked for:
 //! up to [`PREFETCH`] ahead, each assuming you accept the ones before it.
 //! Accept, and the next is there (or streaming); say something, and the ones
-//! asked ahead are dropped and the next is asked for as usual.
+//! asked ahead are dropped and the next is asked for as usual. A command is
+//! where asking ahead stops: what comes after it depends on what it prints.
 //!
 //! A reply Ghostwrite can't use (one that breaks the format, an edit whose
 //! lines aren't in its file, a file that doesn't exist) goes back to the model
 //! the same way, as a correction, until it's right or [`MAX_REVISIONS`] tries
 //! in a row fail.
 //!
-//! A command is accepted like any other item: it's set going in the terminal
-//! and the story goes on, without waiting for it to end. A turn asked once
-//! it's going sees the terminal as it is then.
+//! A command is accepted like any other item: it's set going in the terminal,
+//! and the next item is asked for once it's done (the editor waits for it, or
+//! for a while), the turn showing what it printed.
 //!
 //! This is the bookkeeping only. Applying an accepted edit to a buffer,
 //! creating a file or running a command is the editor's job; it tells the
@@ -418,13 +419,27 @@ impl Story {
 
     /// The current item was accepted (and applied, or set going), or read.
     pub fn accept(&mut self) {
+        let said = self.current_item().and_then(|item| decided_of(&item));
+        self.accept_saying(said);
+    }
+
+    /// The current item was accepted, and what came of it is `said` (a command
+    /// that went in a new tab, say), not what it would have been.
+    pub fn accept_saying(&mut self, said: Option<String>) {
         let Some(id) = self.current else { return };
         self.revisions = 0;
         self.current = None;
-        if let Some(said) = self.item(id).and_then(|item| decided_of(&item)) {
-            self.decided.push(said);
-        }
+        self.decided.extend(said);
         self.verdicts.insert(id, Verdict::Accepted);
+    }
+
+    /// Something the model's told with the newest turn, along with what the user decided:
+    /// a command that's still running, say.
+    pub fn tell(&mut self, said: String) {
+        match self.history.last_mut() {
+            Some(turn) => turn.decided.push(said),
+            None => self.decided.push(said),
+        }
     }
 
     /// What the model said, in brief, for the log of interactions: its notes
@@ -521,13 +536,14 @@ impl Story {
     /// The next request to send ahead of time, if it's time for one: the
     /// current item is complete, nothing else is on its way, and fewer than
     /// `most` (at most [`PREFETCH`]) are asked ahead, the last of them an item
-    /// (not `<done>`).
+    /// (not `<done>`). Nothing is asked past a command: what comes after it
+    /// is asked once it has run, with what it printed.
     pub fn prefetch(&mut self, most: usize) -> Option<Prefetch> {
         let current = self.current?;
         let item = self.item(current)?;
-        let ready = self.open && self.error.is_none() && self.writing.is_none() && !matches!(&item, Item::Step(s) if !s.complete);
-        let last_is_item =
-            self.ahead.last().is_none_or(|a| a.done && matches!(protocol::parse(&a.text, true), Reply::Step(_) | Reply::Note(_) | Reply::Run(_)));
+        let ready =
+            self.open && self.error.is_none() && self.writing.is_none() && !matches!(&item, Item::Step(s) if !s.complete) && !matches!(item, Item::Run(_));
+        let last_is_item = self.ahead.last().is_none_or(|a| a.done && matches!(protocol::parse(&a.text, true), Reply::Step(_) | Reply::Note(_)));
         if !ready || self.ahead.len() >= most.min(PREFETCH) || !last_is_item {
             return None;
         }
@@ -814,15 +830,32 @@ mod tests {
     }
 
     #[test]
-    fn a_command_is_set_going_and_the_story_goes_on() {
+    fn nothing_is_asked_ahead_past_a_command() {
         const RUN: &str = "<run>\ncargo test\n</run>\n<say>\nSee if it passes.\n</say>\n";
         let mut story = Story::new("does it pass?");
         let Settled::At(id) = arrived(&mut story, RUN) else { panic!() };
-        let ahead = story.prefetch(PREFETCH).expect("what comes after it is asked ahead");
-        assert_eq!(ahead.followups.last().unwrap().decided, ["ran in the terminal: `cargo test`"]);
+        assert!(story.prefetch(PREFETCH).is_none(), "what comes after it depends on what it prints");
         story.accept();
         assert_eq!(story.verdict(id), Verdict::Accepted, "accepted once: it's going, and that's it");
         assert_eq!(story.summary(), (1, 1));
+        assert_eq!(story.settle(), Settled::Ask, "the next is asked for now");
+
+        let mut story = Story::new("fix and test");
+        arrived(&mut story, FIX);
+        let first = story.prefetch(PREFETCH).expect("an edit: what's next is asked ahead");
+        story.ahead_text(first.id, RUN);
+        story.ahead_finished(first.id, None);
+        assert!(story.prefetch(PREFETCH).is_none(), "but not past the command it came to");
+    }
+
+    #[test]
+    fn a_command_run_otherwise_is_told_as_it_was() {
+        let mut story = Story::new("serve");
+        arrived(&mut story, "<run>\nmake\n</run>\n<say>\nBuild.\n</say>\n");
+        story.accept_saying(Some("ran in a new tab of the terminal: `make`".into()));
+        assert_eq!(story.settle(), Settled::Ask);
+        story.tell("`make` is still running".into());
+        assert_eq!(story.followups().last().unwrap().decided, ["ran in a new tab of the terminal: `make`", "`make` is still running"]);
     }
 
     #[test]

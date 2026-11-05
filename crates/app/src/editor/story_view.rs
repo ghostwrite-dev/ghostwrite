@@ -171,7 +171,7 @@ pub(super) fn waiting_hint(story: Option<&Story>) -> String {
 }
 
 /// `.`, `..`, `...` in turn, so waiting shows it's alive.
-fn dots() -> &'static str {
+pub(super) fn dots() -> &'static str {
     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
     [".", "..", "..."][(ms / 400 % 3) as usize]
 }

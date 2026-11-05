@@ -3,12 +3,14 @@
 //! written to it (and the emulator's own answers to the programs in it).
 //! What's on it is read back as a [`Screen`] of cells to draw, in this
 //! crate's own terms, or as plain text, which is how the model sees it.
+//! A [`Watch`] tells, from another thread, when what it was running is done.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -19,6 +21,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
+use alacritty_terminal::vte::ansi::Rgb;
 
 mod links;
 mod screen;
@@ -85,10 +88,37 @@ pub struct Terminal {
     /// Where the user started typing on the shell's line: its line counted from
     /// the top of the scrollback, and its column.
     typed_from: Mutex<Option<(usize, usize)>>,
-    /// The terminal's device and the shell's process, to tell whether the shell has
-    /// the terminal (at its prompt) or a program it started does.
-    #[cfg(unix)]
-    foreground: Option<(std::fs::File, i32)>,
+    /// The line the last command was entered on (Enter at the shell's line), from the
+    /// top of the scrollback: what's come since is that command's.
+    last_command: Mutex<Option<usize>>,
+    watch: Watch,
+}
+
+/// The colors a program in it is told when it asks (OSC 10, 11, 12 and 4): the theme's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub cursor: [u8; 3],
+    pub ansi: [[u8; 3]; 16],
+}
+
+impl Palette {
+    /// Color `index` as alacritty numbers them: the 256, then the foreground, background and cursor.
+    fn get(&self, index: usize) -> Option<Rgb> {
+        let [r, g, b] = match index {
+            0..16 => self.ansi[index],
+            16..256 => match screen::indexed(index as u8) {
+                Color::Rgb(r, g, b) => [r, g, b],
+                _ => return None,
+            },
+            256 => self.foreground,
+            257 => self.background,
+            258 => self.cursor,
+            _ => return None,
+        };
+        Some(Rgb { r, g, b })
+    }
 }
 
 /// What the emulator reports: it's changed (`on_change`, called on its
@@ -98,6 +128,10 @@ pub struct Events {
     sender: Arc<OnceLock<EventLoopSender>>,
     size: Arc<Mutex<WindowSize>>,
     exited: Arc<AtomicBool>,
+    /// How many times it's changed, and when it last did, for a [`Watch`].
+    changes: Arc<AtomicU64>,
+    changed_at: Arc<Mutex<Instant>>,
+    palette: Arc<Mutex<Option<Palette>>>,
     on_change: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -118,9 +152,19 @@ impl EventListener for Events {
                 let size = *self.size.lock().unwrap();
                 return self.write(answer(size).into_bytes());
             }
+            // A program asking what the colors are (to pick its own to suit): the theme's.
+            Event::ColorRequest(index, answer) => {
+                let color = self.palette.lock().unwrap().and_then(|palette| palette.get(index));
+                if let Some(color) = color {
+                    self.write(answer(color).into_bytes());
+                }
+                return;
+            }
             Event::Exit | Event::ChildExit(_) => self.exited.store(true, Ordering::SeqCst),
             _ => return,
         }
+        *self.changed_at.lock().unwrap() = Instant::now();
+        self.changes.fetch_add(1, Ordering::SeqCst);
         (self.on_change)();
     }
 }
@@ -141,6 +185,11 @@ fn user_shell() -> (String, Vec<String>) {
 /// for PowerShell.
 pub const CLEAR_LINE: &str = if cfg!(windows) { "\x1b" } else { "\x05\x15" };
 
+/// What's typed to give up the line the shell has: Ctrl-C. Unlike [`CLEAR_LINE`], it does
+/// in vi mode too, and at a continuation prompt (`dquote>`) as well; the shell
+/// prints a new prompt, which is waited for before anything's typed after it.
+pub const ABANDON_LINE: &[u8] = b"\x03";
+
 impl Terminal {
     /// Start the user's shell (see [`user_shell`]) in `dir`,
     /// `cols` by `rows`. `on_change` is called (on the terminal's thread) when
@@ -149,6 +198,11 @@ impl Terminal {
         let (shell, shell_args) = user_shell();
         let size = WindowSize { num_lines: rows.max(1), num_cols: cols.max(1), cell_width: 8, cell_height: 16 };
         let mut env = HashMap::from([("TERM".to_string(), "xterm-256color".to_string()), ("COLORTERM".to_string(), "truecolor".to_string())]);
+        // No pager: `git log` prints all of it, into the scrollback where it can be read (and
+        // the model reads it), rather than waiting in `less` for keys. `GIT_PAGER` is over
+        // git's own `core.pager` too.
+        env.insert("PAGER".into(), "cat".into());
+        env.insert("GIT_PAGER".into(), "cat".into());
         // Launched from the Finder there's no locale, and the shell would draw UTF-8 as escapes.
         if std::env::var_os("LANG").is_none() {
             env.insert("LANG".into(), "en_US.UTF-8".into());
@@ -163,21 +217,36 @@ impl Terminal {
         };
         let pty = tty::new(&options, size, 0).map_err(|e| format!("couldn't start a shell: {e}"))?;
         #[cfg(unix)]
-        let foreground = pty.file().try_clone().ok().map(|file| (file, pty.child().id() as i32));
-        let events = Events { sender: Arc::default(), size: Arc::new(Mutex::new(size)), exited: Arc::default(), on_change: Arc::new(on_change) };
+        let foreground = pty.file().try_clone().ok().map(|file| Arc::new((file, pty.child().id() as i32)));
+        #[cfg(not(unix))]
+        let foreground = None;
+        let events = Events {
+            sender: Arc::default(),
+            size: Arc::new(Mutex::new(size)),
+            exited: Arc::default(),
+            changes: Arc::default(),
+            changed_at: Arc::new(Mutex::new(Instant::now())),
+            palette: Arc::default(),
+            on_change: Arc::new(on_change),
+        };
+        let watch = Watch { foreground, changes: events.changes.clone(), changed_at: events.changed_at.clone(), exited: events.exited.clone() };
         // Programs that ask (`CSI ? u`) are told kitty's keyboard protocol is here.
         let config = Config { scrolling_history: SCROLLBACK, kitty_keyboard: true, ..Config::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &Size::from(size), events.clone())));
         let event_loop = EventLoop::new(term.clone(), events.clone(), pty, false, false).map_err(|e| format!("couldn't start a shell: {e}"))?;
         events.sender.set(event_loop.channel()).ok();
         event_loop.spawn();
-        Ok(Self {
-            term,
-            events,
-            typed_from: Mutex::new(None),
-            #[cfg(unix)]
-            foreground,
-        })
+        Ok(Self { term, events, typed_from: Mutex::new(None), last_command: Mutex::new(None), watch })
+    }
+
+    /// The colors to tell a program that asks: the theme's.
+    pub fn set_palette(&self, palette: Palette) {
+        *self.events.palette.lock().unwrap() = Some(palette);
+    }
+
+    /// Something to watch it with from another thread: whether it's busy, and when it last printed.
+    pub fn watch(&self) -> Watch {
+        self.watch.clone()
     }
 
     /// What's on the screen now, to draw.
@@ -219,6 +288,11 @@ impl Terminal {
         term.scroll_display(Scroll::Bottom);
         term.selection = None;
         let mut from = self.typed_from.lock().unwrap();
+        // Enter: a command's entered, on the line where the typing started.
+        if bytes.iter().any(|b| matches!(b, b'\r' | b'\n')) && !term.mode().contains(TermMode::ALT_SCREEN) {
+            let cursor = term.grid().history_size() + term.grid().cursor.point.line.0.max(0) as usize;
+            *self.last_command.lock().unwrap() = Some(from.map_or(cursor, |(line, _)| line.min(cursor)));
+        }
         // Enter, Ctrl-C, Ctrl-D, Ctrl-L or a cleared line: a new line to type on.
         let ends = bytes.iter().any(|b| matches!(b, b'\r' | b'\n' | 0x03 | 0x04 | 0x0c)) || bytes.ends_with(CLEAR_LINE.as_bytes());
         if ends || term.mode().contains(TermMode::ALT_SCREEN) {
@@ -248,16 +322,12 @@ impl Terminal {
     /// Whether a program the shell started has the terminal (a command is running), or
     /// the shell has it back, at its prompt. `None` where that can't be told (Windows).
     pub fn busy(&self) -> Option<bool> {
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd as _;
-            let (file, shell) = self.foreground.as_ref()?;
-            // SAFETY: the descriptor is ours, open for as long as `file` is.
-            let group = unsafe { libc::tcgetpgrp(file.as_raw_fd()) };
-            (group > 0).then_some(group != *shell)
-        }
-        #[cfg(not(unix))]
-        None
+        self.watch.busy()
+    }
+
+    /// Whether the user has typed on the shell's line since it was last entered or cleared.
+    pub fn typed(&self) -> bool {
+        self.typed_from.lock().unwrap().is_some()
     }
 
     /// Where what the user has typed on the shell's line starts, on the screen
@@ -393,21 +463,116 @@ impl Terminal {
     }
 
     /// The scrollback and screen as plain text, ending at the last line with
-    /// anything on it: at most `max_bytes` from the end, whole lines.
+    /// anything on it: at most about `max_bytes` from the end.
     pub fn text(&self, max_bytes: usize) -> String {
-        let lines = transcript(&self.term.lock());
-        let mut tail = vec![];
-        let mut bytes = 0;
-        for line in lines.iter().rev() {
-            bytes += line.len() + 1;
-            if bytes > max_bytes {
-                tail.push("… (earlier lines cut)");
-                break;
-            }
-            tail.push(line);
+        tail(&transcript(&self.term.lock()), max_bytes)
+    }
+
+    /// What's come since the last command was entered, from its line on (as [`text`](Self::text)
+    /// has it), if one has been.
+    pub fn since_command(&self, max_bytes: usize) -> Option<String> {
+        let row = (*self.last_command.lock().unwrap())?;
+        let read = Transcript::of(&self.term.lock());
+        let (line, _) = read.at(row, 0);
+        let lines: Vec<String> = read.text.split('\n').skip(line).map(str::to_string).collect();
+        Some(tail(&lines, max_bytes))
+    }
+}
+
+/// The end of `lines`, in about `max_bytes`: the lines that fit whole, and of the one
+/// before them that doesn't, its end (so one long line still says how it ends).
+fn tail(lines: &[String], max_bytes: usize) -> String {
+    const CUT: &str = "…";
+    let mut tail: Vec<&str> = vec![];
+    let mut bytes = 0;
+    let mut cut = None;
+    for line in lines.iter().rev() {
+        if bytes + line.len() + 1 > max_bytes {
+            let room = max_bytes.saturating_sub(bytes + CUT.len() + 1).min(line.len());
+            cut = Some(format!("{CUT}{}", &line[line.ceil_char_boundary(line.len() - room)..]));
+            break;
         }
-        tail.reverse();
-        tail.join("\n")
+        bytes += line.len() + 1;
+        tail.push(line);
+    }
+    let cut = cut.iter().map(String::as_str);
+    cut.chain(tail.into_iter().rev()).collect::<Vec<_>>().join("\n")
+}
+
+/// What waiting for the shell came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waited {
+    /// It's at its prompt (where that can be told), and has printed nothing for a moment.
+    Idle,
+    /// What it's running is still going at the timeout: a server, say, or a watcher.
+    StillRunning,
+    /// The shell exited.
+    Exited,
+}
+
+/// The shell, watched from another thread: whether a program it started has the terminal,
+/// and when it last printed anything.
+#[derive(Clone)]
+pub struct Watch {
+    /// The terminal's device and the shell's process, to tell whether the shell has
+    /// the terminal (at its prompt) or a program it started does.
+    foreground: Option<Arc<(std::fs::File, i32)>>,
+    changes: Arc<AtomicU64>,
+    changed_at: Arc<Mutex<Instant>>,
+    exited: Arc<AtomicBool>,
+}
+
+impl Watch {
+    /// Whether a program the shell started has the terminal (a command is running), or
+    /// the shell has it back, at its prompt. `None` where that can't be told (Windows).
+    pub fn busy(&self) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            let (file, shell) = self.foreground.as_deref()?;
+            // SAFETY: the descriptor is ours, open for as long as `file` is.
+            let group = unsafe { libc::tcgetpgrp(file.as_raw_fd()) };
+            (group > 0).then_some(group != *shell)
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
+    /// How many times it's changed so far: what [`until_idle`](Self::until_idle) counts from.
+    pub fn changes(&self) -> u64 {
+        self.changes.load(Ordering::SeqCst)
+    }
+
+    /// Once something has been printed since the count of [`changes`](Self::changes) was
+    /// `after`, the shell has the terminal back (where that can be told: otherwise only
+    /// the quiet counts), and nothing more has come for `quiet`; or once `timeout` has gone
+    /// by. Watched on a thread of its own, which stops when what it gives back is dropped.
+    pub fn until_idle(&self, after: u64, quiet: Duration, timeout: Duration) -> futures::channel::oneshot::Receiver<Waited> {
+        const EVERY: Duration = Duration::from_millis(20);
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let (watch, start) = (self.clone(), Instant::now());
+        std::thread::spawn(move || {
+            loop {
+                let printed = watch.changes() != after;
+                let quiet_for = watch.changed_at.lock().unwrap().elapsed();
+                let waited = if watch.exited.load(Ordering::SeqCst) {
+                    Waited::Exited
+                } else if printed && watch.busy() != Some(true) && quiet_for >= quiet {
+                    Waited::Idle
+                } else if start.elapsed() >= timeout {
+                    Waited::StillRunning
+                } else {
+                    std::thread::sleep(EVERY);
+                    if tx.is_canceled() {
+                        return;
+                    }
+                    continue;
+                };
+                tx.send(waited).ok();
+                return;
+            }
+        });
+        rx
     }
 }
 
@@ -625,19 +790,11 @@ mod tests {
         assert_eq!(read.cell(3, 1), (4, 1));
     }
 
-    /// Once the shell's prompt is up, and has stayed where it is a moment.
+    /// Once the shell's prompt is up, and it's been quiet a moment: where it ends.
     fn prompted(terminal: &Terminal) -> (usize, usize) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut last = None;
-        loop {
-            std::thread::sleep(Duration::from_millis(300));
-            let now = terminal.screen().cursor.map(|c| (c.line, c.col)).filter(|(_, col)| *col > 0);
-            if let Some(at) = now.filter(|_| now == last) {
-                return at;
-            }
-            assert!(Instant::now() < deadline, "no prompt: {}", terminal.text(10_000));
-            last = now;
-        }
+        let waited = futures::executor::block_on(terminal.watch().until_idle(0, Duration::from_millis(300), Duration::from_secs(20)));
+        assert_eq!(waited, Ok(Waited::Idle), "no prompt: {}", terminal.text(10_000));
+        terminal.screen().cursor.map(|c| (c.line, c.col)).expect("a cursor")
     }
 
     fn shows(terminal: &Terminal, what: &str, shown: bool) {
@@ -683,6 +840,76 @@ mod tests {
         terminal.wheel(1, 4, 9, Held::default());
         terminal.input(b"\r".as_slice());
         shows(&terminal, "[<64;10;5M", true);
+        terminal.input(b"\x03".as_slice());
+    }
+
+    #[test]
+    fn one_long_last_line_is_cut_inside_not_left_out() {
+        let lines = |text: &str| text.split('\n').map(str::to_string).collect::<Vec<_>>();
+        let long = format!("start {} end", "x".repeat(100));
+        assert_eq!(tail(&lines(&format!("one\n{long}")), 30), format!("…{}", &long[long.len() - 26..]), "the end of the line, not nothing");
+        assert_eq!(tail(&lines("one\ntwo\nthree"), 10), "…\ntwo\nthree", "whole lines while they fit");
+        assert_eq!(tail(&lines("one\ntwo"), 100), "one\ntwo");
+        assert!(tail(&lines(&"é".repeat(50)), 21).ends_with('é'), "cut between chars");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn what_a_command_printed_is_read_from_its_line_on_and_waited_for() {
+        let terminal = Terminal::start(&std::env::temp_dir(), 80, 24, || {}).unwrap();
+        prompted(&terminal);
+        assert_eq!(terminal.since_command(10_000), None, "nothing's been run");
+        terminal.input(b"echo before\r".as_slice());
+        shows(&terminal, "before\n", true);
+        let done = terminal.watch().until_idle(terminal.watch().changes(), Duration::from_millis(200), Duration::from_secs(20));
+        terminal.input(b"sleep 0.5; echo after-$((40 + 2))\r".as_slice());
+        assert_eq!(futures::executor::block_on(done), Ok(Waited::Idle));
+        let since = terminal.since_command(10_000).unwrap();
+        assert!(since.contains("sleep 0.5") && since.contains("\nafter-42\n"), "the command and what it printed: {since}");
+        assert!(!since.contains("before\n"), "not what came before it: {since}");
+        let done = terminal.watch().until_idle(terminal.watch().changes(), Duration::from_millis(200), Duration::from_millis(500));
+        terminal.input(b"sleep 30\r".as_slice());
+        assert_eq!(futures::executor::block_on(done), Ok(Waited::StillRunning), "a long one is let go at the timeout");
+        terminal.input(b"\x03".as_slice());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pager_doesnt_hold_the_output() {
+        let dir = std::env::temp_dir().join(format!("ghostwrite-pager-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&dir).output();
+        if !git(&["init", "-q"]).is_ok_and(|out| out.status.success()) {
+            return eprintln!("no git: skipped");
+        }
+        // More than a screen of it: `less` would wait for keys.
+        for i in 0..30 {
+            git(&["commit", "-q", "--allow-empty", "-m", &format!("commit-number-{i}")]).unwrap();
+        }
+        let terminal = Terminal::start(&dir, 80, 24, || {}).unwrap();
+        prompted(&terminal);
+        let done = terminal.watch().until_idle(terminal.watch().changes(), Duration::from_millis(300), Duration::from_secs(5));
+        terminal.input(b"git log\r".as_slice());
+        assert_eq!(futures::executor::block_on(done), Ok(Waited::Idle), "it printed it all and was done: {}", terminal.text(1_000));
+        assert!(terminal.text(100_000).contains("commit-number-0"), "the first commit is in the scrollback");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_program_asking_the_colors_is_told_the_themes() {
+        let terminal = Terminal::start(&std::env::temp_dir(), 80, 24, || {}).unwrap();
+        terminal.set_palette(Palette { foreground: [0x11, 0x22, 0x33], background: [0xfe, 0xdc, 0xba], cursor: [0, 0, 0], ansi: [[0; 3]; 16] });
+        prompted(&terminal);
+        // Ask for the background, then show what comes back.
+        terminal.input(b"printf '\\033]11;?\\033\\\\'; cat -v\r".as_slice());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while terminal.busy() != Some(true) {
+            assert!(Instant::now() < deadline, "cat never ran");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        terminal.input(b"\r".as_slice());
+        shows(&terminal, "rgb:fefe/dcdc/baba", true);
         terminal.input(b"\x03".as_slice());
     }
 

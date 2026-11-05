@@ -10,8 +10,14 @@
 //!
 //! A story's command waiting in the terminal is reviewed here in AI mode:
 //! look through what's on it, and Tab runs it as ever.
+//!
+//! Reading it again is the whole scrollback, on the UI thread: while the shell
+//! prints, that's done at most every [`REREAD`].
 
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+use futures::channel::mpsc::UnboundedSender;
 
 use ghostwrite_core::{Buffer, Key, Mode, Range};
 use ghostwrite_terminal::{Transcript, located, path_at};
@@ -23,6 +29,8 @@ use super::{Autoscroll, Editor};
 
 /// The id the terminal's text goes by: no document has it.
 pub(super) const READING: DocId = DocId::MAX;
+/// How often the terminal being read is read again while the shell prints.
+const REREAD: Duration = Duration::from_millis(100);
 
 pub(super) struct Reading {
     pub(super) tab: Tab,
@@ -33,6 +41,11 @@ pub(super) struct Reading {
     for_story: bool,
     /// No key has moved it yet: the cursor stays with the shell's.
     with_the_shell: bool,
+    /// When it was last read, how many times it has been, and whether it's to be read again
+    /// once [`REREAD`] has gone by.
+    read_at: Instant,
+    pub(super) reads: usize,
+    due: bool,
 }
 
 /// Where byte `at` is: its line, and char along it.
@@ -112,7 +125,8 @@ impl Editor {
         let at = at_the_shells_cursor(&doc.buffer, &transcript, &shell.terminal);
         let view = View { selection: Range::point(at), ..View::default() };
         let tab = Tab { doc, view };
-        self.terminal.reading = Some(Reading { tab, transcript, shell: shell.number, for_story, with_the_shell: true });
+        let reading = Reading { tab, transcript, shell: shell.number, for_story, with_the_shell: true, read_at: Instant::now(), reads: 1, due: false };
+        self.terminal.reading = Some(reading);
         self.terminal.shown = true;
         self.show_reading(true);
         cx.notify();
@@ -144,11 +158,28 @@ impl Editor {
         }
     }
 
+    /// Shell `number` printed something: if it's being read, it's read again, unless it
+    /// was a moment ago; then once [`REREAD`] has gone by, when `poke` sends it round again.
+    pub(super) fn printed(&mut self, number: usize, poke: &UnboundedSender<()>) {
+        let Some(reading) = self.terminal.reading.as_mut().filter(|reading| reading.shell == number) else { return };
+        if reading.read_at.elapsed() >= REREAD {
+            return self.read_again(number);
+        }
+        if !std::mem::replace(&mut reading.due, true) {
+            let poke = poke.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(REREAD);
+                poke.unbounded_send(()).ok();
+            });
+        }
+    }
+
     /// Shell `number` printed something: if it's being read, the text is read
     /// again, the selection moving with its chars, and the view staying put.
     pub(super) fn read_again(&mut self, number: usize) {
         let Some(shell) = self.terminal.shells.iter().find(|shell| shell.number == number) else { return };
         let Some(reading) = self.terminal.reading.as_mut().filter(|reading| reading.shell == number) else { return };
+        (reading.read_at, reading.reads, reading.due) = (Instant::now(), reading.reads + 1, false);
         let transcript = shell.terminal.transcript();
         if *reading.tab.doc.buffer.rope() != transcript.text {
             reading.tab.reload(transcript.text.clone());
@@ -240,10 +271,7 @@ impl Editor {
             text.slice(tab.doc.buffer.lines_range(line..line + 1)).trim_end().to_string()
         };
         self.stop_reading();
-        self.open_story("", window, cx);
-        if let Some(state) = self.story.as_mut() {
-            state.quoted = Some(quoted).filter(|q| !q.trim().is_empty());
-        }
+        self.open_story_about(Some(quoted), "", window, cx);
     }
 
     /// `gf` (or Enter, reading the terminal): open the file named where the

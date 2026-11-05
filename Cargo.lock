@@ -2538,6 +2538,7 @@ name = "ghostwrite-terminal"
 version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
+ "futures",
  "libc",
 ]
 
