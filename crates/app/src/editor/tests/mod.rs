@@ -82,9 +82,10 @@ impl Setup<'_> {
         self.read(|e| e.project.status.as_ref().map(|s| s.to_string()))
     }
 
+    /// The active file relative to the project, with `/` as the editor shows it.
     fn active(&mut self) -> Option<String> {
         let dir = self.dir.clone();
-        self.read(|e| e.project.active_path().map(|p| p.strip_prefix(&dir).unwrap().display().to_string()))
+        self.read(|e| e.project.active_path().map(|p| ghostwrite_project::display(&p, &dir)))
     }
 
     fn cursor(&mut self) -> usize {

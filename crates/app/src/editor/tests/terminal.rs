@@ -90,6 +90,7 @@ fn the_request_after_a_command_carries_what_it_printed(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+#[cfg_attr(windows, ignore = "Windows can't tell a running command from the prompt")]
 fn tab_with_a_program_running_in_front_runs_the_command_in_a_new_tab(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let run = "<run>\necho beside-$((40 + 2))\n</run>\n<say>\nMeanwhile.\n</say>\n";
@@ -138,6 +139,7 @@ fn more_of_the_reply_leaves_the_terminal_where_the_user_put_it(cx: &mut TestAppC
 }
 
 #[gpui::test]
+#[cfg_attr(windows, ignore = "Windows can't tell a running command from the prompt")]
 fn a_ctrl_c_goes_to_the_shell_its_command_ran_in_after_switching_tabs(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let long = "<run>\nsleep 100\n</run>\n<say>\nA long one.\n</say>\n";
@@ -548,6 +550,7 @@ fn a_command_takes_the_place_of_what_the_user_had_typed(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+#[cfg_attr(windows, ignore = "Windows can't tell a running command from the prompt")]
 fn tab_goes_on_without_waiting_for_a_long_command(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let run = "<run>\nsleep 30\n</run>\n<say>\nA long one.\n</say>\n";
@@ -566,6 +569,7 @@ fn tab_goes_on_without_waiting_for_a_long_command(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+#[cfg_attr(windows, ignore = "needs a POSIX shell and its tools")]
 fn control_keys_reach_a_program_in_the_terminal(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
@@ -581,6 +585,7 @@ fn control_keys_reach_a_program_in_the_terminal(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+#[cfg_attr(windows, ignore = "needs a POSIX shell and its tools")]
 fn a_program_that_asks_for_kittys_keyboard_gets_it(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
@@ -637,6 +642,7 @@ fn esc_esc_reads_the_terminal_with_the_editors_keys(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+#[cfg_attr(windows, ignore = "needs a POSIX shell and its tools")]
 fn what_comes_in_while_reading_leaves_the_selection_on_its_text(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
@@ -729,6 +735,7 @@ fn space_a_reading_the_terminal_asks_about_what_is_selected(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+#[cfg_attr(windows, ignore = "needs a POSIX shell and its tools")]
 fn a_lone_esc_reaches_the_shell_and_esc_esc_doesnt_eat_the_next_key(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);

@@ -60,7 +60,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(&crate::keys::in_field("cmd-x"), Cut, ctx),
         KeyBinding::new("home", Home, ctx),
         KeyBinding::new(&crate::keys::in_field("cmd-left"), Home, ctx),
-        KeyBinding::new("ctrl-a", Home, ctx),
         KeyBinding::new("end", End, ctx),
         KeyBinding::new(&crate::keys::in_field("cmd-right"), End, ctx),
         KeyBinding::new("ctrl-e", End, ctx),
@@ -70,6 +69,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", Down, ctx),
         KeyBinding::new("tab", Complete, ctx),
     ]);
+    // On a Mac Ctrl+A goes to the start, as in Emacs. Elsewhere it's select all (`cmd-a` above),
+    // and a later binding of it here would win over that.
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([KeyBinding::new("ctrl-a", Home, ctx)]);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

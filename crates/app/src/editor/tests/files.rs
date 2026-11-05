@@ -289,7 +289,7 @@ fn files_adds_and_renames(cx: &mut TestAppContext) {
     t.keys("space e a").input("notes/todo.md").keys("enter");
     assert!(t.dir.join("notes/todo.md").is_file());
     assert_eq!(t.active().as_deref(), Some("notes/todo.md"), "a new file opens");
-    t.keys("space e r").keys("cmd-a").input("done.md").keys("enter");
+    t.keys("space e r").keys(&crate::keys::in_field("cmd-a")).input("done.md").keys("enter");
     assert!(t.dir.join("notes/done.md").is_file());
     assert_eq!(t.active().as_deref(), Some("notes/done.md"), "the tab follows the rename");
 }

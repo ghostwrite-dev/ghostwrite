@@ -13,7 +13,7 @@ fn a_renamed_file_moves_to_its_new_languages_server(cx: &mut TestAppContext) {
     t.command("w paper.typ");
     assert_eq!(t.active().as_deref(), Some("paper.typ"));
     assert_eq!(server(&mut t), Some("tinymist"), "writing it as .typ starts tinymist");
-    t.keys("space e r").keys("cmd-a").input("paper.md").keys("enter");
+    t.keys("space e r").keys(&crate::keys::in_field("cmd-a")).input("paper.md").keys("enter");
     assert_eq!(t.active().as_deref(), Some("paper.md"));
     assert_eq!(server(&mut t), None, "renaming it to .md leaves tinymist");
 }
@@ -89,7 +89,7 @@ fn the_language_server_formats_renames_and_lists_symbols(cx: &mut TestAppContext
             Some("add"),
             "the prompt starts with its name"
         );
-        t.keys("cmd-a").input("plus").keys("enter");
+        t.keys(&crate::keys::in_field("cmd-a")).input("plus").keys("enter");
     });
     wait(&mut t, "symbols", &|e| e.picker.is_some(), &|t| {
         t.keys("escape space s");

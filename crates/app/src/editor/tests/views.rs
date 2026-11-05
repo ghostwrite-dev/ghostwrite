@@ -170,6 +170,7 @@ fn space_e_and_space_t_go_there_and_again_back_to_the_code(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+#[cfg_attr(windows, ignore = "needs a POSIX shell and its tools")]
 fn esc_esc_or_ctrl_backslash_ctrl_n_stop_typing_in_the_terminal(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
