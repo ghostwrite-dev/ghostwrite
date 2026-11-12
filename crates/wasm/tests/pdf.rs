@@ -29,12 +29,16 @@ macro_rules! needs_the_plugin {
 /// A PDF with one page of `width` by 100 points, with its bottom left filled in.
 fn pdf(width: u32) -> Vec<u8> {
     let content = "0 0 0 rg 0 0 100 50 re f";
-    let objects = [
+    pdf_of(&[
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} 100] /Contents 4 0 R >>"),
         format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
-    ];
+    ])
+}
+
+/// A PDF of these objects, numbered from 1, the first its catalog.
+fn pdf_of(objects: &[String]) -> Vec<u8> {
     let mut bytes = String::from("%PDF-1.4\n");
     let mut offsets = vec![];
     for (ix, object) in objects.iter().enumerate() {
@@ -90,6 +94,36 @@ fn it_draws_a_files_pages_and_again_when_the_file_changes() {
     std::fs::write(&path, pdf(200)).unwrap();
     assert!(renderer.render("").is_ok(), "and it goes on when the file's back");
     assert!(std::fs::read_dir(&root).unwrap().count() == 1, "it writes nothing beside it");
+}
+
+#[test]
+fn its_links_go_to_web_pages_and_to_places_in_it() {
+    use ghostwrite_page::LinkTo;
+    let plugin = needs_the_plugin!();
+    let root = ghostwrite_project::scratch_dir("pdf-links").canonicalize().unwrap();
+    let path = root.join("paper.pdf");
+    // Two pages 200 by 100: on the first a web link at its top left, one to the second
+    // page 30 points from its top, and one there by name; nothing on the second.
+    let link = |rect: &str, rest: &str| format!("<< /Type /Annot /Subtype /Link /Rect [{rect}] {rest} >>");
+    std::fs::write(
+        &path,
+        pdf_of(&[
+            "<< /Type /Catalog /Pages 2 0 R /Names << /Dests << /Names [(second) [4 0 R /Fit]] >> >> >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Annots [5 0 R 6 0 R 7 0 R] >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] >>".to_string(),
+            link("0 80 50 100", "/A << /S /URI /URI (https://typst.app) >>"),
+            link("100 0 150 20", "/Dest [4 0 R /XYZ 0 70 0]"),
+            link("150 0 200 20", "/A << /S /GoTo /D (second) >>"),
+        ]),
+    )
+    .unwrap();
+    let pages = plugin.renderer(&root, &path).unwrap().render("").unwrap();
+    assert_eq!(pages.link_at(0, 10., 10.), Some(LinkTo::Uri("https://typst.app".into())), "near the top left, the page the right way up");
+    assert_eq!(pages.link_at(0, 10., 90.), None, "and not at the bottom");
+    assert_eq!(pages.link_at(0, 120., 90.), Some(LinkTo::Page(1, 30.)));
+    assert_eq!(pages.link_at(0, 170., 90.), Some(LinkTo::Page(1, 0.)), "by its name");
+    assert_eq!(pages.link_at(1, 10., 10.), None);
 }
 
 #[test]

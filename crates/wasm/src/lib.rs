@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use ghostwrite_core::syntax::Load;
-use ghostwrite_page::{Bitmap, Pages, Place, Region, Renderer, Size};
+use ghostwrite_page::{Bitmap, LinkTo, Pages, Place, Region, Renderer, Size};
 use ghostwrite_plugin::manifest::Access;
 use ghostwrite_plugin::{Action, Block, Code, Context, Event, Reply, Shown};
 use serde_json::Value;
@@ -172,6 +172,8 @@ impl wit_host::Host for State {
 struct Live {
     store: Store<State>,
     plugin: bindings::Plugin,
+    /// `links`, if it was built against a world that has it (`with-links`).
+    links: Option<wasmtime::component::TypedFunc<(u64, u64), (Vec<wit::Link>,)>>,
     /// How long it's given for each call.
     ticks: u64,
 }
@@ -230,8 +232,12 @@ impl Live {
         store.limiter(|state| &mut state.limits);
         store.set_epoch_deadline(ticks);
         store.epoch_deadline_trap();
-        let plugin = bindings::Plugin::instantiate(&mut store, &component, &linker).map_err(|e| format!("it doesn't fit this editor: {e}"))?;
-        Ok(Self { store, plugin, ticks })
+        let doesnt_fit = |e: wasmtime::Error| format!("it doesn't fit this editor: {e}");
+        let instance = linker.instantiate(&mut store, &component).map_err(doesnt_fit)?;
+        let plugin = bindings::Plugin::new(&mut store, &instance).map_err(doesnt_fit)?;
+        // Built against version 1.0, it hasn't got them; that's all.
+        let links = instance.get_typed_func(&mut store, "links").ok();
+        Ok(Self { store, plugin, links, ticks })
     }
 }
 
@@ -392,7 +398,7 @@ impl Renderer for WasmRenderer {
                 return Err(why_stopped(&trap));
             }
         };
-        Ok(Arc::new(MadePages { pages: made, live: self.live.clone() }))
+        Ok(Arc::new(MadePages { pages: made, live: self.live.clone(), links: Mutex::default() }))
     }
 }
 
@@ -400,9 +406,33 @@ impl Renderer for WasmRenderer {
 struct MadePages {
     pages: Vec<wit::Page>,
     live: Arc<Mutex<Option<Live>>>,
+    /// Each page's links, once asked for.
+    links: Mutex<HashMap<usize, Vec<wit::Link>>>,
 }
 
 impl MadePages {
+    /// The links on `page`, asked of the plugin the first time.
+    fn links_on(&self, page: usize) -> Vec<wit::Link> {
+        let mut known = self.links.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(links) = known.get(&page) {
+            return links.clone();
+        }
+        let Some(asked) = self.pages.get(page) else { return vec![] };
+        let mut held = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(live) = held.as_mut() else { return vec![] };
+        let Some(call) = live.links else { return vec![] };
+        live.store.set_epoch_deadline(live.ticks);
+        let links = match call.call(&mut live.store, (asked.key_high, asked.key_low)) {
+            Ok((links,)) => links,
+            Err(_) => {
+                *held = None;
+                vec![]
+            }
+        };
+        known.insert(page, links.clone());
+        links
+    }
+
     fn glyphs(&self) -> impl Iterator<Item = (usize, &wit::Glyph)> {
         self.pages.iter().enumerate().flat_map(|(ix, page)| page.glyphs.iter().map(move |glyph| (ix, glyph)))
     }
@@ -481,6 +511,15 @@ impl Pages for MadePages {
         let glyph = self.pages.get(page)?.glyphs.iter().filter(|glyph| glyph.source.is_some()).min_by(|a, b| distance(a).total_cmp(&distance(b)))?;
         let (start, end) = glyph.source?;
         Some(if x > glyph.x + glyph.width / 2. { end } else { start } as usize)
+    }
+
+    fn link_at(&self, page: usize, x: f32, y: f32) -> Option<LinkTo> {
+        let inside = |link: &&wit::Link| (link.x..=link.x + link.width).contains(&x) && (link.y..=link.y + link.height).contains(&y);
+        let link = self.links_on(page).into_iter().find(|link| inside(&link))?;
+        Some(match link.to {
+            wit::LinkTo::Uri(uri) => LinkTo::Uri(uri),
+            wit::LinkTo::Page((to, down)) => LinkTo::Page(usize::try_from(to).ok().filter(|&to| to < self.pages.len())?, down),
+        })
     }
 }
 

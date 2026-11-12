@@ -55,6 +55,15 @@ pub struct Place {
     pub height: f32,
 }
 
+/// Where a link on a page goes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkTo {
+    /// A web page, or anything else a URI names.
+    Uri(String),
+    /// A place in these pages: the page, and how far down it, in points.
+    Page(usize, f32),
+}
+
 /// Pages laid out from some text, as the editor needs them, whatever they are:
 /// to draw them, to show a cursor and a selection on them, and to find the text
 /// under a click. Offsets are bytes of that text.
@@ -89,6 +98,10 @@ pub trait Pages: Send + Sync {
     /// The text, if these pages are what it comes from, so that it can't be edited;
     /// `None` if they're made from a file that can.
     fn text(&self) -> Option<&str> {
+        None
+    }
+    /// Where the link at `x`, `y` on `page` goes, if there's one there.
+    fn link_at(&self, _page: usize, _x: f32, _y: f32) -> Option<LinkTo> {
         None
     }
 }
@@ -216,6 +229,10 @@ impl Pages for OnlyPages {
 
     fn text(&self) -> Option<&str> {
         Some(&self.text)
+    }
+
+    fn link_at(&self, page: usize, x: f32, y: f32) -> Option<LinkTo> {
+        self.pages.link_at(page, x, y)
     }
 }
 

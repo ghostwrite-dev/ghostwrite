@@ -75,11 +75,14 @@ pub struct PagesScroll {
     pub reveal: Option<(usize, bool)>,
     /// The line they were last brought to.
     pub line: Option<usize>,
+    /// A place to bring to the top next time they're drawn: a page, and how far
+    /// down it, in points (where a link goes).
+    pub jump: Option<(usize, f32)>,
 }
 
 impl Default for PagesScroll {
     fn default() -> Self {
-        Self { top: 0., left: 0., zoom: 1., reveal: None, line: None }
+        Self { top: 0., left: 0., zoom: 1., reveal: None, line: None, jump: None }
     }
 }
 

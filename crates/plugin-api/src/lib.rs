@@ -27,7 +27,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "plugin",
+        world: "with-links",
         pub_export_macro: true,
         export_macro_name: "export",
         default_bindings_module: "ghostwrite_plugin_api::bindings",
@@ -35,7 +35,7 @@ pub mod bindings {
 }
 
 pub use bindings::ghostwrite::plugin::host::{fetch, which};
-pub use bindings::ghostwrite::plugin::types::{Action, Block, CodeBlock, Context, Drawing, Edit, Event, Glyph, Page, Panel, Region, Span};
+pub use bindings::ghostwrite::plugin::types::{Action, Block, CodeBlock, Context, Drawing, Edit, Event, Glyph, Link, LinkTo, Page, Panel, Region, Span};
 
 /// What a plugin answers: what to do, or what went wrong, for the status bar.
 pub type Reply = Result<Vec<Action>, String>;
@@ -73,6 +73,12 @@ pub trait Plugin {
     /// past the page's edge see-through.
     fn draw(_key_high: u64, _key_low: u64, _region: Region) -> Option<Drawing> {
         None
+    }
+
+    /// The links on the page with this key, in points from its top left: where a
+    /// click on each goes.
+    fn links(_key_high: u64, _key_low: u64) -> Vec<Link> {
+        vec![]
     }
 
     /// What `server` starts with, if its manifest says this plugin configures it:
@@ -138,6 +144,10 @@ macro_rules! register {
 
             fn draw(key_high: u64, key_low: u64, region: $crate::Region) -> Option<$crate::Drawing> {
                 <$plugin as $crate::Plugin>::draw(key_high, key_low, region)
+            }
+
+            fn links(key_high: u64, key_low: u64) -> Vec<$crate::Link> {
+                <$plugin as $crate::Plugin>::links(key_high, key_low)
             }
 
             fn server_env(server: String, project: String, root: String) -> Vec<(String, String)> {

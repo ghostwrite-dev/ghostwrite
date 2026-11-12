@@ -39,11 +39,24 @@ impl PageView {
     }
 }
 
+/// Whether the pointer at `at` is on a link a click would follow.
+fn on_link(state: &Prepainted, at: gpui::Point<Pixels>, command: bool) -> bool {
+    following(&*state.pages, command) && state.stack.at(state.shown.viewport.unplace(at)).is_some_and(|(page, x, y)| state.pages.link_at(page, x, y).is_some())
+}
+
+/// Whether a click follows a link: on pages that are only that (a document's), and
+/// with ⌘ on those made from text, where a click goes to the text.
+fn following(pages: &dyn Pages, command: bool) -> bool {
+    pages.text().is_some() != command
+}
+
 fn rect(stack: &Stack, place: Place) -> Bounds<Pixels> {
     stack.rect(place.page, place.x, place.y, place.width, place.height)
 }
 
 pub struct Prepainted {
+    /// Where the pointer can be a hand, over a link.
+    hitbox: gpui::Hitbox,
     stack: Stack,
     shown: Shown,
     pages: Arc<dyn Pages>,
@@ -134,7 +147,11 @@ impl Element for PageView {
                 None => {}
             }
             let wanted = scroll.reveal.and_then(|(at, _)| pages.nearest(at)).map(|place| rect(&stack, place));
-            let scroll_top = stack.reveal(top, wanted, scroll.reveal.is_some_and(|(_, always)| always), view_height);
+            let mut scroll_top = stack.reveal(top, wanted, scroll.reveal.is_some_and(|(_, always)| always), view_height);
+            // Where a link went: there, a little below the top.
+            if let Some((page, down)) = scroll.jump.filter(|(page, _)| *page < stack.len()) {
+                scroll_top = stack.clamp(stack.rect(page, 0., down, 0., 0.).top() - metrics.line_height, view_height);
+            }
 
             // The selection and the cursor.
             let mode = editor.modal.mode;
@@ -163,7 +180,7 @@ impl Element for PageView {
         self.editor.update(cx, |editor, _| {
             let own = editor.tab().is_some_and(|active| active.doc.id == id);
             if let Some(tab) = editor.project.tabs.by_id_mut(id) {
-                (tab.view.pages.top, tab.view.pages.left, tab.view.pages.reveal) = (scroll_top.into(), stack.scroll_left.into(), None);
+                (tab.view.pages.top, tab.view.pages.left, tab.view.pages.reveal, tab.view.pages.jump) = (scroll_top.into(), stack.scroll_left.into(), None, None);
                 if own {
                     tab.view.autoscroll = None;
                 }
@@ -172,7 +189,8 @@ impl Element for PageView {
                 editor.measured = Measured { rows, cursor: None, top_line: None };
             }
         });
-        Some(Prepainted { stack, shown, pages, line_height: metrics.line_height })
+        let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
+        Some(Prepainted { hitbox, stack, shown, pages, line_height: metrics.line_height })
     }
 
     fn paint(
@@ -188,7 +206,20 @@ impl Element for PageView {
         window.handle_input(&self.focus, ElementInputHandler::new(bounds, self.editor.clone()), cx);
         let Some(state) = state else { return };
         pages::paint(&mut state.shown, window);
+        let on_link = on_link(state, window.mouse_position(), window.modifiers().platform);
+        if on_link && state.hitbox.is_hovered(window) {
+            window.set_cursor_style(gpui::CursorStyle::PointingHand, &state.hitbox);
+        }
         self.listen(bounds, state, window);
+        // Drawn again when the pointer goes onto a link or off it, for the hand.
+        let (stack, pages, viewport) = (state.stack.clone(), state.pages.clone(), state.shown.viewport);
+        window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, _| {
+            let now = bounds.contains(&event.position)
+                && stack.at(viewport.unplace(event.position)).is_some_and(|(page, x, y)| following(&*pages, event.modifiers.platform) && pages.link_at(page, x, y).is_some());
+            if phase == DispatchPhase::Bubble && now != on_link {
+                window.refresh();
+            }
+        });
     }
 }
 
@@ -203,7 +234,11 @@ impl PageView {
                 return;
             }
             window.focus(&focus);
-            let byte = stack.at(viewport.unplace(event.position)).and_then(|(page, x, y)| pages.at(page, x, y));
+            let on = stack.at(viewport.unplace(event.position));
+            if let Some(link) = on.filter(|_| following(&*pages, event.modifiers.platform)).and_then(|(page, x, y)| pages.link_at(page, x, y)) {
+                return editor.update(cx, |editor, cx| editor.follow_page_link(doc, link, cx));
+            }
+            let byte = on.and_then(|(page, x, y)| pages.at(page, x, y));
             editor.update(cx, |editor, cx| editor.click_page_of(doc, byte, event.modifiers.shift, event.click_count, cx));
         });
         let editor = self.editor.clone();

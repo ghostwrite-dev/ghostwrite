@@ -147,6 +147,33 @@ fn until_it_has_pages(t: &mut Setup) {
 }
 
 #[gpui::test]
+fn a_link_in_a_pdf_goes_to_its_page_and_ctrl_o_comes_back(cx: &mut TestAppContext) {
+    use ghostwrite_page::LinkTo;
+    cx.executor().allow_parking();
+    let mut t = open("x\n", &[], cx);
+    let pdf = t.dir.join("paper.pdf");
+    std::fs::write(&pdf, two_page_pdf()).unwrap();
+    let editor = t.editor.clone();
+    t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![pdf.clone()], cx)));
+    until_it_has_pages(&mut t);
+    let follow = |t: &mut Setup, link: LinkTo| {
+        t.cx.update(|_, cx| editor.update(cx, |e, cx| e.follow_page_link(None, link, cx)));
+        t.cx.run_until_parked();
+    };
+    // Zoomed in, so that the second page is out of view.
+    t.cx.update(|_, cx| editor.update(cx, |e, _| e.tab_mut().unwrap().view.pages.zoom = 4.));
+    follow(&mut t, LinkTo::Page(1, 40.));
+    assert_eq!(t.read(|e| e.tab().unwrap().cursor_position().0), 1, "on the second page");
+    let top = t.read(|e| e.tab().unwrap().view.pages.top);
+    assert!(top > 0., "and it's scrolled there: {top}");
+    t.keys("ctrl-o");
+    assert_eq!(t.read(|e| e.tab().unwrap().cursor_position().0), 0, "back where it was");
+
+    follow(&mut t, LinkTo::Uri("file:///etc/passwd".into()));
+    assert_eq!(t.status().as_deref(), Some("links like file:///etc/passwd aren't opened from here"), "only web pages and mail open");
+}
+
+#[gpui::test]
 fn a_pdf_is_its_pages_read_only_and_the_model_leaves_it_be(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &["unused"], cx);
@@ -516,6 +543,31 @@ fn a_typst_files_pages_are_a_tab_and_follow_it(cx: &mut TestAppContext) {
     t.keys("g g space j");
     assert_eq!(t.read(|e| e.tab().unwrap().view.pages.line), Some(0), "space j brings the pages to the cursor");
     assert_eq!(t.status().as_deref(), Some("no problems in this file"), "it has no server here to say");
+}
+
+#[gpui::test]
+fn pages_are_made_again_when_a_file_they_use_turns_up(cx: &mut TestAppContext) {
+    let mut t = open("", &[], cx);
+    let path = t.dir.join("paper.typ");
+    std::fs::write(&path, "#set page(width: 300pt, height: 200pt)\n#include \"figure.typ\"\n").unwrap();
+    let editor = t.editor.clone();
+    t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![path.clone()], cx)));
+    t.command("preview").command("preview");
+    let compiled = |t: &mut Setup| {
+        t.cx.update(|_, cx| editor.update(cx, |e, cx| e.refresh_aside(cx)));
+        t.cx.run_until_parked();
+        t.read(|e| {
+            let p = e.tab().unwrap().doc.rendered.as_ref().unwrap();
+            (p.pages.is_some(), p.error.clone())
+        })
+    };
+    let (_, error) = compiled(&mut t);
+    assert!(error.is_some_and(|e| e.contains("figure.typ")), "it isn't there yet");
+
+    std::fs::write(t.dir.join("figure.typ"), "A figure.\n").unwrap();
+    let figure = t.dir.join("figure.typ");
+    t.editor.update(t.cx, |e, cx| e.disk_changed(&[figure], cx));
+    assert_eq!(compiled(&mut t), (true, None), "made again once it is, with no edit to the file");
 }
 
 #[gpui::test]

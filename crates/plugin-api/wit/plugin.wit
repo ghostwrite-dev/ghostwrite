@@ -1,5 +1,8 @@
 // What a plugin and the editor say to each other. Once released, version 1 only
 // grows in ways plugins built against it can't notice; anything else is version 2.
+// It's grown by worlds that add to `plugin`: a plugin built against one has more for
+// the editor to ask, and one built against `plugin` alone still runs (since 1.1:
+// `with-links`).
 package ghostwrite:plugin@1.0.0;
 
 interface types {
@@ -60,6 +63,22 @@ interface types {
         key-high: u64,
         key-low: u64,
         glyphs: list<glyph>,
+    }
+
+    // Where a link on a page goes: a URI (a web page, say), or a place in these
+    // pages, the page (from 0) and how far down it, in points.
+    variant link-to {
+        uri(string),
+        page(tuple<u32, f32>),
+    }
+
+    // A link's box on a page, in points from its top left, and where it goes.
+    record link {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        to: link-to,
     }
 
     // What of a page to draw: the page drawn `scale` pixels to a point, and of
@@ -152,4 +171,13 @@ world plugin {
     // A notification of the server's about the file, one the panel's `notifications`
     // lists, its params as JSON. `true`: ask its requests again.
     export panel-notification: func(state: string, method: string, params: string) -> tuple<panel, bool>;
+}
+
+// Since 1.1: what a plugin making pages adds, if it's built against this world.
+world with-links {
+    include plugin;
+    use types.{link};
+
+    // The links on the page with this key, of the last pages made or the ones before.
+    export links: func(key-high: u64, key-low: u64) -> list<link>;
 }

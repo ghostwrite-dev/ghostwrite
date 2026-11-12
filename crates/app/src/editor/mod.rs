@@ -456,6 +456,18 @@ impl Editor {
         if paths.iter().any(|path| path.components().any(|part| part.as_os_str() == ".git")) {
             self.forget_git_base();
         }
+        // Pages made from a file can use others (a figure, a file it includes): made
+        // again when any of those may have changed, as if the file had been.
+        for tab in self.project.tabs.iter_mut() {
+            let others = paths.iter().any(|path| tab.doc.path.as_ref() != Some(path));
+            if others
+                && !tab.doc.is_only_pages()
+                && let Some(rendered) = tab.doc.rendered.as_mut()
+            {
+                rendered.made = None;
+                cx.notify();
+            }
+        }
         let reread = self.project.to_reread(paths);
         let read = cx.background_spawn(async move { reread.read() });
         cx.spawn(async move |this, cx| {

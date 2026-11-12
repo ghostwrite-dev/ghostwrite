@@ -178,6 +178,34 @@ impl Editor {
         true
     }
 
+    /// A link on the pages of the tab of `doc` (or of the active tab) clicked: a web
+    /// page opens in the browser, and a place in them is scrolled to, as a jump
+    /// (`ctrl-o` comes back).
+    pub(super) fn follow_page_link(&mut self, doc: Option<DocId>, link: ghostwrite_page::LinkTo, cx: &mut Context<Self>) {
+        match link {
+            ghostwrite_page::LinkTo::Uri(uri) => {
+                let scheme = uri.split_once(':').map(|(scheme, _)| scheme.to_ascii_lowercase());
+                if scheme.as_deref().is_some_and(|scheme| ["http", "https", "mailto"].contains(&scheme)) {
+                    cx.open_url(&uri);
+                } else {
+                    self.project.say(format!("links like {uri} aren't opened from here"));
+                }
+            }
+            ghostwrite_page::LinkTo::Page(page, down) => {
+                let shown = doc.map_or_else(|| self.shown_pages(), |doc| self.pages_of(doc));
+                let from = self.before_jump();
+                let Some(file) = shown.and_then(|id| self.project.tabs.by_id_mut(id)) else { return };
+                file.view.pages.jump = Some((page, down));
+                // Pages that are only pages have a line each: the cursor goes to that one.
+                if file.doc.pages_are_the_text() && page < file.doc.buffer.line_count() {
+                    file.view.selection = Range::point(file.doc.buffer.line_start(page));
+                    self.note_jump(from);
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// A click on pages, on the text at `byte` if it's on any: the cursor goes there,
     /// in the document they're of. A view stays where it is, and the file's tab has
     /// the cursor there when it's next shown; a double click goes to that tab.
