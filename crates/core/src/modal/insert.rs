@@ -241,7 +241,7 @@ impl Modal {
 /// Enter: a new line, as helix opens one. Spaces before the cursor go; the
 /// new line has this one's indent (a level more after an opening bracket, or
 /// what else its language says: a `:`, in some), and goes on with a line comment this one starts with.
-/// Between brackets the cursor gets a line of its own. With only indent
+/// Between brackets (or a pair of the language's own) the cursor gets a line of its own. With only indent
 /// before the cursor, the line moves down as it is.
 fn newline(t: &mut Target) {
     let at = t.selection.head;
@@ -256,8 +256,9 @@ fn newline(t: &mut Target) {
     let language = t.language.unwrap_or(&Language::DEFAULT);
     let new = if let Some(leader) = language.comment_leader(&t.buffer.line(line)) {
         format!("\n{indent}{leader} ")
-    } else if between_pair(t, at).is_some_and(|(open, _)| matches!(open, '(' | '[' | '{')) {
-        // `{|}`: the cursor on a line of its own, indented, and the bracket under.
+    } else if between_pair(t, at).is_some_and(|pair| matches!(pair.0, '(' | '[' | '{') || language.pairs.contains(&pair)) {
+        // `{|}`, or a pair of the language's own (`$|$`): the cursor on a line of its
+        // own, indented, and the closing one under.
         let inner = format!("\n{indent}{}", t.indent.as_str());
         let new = format!("{inner}\n{indent}");
         return put(t, kept..at, &new, kept + inner.len());

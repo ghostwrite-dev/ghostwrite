@@ -579,3 +579,19 @@ fn the_cheatsheet_and_the_keymap_agree() {
         }
     }
 }
+
+#[gpui::test]
+fn enter_between_brackets_or_typsts_dollars_puts_the_cursor_on_a_line_of_its_own(cx: &mut TestAppContext) {
+    let mut t = open("", &[], cx);
+    for (file, typed, made) in [
+        ("a.rs", "fn f() {", "fn f() {\n    X\n}"),
+        ("a.typ", "#f[", "#f[\n    X\n]"),
+        ("b.typ", "$", "$\n    X\n$"),
+        ("c.typ", "\"", "\"\nX\""),
+    ] {
+        std::fs::write(t.dir.join(file), "").unwrap();
+        t.command(&format!("e {file}"));
+        t.keys("i").input(typed).keys("enter").input("X").keys("escape");
+        assert_eq!(t.text(), made, "{typed} in {file}");
+    }
+}
