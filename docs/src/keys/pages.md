@@ -12,4 +12,4 @@ The code's other keys work as ever, moving through the text the pages are made f
 
 A PDF or an image isn't this view: it's a tab of its own that's only pages, where `j` and `k` go from page to page as the code's keys.
 
-The names in the last column are what you use to [remap a key](../configuration/keys.md), here under the view's name: `"pages"` for Typst's. The plugin's own keys for the view go over these, and yours over both. In `space ?`, the section is called by the view's title and key: **Pages  space v**.
+The names in the last column are what you use to [remap a key](../configuration/keys.md), here under the view's name: `"pages"` for Typst's. The plugin's own keys for the view go over these, and yours over both. In the ⌘/ cheatsheet, the section is called by the view's title and key: **Pages  space v**.

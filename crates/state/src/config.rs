@@ -218,10 +218,7 @@ mod tests {
         let json = serde_json::json!({ "keys": { "space w": ":wa", "space W": ":wa", "files": { "space w": "undo" } } });
         let (modal, problems) = modal_of(&json, &[]);
         assert_eq!(problems.len(), 2, "{problems:?}");
-        assert!(
-            problems[0].starts_with("\"space w\": those keys lead on to others (space w v, space w w, space w q, space w o), so they can't be bound"),
-            "{problems:?}"
-        );
+        assert!(problems[0].starts_with("\"space w\": those keys lead on to others (space w q, space w o), so they can't be bound"), "{problems:?}");
         assert!(problems[1].starts_with("files: \"space w\": those keys lead on to others"), "{problems:?}");
         assert!(modal.binds(Key::Char(' ')), "space is as it was");
     }

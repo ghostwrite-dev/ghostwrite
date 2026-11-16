@@ -7,7 +7,7 @@ Put the cursor on a line, or select some lines, and press `space a`. A prompt op
 - A question ("what does this do?", "why is this slow?", "walk me through the request path") is answered with notes pinned to the code, one at a time, across files as needed.
 - A request for a change ("add a timeout", "handle the empty case", "rename this to `size`") comes as steps.
 
-Where you ask from matters: the lines you point at are marked for the model, and it starts from them. You can ask in any view. On the terminal, `space a` asks about what's selected there.
+Where you ask from matters: the lines you point at are marked for the model, and it starts from them. You can ask in any view but the terminal, whose keys are the shell's.
 
 While the model is thinking, ✦ and what it's doing ("reading src/lib.rs") show in the top right of the code, under what you asked.
 
@@ -32,7 +32,7 @@ There's no skip: if you don't want a step, say what you want instead.
 
 ### Looking around
 
-While a story is up you can move, open files with `space f` or `space b`, switch tabs and scroll. A step that arrives while you're elsewhere waits in the corner rather than pulling you away. The first Tab brings you back to it; the next one accepts it.
+While a story is up you can move, open files with ⌘P or ⌘E, switch tabs and scroll. A step that arrives while you're elsewhere waits in the corner rather than pulling you away. The first Tab brings you back to it; the next one accepts it.
 
 ### Where to look
 
@@ -57,7 +57,7 @@ The story ends when the model says it's done, or when you stop it. The status li
 The same review works for lists the editor makes itself:
 
 - `space d` goes through the file's diagnostics, one note at a time.
-- `space /` and `:grep` go through the project's search matches.
+- ⌘⇧F and `:grep` go through the project's search matches.
 - `:replace old new` offers each line it would change as a step.
 
 Tab reads on, or accepts. Enter asks the model about the item you're on, and the model takes over the story from there.

@@ -27,7 +27,7 @@ fn a_click_moves_the_cursor_and_shift_or_v_extends(cx: &mut TestAppContext) {
     assert_eq!(selected(&mut t), ("foo".into(), Mode::Select), "in select mode a click extends");
     click(&mut t, 5, false, 2);
     assert_eq!(selected(&mut t), ("bar".into(), Mode::Select), "a double click is the word");
-    t.keys("space e escape");
+    t.app_keys("cmd-b escape");
     click(&mut t, 8, false, 1);
     assert_eq!(selected(&mut t), ("".into(), Mode::Normal), "going to the tree ended the selection");
     click(&mut t, 5, false, 3);
@@ -111,8 +111,8 @@ fn searching_the_file(cx: &mut TestAppContext) {
     assert_eq!(selected(&mut t), (18, "TWO".into()), "n finds it, a whole word");
     t.keys("?").input("one").keys("enter");
     assert_eq!(selected(&mut t).0, 0, "? searches back");
-    t.keys("space ?");
-    assert!(t.read(|e| e.cheatsheet), "the cheatsheet is space ?");
+    t.app_keys("cmd-/");
+    assert!(t.read(|e| e.cheatsheet), "the cheatsheet is ⌘/");
 }
 
 #[gpui::test]
@@ -142,7 +142,7 @@ fn pickers_open_files_by_a_few_letters(cx: &mut TestAppContext) {
     for f in ["src/editor/mod.rs", "src/editor/view.rs", "src/main.rs"] {
         std::fs::write(t.dir.join(f), "").unwrap();
     }
-    t.keys("space f");
+    t.app_keys("cmd-p");
     for _ in 0..100 {
         t.cx.run_until_parked();
         if t.read(|e| e.picker.as_ref().is_some_and(|p| !p.listing())) {
@@ -152,9 +152,9 @@ fn pickers_open_files_by_a_few_letters(cx: &mut TestAppContext) {
     }
     t.input("edmod").keys("enter");
     assert_eq!(t.active().as_deref(), Some("src/editor/mod.rs"));
-    t.keys("space b").input("doc").keys("enter");
-    assert_eq!(t.active().as_deref(), Some("doc.txt"), "space b: the open ones");
-    t.keys("space b down escape");
+    t.app_keys("cmd-e").input("doc").keys("enter");
+    assert_eq!(t.active().as_deref(), Some("doc.txt"), "⌘E: the open ones");
+    t.app_keys("cmd-e down escape");
     assert_eq!(t.active().as_deref(), Some("doc.txt"), "esc leaves it be");
     assert!(t.read(|e| e.picker.is_none()));
 }
@@ -212,7 +212,7 @@ fn a_lean_file_types_symbols_from_backslashes(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_cheatsheet_really_scrolls(cx: &mut TestAppContext) {
     let mut t = open("one\ntwo\n", &[], cx);
-    t.keys("space ?");
+    t.app_keys("cmd-/");
     t.cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(300.)));
     let draw = |t: &mut Setup| {
         t.cx.update(|window, _| window.refresh());
@@ -239,9 +239,9 @@ fn the_cheatsheet_really_scrolls(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn space_question_mark_shows_the_cheatsheet_j_k_scroll_it_and_any_other_key_closes_it(cx: &mut TestAppContext) {
+fn cmd_slash_shows_the_cheatsheet_j_k_scroll_it_and_any_other_key_closes_it(cx: &mut TestAppContext) {
     let mut t = open("one\ntwo\n", &[], cx);
-    t.keys("space ?");
+    t.app_keys("cmd-/");
     assert!(t.read(|e| e.cheatsheet));
     t.keys("j k down up");
     assert!(t.read(|e| e.cheatsheet), "j and k scroll it");
@@ -523,10 +523,7 @@ fn your_keys_run_commands_by_name_or_a_colon_command_and_no_op_unbinds(cx: &mut 
     t.editor.update(t.cx, |e, _| e.use_keys(keymap, &wrong));
     let status = t.status().unwrap_or_default();
     assert!(status.contains("no command \"extend_lin_below\""), "a name that isn't a command is said: {status}");
-    assert!(
-        status.contains("\"space w\": those keys lead on to others (space w v, space w w, space w q, space w o)"),
-        "and keys that lead on to the panes': {status}"
-    );
+    assert!(status.contains("\"space w\": those keys lead on to others (space w q, space w o)"), "and keys that lead on to the panes': {status}");
     t.keys("Z d");
     assert_eq!(t.text(), "three\n", "Z selects the line, as x did");
     t.keys("x d");
@@ -547,7 +544,7 @@ fn your_keys_run_commands_by_name_or_a_colon_command_and_no_op_unbinds(cx: &mut 
     let row = |what: &str| sheet.iter().flat_map(|(_, rows)| rows).find(|row| row.what.starts_with(what)).map(|row| row.keys.clone());
     assert_eq!(row("select line").as_deref(), Some("X alt-x % Z"));
     assert_eq!(row(":wa").as_deref(), Some("space W"));
-    t.keys("space ?");
+    t.app_keys("cmd-/");
     t.cx.update(|window, _| window.refresh());
     t.cx.run_until_parked();
     assert!(t.read(|e| e.cheatsheet));
@@ -583,12 +580,9 @@ fn the_cheatsheet_and_the_keymap_agree() {
 #[gpui::test]
 fn enter_between_brackets_or_typsts_dollars_puts_the_cursor_on_a_line_of_its_own(cx: &mut TestAppContext) {
     let mut t = open("", &[], cx);
-    for (file, typed, made) in [
-        ("a.rs", "fn f() {", "fn f() {\n    X\n}"),
-        ("a.typ", "#f[", "#f[\n    X\n]"),
-        ("b.typ", "$", "$\n    X\n$"),
-        ("c.typ", "\"", "\"\nX\""),
-    ] {
+    for (file, typed, made) in
+        [("a.rs", "fn f() {", "fn f() {\n    X\n}"), ("a.typ", "#f[", "#f[\n    X\n]"), ("b.typ", "$", "$\n    X\n$"), ("c.typ", "\"", "\"\nX\"")]
+    {
         std::fs::write(t.dir.join(file), "").unwrap();
         t.command(&format!("e {file}"));
         t.keys("i").input(typed).keys("enter").input("X").keys("escape");

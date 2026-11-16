@@ -25,6 +25,13 @@ actions!(
         PrevTab,
         ToggleTree,
         ToggleTerminal,
+        ToggleDebugger,
+        FilePicker,
+        BufferPicker,
+        ProjectSearch,
+        SplitPane,
+        OtherPane,
+        Cheatsheet,
         ZoomIn,
         ZoomOut,
         ResetZoom,
@@ -46,7 +53,25 @@ pub struct OpenRecent {
 }
 
 pub fn install(cx: &mut App) {
-    cx.bind_keys([
+    cx.bind_keys(bindings());
+    crate::ui::text_field::bind_keys(cx);
+    cx.on_action(|_: &Quit, cx| crate::workspace::quit(false, cx));
+    cx.on_action(|_: &ZoomIn, cx| crate::theme::zoom(1, cx));
+    cx.on_action(|_: &ZoomOut, cx| crate::theme::zoom(-1, cx));
+    cx.on_action(|_: &ResetZoom, cx| crate::theme::zoom(0, cx));
+    // With no window to take it (one does, in its own place), a window of its own.
+    cx.on_action(|recent: &OpenRecent, cx| crate::workspace::open_anywhere(vec![recent.root.clone()], cx));
+    cx.on_action(|_: &ClearRecent, cx| {
+        store::recent_projects().iter().for_each(|root| store::forget_project(root));
+        set_menus(cx);
+    });
+    set_menus(cx);
+}
+
+/// The app's key bindings: the ⌘ keys, with their actions. The editor handles
+/// most of them itself; [`install`] adds the app-wide ones' handlers.
+pub fn bindings() -> Vec<KeyBinding> {
+    vec![
         KeyBinding::new(&crate::keys::app("cmd-q"), Quit, None),
         KeyBinding::new(&crate::keys::app("cmd-o"), Open, Some("Editor")),
         KeyBinding::new(&crate::keys::app("cmd-shift-o"), OpenFolder, None),
@@ -72,19 +97,18 @@ pub fn install(cx: &mut App) {
         KeyBinding::new(&crate::keys::app("cmd-a"), SelectAll, Some("Editor")),
         KeyBinding::new(&crate::keys::app("cmd-j"), ToggleTerminal, Some("Editor")),
         KeyBinding::new(&crate::keys::app("cmd-b"), ToggleTree, Some("Editor")),
-    ]);
-    crate::ui::text_field::bind_keys(cx);
-    cx.on_action(|_: &Quit, cx| crate::workspace::quit(false, cx));
-    cx.on_action(|_: &ZoomIn, cx| crate::theme::zoom(1, cx));
-    cx.on_action(|_: &ZoomOut, cx| crate::theme::zoom(-1, cx));
-    cx.on_action(|_: &ResetZoom, cx| crate::theme::zoom(0, cx));
-    // With no window to take it (one does, in its own place), a window of its own.
-    cx.on_action(|recent: &OpenRecent, cx| crate::workspace::open_anywhere(vec![recent.root.clone()], cx));
-    cx.on_action(|_: &ClearRecent, cx| {
-        store::recent_projects().iter().for_each(|root| store::forget_project(root));
-        set_menus(cx);
-    });
-    set_menus(cx);
+        KeyBinding::new(&crate::keys::app("cmd-shift-d"), ToggleDebugger, Some("Editor")),
+        KeyBinding::new(&crate::keys::app("cmd-p"), FilePicker, Some("Editor")),
+        KeyBinding::new(&crate::keys::app("cmd-e"), BufferPicker, Some("Editor")),
+        KeyBinding::new(&crate::keys::app("cmd-shift-f"), ProjectSearch, Some("Editor")),
+        KeyBinding::new(&crate::keys::app("cmd-\\"), SplitPane, Some("Editor")),
+        // On a Danish Mac, `\` is Option-Shift-7: ⌘\ comes as ⌘⌥⇧7.
+        KeyBinding::new(&crate::keys::app("cmd-alt-shift-7"), SplitPane, Some("Editor")),
+        KeyBinding::new(&crate::keys::app("cmd-k"), OtherPane, Some("Editor")),
+        KeyBinding::new(&crate::keys::app("cmd-/"), Cheatsheet, Some("Editor")),
+        // On a Danish (and other Nordic or German) Mac, `/` is Shift-7: ⌘/ comes as ⌘⇧7.
+        KeyBinding::new(&crate::keys::app("cmd-shift-7"), Cheatsheet, Some("Editor")),
+    ]
 }
 
 /// A project as the menu shows it: its folder, `~/…` if it's in home.

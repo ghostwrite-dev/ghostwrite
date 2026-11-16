@@ -262,13 +262,13 @@ fn a_views_key_thats_taken_is_said_before_its_installed(cx: &mut TestAppContext)
     std::fs::create_dir(&source).unwrap();
     std::fs::copy(&code, source.join("code.wasm")).unwrap();
     let manifest = r#"{ "name": "clash-test", "api": 1, "code": "code.wasm", "extensions": ["clashtest"],
-        "views": [{ "name": "notes", "title": "Notes", "shows": "blocks", "key": "space f" }] }"#;
+        "views": [{ "name": "notes", "title": "Notes", "shows": "blocks", "key": "space k" }] }"#;
     std::fs::write(source.join("plugin.json"), manifest).unwrap();
     t.command("plugin install clashing");
     settle(&mut t);
     let (_, lines) = question(&mut t).expect("it's asked about");
-    assert!(lines.contains(&("its view notes: Notes beside the file, on space f".to_string(), false)), "{lines:?}");
-    let clash = "clash-test's notes view has no key: space f is the editor's (file_picker)";
+    assert!(lines.contains(&("its view notes: Notes beside the file, on space k".to_string(), false)), "{lines:?}");
+    let clash = "clash-test's notes view has no key: space k is the editor's (hover)";
     assert!(lines.iter().any(|(line, warning)| *warning && line.starts_with(clash)), "a warning: {lines:?}");
 }
 

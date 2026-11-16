@@ -12,10 +12,15 @@ The ⌘ keys are for the app. On Windows and Linux, ⌘ is Ctrl+Shift, ⌘⇧ is
 | ⌘S, ⌘⇧S | save, save as |
 | ⌘B | Files: go there; from there, hide it |
 | ⌘J | the terminal: go there, typing; from there, hide it |
+| ⌘⇧D | the debugger, while something's being debugged; from there, back to the code |
+| ⌘P, ⌘E | pick a file, an open file |
+| ⌘⇧F | search the project |
+| ⌘\\, ⌘K | split the pane; the keys to the other pane |
 | ⌘Z, ⌘⇧Z | undo, redo |
 | ⌘C, ⌘X, ⌘V, ⌘A | copy, cut, paste, select all |
 | ⌘=, ⌘-, ⌘0 | zoom in, out, actual size (with pages in front: theirs) |
 | ⌘ scroll | zoom the pages under the pointer |
+| ⌘/ | every key, from any view |
 | ⌘Q | quit |
 
 With the keys on the terminal, the tab keys are about its tabs: see [Terminal](terminal.md#tabs).

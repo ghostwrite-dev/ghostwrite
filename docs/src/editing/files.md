@@ -4,8 +4,8 @@
 
 | Keys | Picks |
 | --- | --- |
-| `space f` | a file of the project |
-| `space b` | an open file |
+| ⌘P | a file of the project |
+| ⌘E | an open file |
 | `space s` | a symbol in this file |
 | `space .` | one of the language server's code actions here |
 
@@ -13,7 +13,7 @@ Typing narrows the list fuzzily: `edmod` finds `editor/mod.rs`. ↑ and ↓ choo
 
 ## The file tree
 
-`space e` goes to Files, the file tree, and `space e` again (or `esc`) goes back to the code. ⌘B goes there too, and from there hides it.
+⌘B goes to Files, the file tree, and from there hides it. `esc` goes back to the code and leaves it shown. `:tree` goes there too.
 
 | Keys | What they do |
 | --- | --- |
@@ -24,7 +24,7 @@ Typing narrows the list fuzzily: `edmod` finds `editor/mod.rs`. ↑ and ↓ choo
 | `r` | rename: type the new name in place, in insert mode |
 | `d` | move to the Trash |
 
-These are Files' own keys, its layer over the code's. `:` and the `space` keys work as anywhere. See [Modes and views](modes.md#files) and the [Files keys](../keys/files.md).
+These are Files' own keys, its layer over the code's. `:`, the `space` keys and the ⌘ keys work as anywhere. See [Modes and views](modes.md#files) and the [Files keys](../keys/files.md).
 
 When a story would create, remove or rename a file, the step is shown in the tree, in place.
 
@@ -44,11 +44,11 @@ Each open file is a tab.
 
 ## Two panes
 
-`space w v` (or `:vsplit`) opens a second pane beside this one. It shows this file's pages if it has them (a Typst document, say), or else the next tab.
+⌘\ (or `:vsplit`) opens a second pane beside this one. It shows this file's pages if it has them (a Typst document, say), or else the next tab.
 
 | Keys | What they do |
 | --- | --- |
-| `space w w`, a click | the keys to the other pane |
+| ⌘K, a click | the keys to the other pane |
 | `space w q`, `space w o`, `:only` | back to one pane |
 
 Each pane shows its own tab. Going to a tab that's in the other pane moves you there. A preview beside its file keeps up as you type, and clicking on it moves the cursor in the file without taking the keys away.

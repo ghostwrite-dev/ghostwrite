@@ -39,6 +39,8 @@ fn open_with<'a>(text: &str, replies: &[&str], language_servers: bool, cx: &'a m
     std::fs::write(&path, text).unwrap();
     cx.update(|cx| {
         crate::theme::install(WindowAppearance::Light, cx);
+        // The app's ⌘ keys, as `actions::install` binds them (without its app-wide handlers).
+        cx.bind_keys(crate::actions::bindings());
         crate::ui::text_field::bind_keys(cx);
     });
     let backend = (!replies.is_empty()).then(|| Backend::Scripted(replies.iter().map(|r| r.to_string()).collect()));
@@ -57,6 +59,12 @@ impl Setup<'_> {
         self.cx.simulate_keystrokes(keys);
         self.cx.run_until_parked();
         self
+    }
+
+    /// The app's keys, written as on a Mac (`cmd-j`), as this system has them.
+    fn app_keys(&mut self, keys: &str) -> &mut Self {
+        let keys = keys.split(' ').map(crate::keys::app).collect::<Vec<_>>().join(" ");
+        self.keys(&keys)
     }
 
     fn input(&mut self, text: &str) -> &mut Self {

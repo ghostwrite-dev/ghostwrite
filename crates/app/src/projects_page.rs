@@ -171,7 +171,7 @@ impl Render for ProjectsPage {
                             .child(":tutor        learn the keys, in a few minutes")
                             .child(":api-key      give it a Claude API key, or use Claude Code if it's installed")
                             .child(":model        see which models can be asked, and choose one")
-                            .child("space ?       see every key, at any time")
+                            .child("⌘/            see every key, at any time")
                             .into_any_element()
                     } else {
                         div().id("recent").flex().flex_col().gap_1().overflow_y_scroll().children(rows).into_any_element()

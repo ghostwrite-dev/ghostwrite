@@ -1,9 +1,8 @@
 //! The keymap: which keys run which [`Command`] in normal and select mode
 //! (and AI mode, looking around), as helix keeps it: a trie, where `g`,
-//! `space`, `space w`, `z`, `m`, `]`, `[` lead on to more keys. `space` and a
-//! letter is the one way from view to view (`space e`, `t`, `x`, and the keys
-//! plugins' views declare), and the panes are under `space w`, as helix's window
-//! mode is.
+//! `space`, `space w`, `z`, `m`, `]`, `[` lead on to more keys. Going from view to
+//! view is the app's ⌘ keys' (`cmd-b`, `cmd-j`, `cmd-p`…, in the app's actions), not
+//! these: only plugins' views still declare a `space` key.
 //!
 //! [`DEFAULT`] is the keymap as data, in the cheatsheet's sections and
 //! lines, so [`Keymap::cheatsheet`] comes from what's bound. Each view that
@@ -142,27 +141,14 @@ pub const DEFAULT: &[(&str, &[Line])] = &[
         "Space",
         &[
             (&[("space a", Ask)], "ask about the line or selection"),
-            (&[("space f", FilePicker), ("space b", BufferPicker)], "pick a file, an open file (fuzzy)"),
-            (&[("space /", GlobalSearch)], "search the project"),
             (&[("space k", Hover), ("space d", FileDiagnostics)], "docs here; this file's diagnostics"),
             (&[("space r", RenameSymbol), ("space .", CodeAction)], "rename; the server's code actions here"),
             (&[("space s", SymbolPicker)], "pick one of the file's symbols"),
             (&[("space j", GotoNextProblem)], "next error (or warning); a file's pages follow"),
             (&[("space y", YankToClipboard), ("space p", PasteClipboardAfter), ("space P", PasteClipboardBefore)], "clipboard yank, paste after, before"),
-            (&[("space ?", Cheatsheet)], "this, every key"),
         ],
     ),
-    (
-        "Views and panes",
-        &[
-            (&[("space e", FileExplorer)], "Files, the file tree (⌘B too); again: back to the code"),
-            (&[("space t", Terminal)], "the terminal, typing in it (⌘J too); again: back to the code"),
-            (&[("space x", Debugger)], "the debugger, while something's being debugged; again: back to the code"),
-            (&[("space w v", Vsplit)], "two panes: this file's pages, or the next tab"),
-            (&[("space w w", RotateView)], "the other pane"),
-            (&[("space w q", Wonly), ("space w o", Wonly)], "only this one"),
-        ],
-    ),
+    ("Views and panes", &[(&[("space w q", Wonly), ("space w o", Wonly)], "only this one")]),
     ("Command line  :", &[(&[(":", CommandMode)], "the command line")]),
 ];
 
@@ -173,19 +159,19 @@ pub const DEFAULT: &[(&str, &[Line])] = &[
 pub const VIEWS: &[(ViewKind, &str, &[Line])] = &[
     (
         ViewKind::Files,
-        "Files  space e",
+        "Files  ⌘B",
         &[
             (&[("j", FilesDown), ("down", FilesDown), ("k", FilesUp), ("up", FilesUp)], "down, up a row (3j: three)"),
             (&[("g g", FilesFirst), ("home", FilesFirst), ("g e", FilesLast), ("G", FilesLast), ("end", FilesLast)], "first, last row"),
             (&[("l", ExpandFolder), ("right", ExpandFolder), ("h", CollapseFolder), ("left", CollapseFolder)], "open a folder, preview a file; close, up"),
             (&[("enter", OpenFile)], "open the file, in the code (a folder: open, close)"),
             (&[("a", AddFile), ("r", RenameFile), ("d", DeleteFile)], "add (name/: a folder), rename, trash"),
-            (&[("esc", FocusCode)], "back to the code (space e too)"),
+            (&[("esc", FocusCode)], "back to the code (⌘B hides it)"),
         ],
     ),
     (
         ViewKind::Terminal,
-        "Terminal  space t",
+        "Terminal  ⌘J",
         &[
             (&[("enter", GotoFile)], "open the file a line names, at its line (gf too)"),
             (&[("esc", FocusCode)], "back to the code (from select mode, normal mode)"),
@@ -193,11 +179,11 @@ pub const VIEWS: &[(ViewKind, &str, &[Line])] = &[
     ),
     (
         ViewKind::Debugger,
-        "Debugger  space x",
+        "Debugger  ⌘⇧D",
         &[
             (&[("j", ScrollDown), ("down", ScrollDown), ("k", ScrollUp), ("up", ScrollUp)], "scroll down, up"),
             (&[("ctrl-d", ScrollPageDown), ("ctrl-u", ScrollPageUp)], "a screen down, up"),
-            (&[("esc", FocusCode)], "back to the code (space x too)"),
+            (&[("esc", FocusCode)], "back to the code (⌘⇧D too)"),
         ],
     ),
 ];
@@ -914,7 +900,7 @@ mod tests {
         let keymap = Keymap::standard();
         assert!(matches!(keymap.find(&keys("g")), Found::Keys));
         assert_eq!(command(keymap, "g g"), Some(GotoFileStart));
-        assert_eq!(command(keymap, "space w v"), Some(Vsplit));
+        assert_eq!(command(keymap, "space w q"), Some(Wonly));
         assert_eq!(command(keymap, "ctrl-w"), None, "ctrl-w leads nowhere in normal mode: it's typing's");
         assert!(matches!(keymap.find(&keys("ctrl-w")), Found::Nothing));
         let mut yours = Keymap::default();
@@ -943,13 +929,13 @@ mod tests {
         assert_eq!(command(&keymap, "x"), None, "unbound");
         assert!(matches!(keymap.find(&keys("ctrl-s")), Found::Bound(Bound::Typed(line)) if line == "w"));
         assert!(matches!(keymap.find(&keys("space W")), Found::Bound(Bound::Typed(line)) if line == "wa"));
-        assert_eq!(command(&keymap, "space f"), Some(FilePicker), "the rest of space is still there");
+        assert_eq!(command(&keymap, "space k"), Some(Hover), "the rest of space is still there");
         assert!(matches!(keymap.find(&keys("space w")), Found::Keys), "space w leads on to the panes' keys, so it isn't bound");
-        assert_eq!(command(&keymap, "space w v"), Some(Vsplit), "and they're as they were");
+        assert_eq!(command(&keymap, "space w q"), Some(Wonly), "and they're as they were");
         assert!(matches!(keymap.find(&keys("g")), Found::Keys), "nor is g");
         assert_eq!(command(&keymap, "q"), Some(ReplayMacro), "a wrong name leaves the key as it was");
         assert_eq!(wrong.len(), 4, "{wrong:?}");
-        assert!(wrong[0].starts_with("\"space w\": those keys lead on to others (space w v, space w w, space w q, space w o)"), "{}", wrong[0]);
+        assert!(wrong[0].starts_with("\"space w\": those keys lead on to others (space w q, space w o)"), "{}", wrong[0]);
         assert!(wrong[1].contains("\"g\": those keys lead on to others"), "{}", wrong[1]);
         assert!(wrong[2].contains("no command \"extend_lin_below\""), "{}", wrong[2]);
         assert!(wrong[3].contains("isn't keys"), "{}", wrong[3]);
@@ -967,6 +953,6 @@ mod tests {
         assert_eq!(sheet.last().map(|s| s.title.as_str()), Some(YOURS));
         assert_eq!(line(":w").as_deref(), Some("ctrl-s"));
         assert_eq!(line("find / till").as_deref(), Some("f t F T ‹c›"));
-        assert_eq!(line("pick a file").as_deref(), Some("space f  space b"));
+        assert_eq!(line("docs here").as_deref(), Some("space k  space d"));
     }
 }

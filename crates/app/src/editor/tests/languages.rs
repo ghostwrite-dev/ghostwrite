@@ -470,7 +470,7 @@ fn space_v_goes_to_a_files_pages_and_back(cx: &mut TestAppContext) {
     t.keys("space v");
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ · pages"), "again, to the same tab");
     assert_eq!(t.read(|e| e.project.tabs.len()), tabs + 2);
-    t.keys("space v space e space v");
+    t.keys("space v").app_keys("cmd-b").keys("space v");
     assert!(pages(&mut t), "from Files, to the pages");
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ · pages"));
     t.keys("space v i");
@@ -479,7 +479,7 @@ fn space_v_goes_to_a_files_pages_and_back(cx: &mut TestAppContext) {
     t.keys("escape");
     assert_eq!(name(&mut t).as_deref(), Some("paper.typ"), "typing isn't a key binding");
     // The help lists the view's keys, drawn and all.
-    t.keys("space ?");
+    t.app_keys("cmd-/");
     t.cx.update(|window, _| window.refresh());
     t.cx.run_until_parked();
     assert!(t.read(|e| e.cheatsheet));
@@ -606,11 +606,6 @@ fn pages_zoom_and_scroll_across_on_their_own(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &["unused"], cx);
     t.cx.update(|_, cx| {
-        cx.bind_keys([
-            gpui::KeyBinding::new("cmd-=", ZoomIn, None),
-            gpui::KeyBinding::new("cmd--", ZoomOut, None),
-            gpui::KeyBinding::new("cmd-0", ResetZoom, None),
-        ]);
         cx.on_action(|_: &ZoomIn, cx| crate::theme::zoom(1, cx));
         cx.on_action(|_: &ZoomOut, cx| crate::theme::zoom(-1, cx));
         cx.on_action(|_: &ResetZoom, cx| crate::theme::zoom(0, cx));
@@ -629,11 +624,11 @@ fn pages_zoom_and_scroll_across_on_their_own(cx: &mut TestAppContext) {
         t.cx.run_until_parked();
     };
 
-    t.keys("cmd-=");
+    t.app_keys("cmd-=");
     assert_eq!(zooms(&mut t), ((1.25, gpui::px(0.)), 1.0), "the pages zoom, the editor doesn't");
-    t.keys("cmd-= cmd--");
+    t.app_keys("cmd-= cmd--");
     assert_eq!(zooms(&mut t).0.0, 1.25, "a step each way");
-    t.keys("cmd-0");
+    t.app_keys("cmd-0");
     assert_eq!(zooms(&mut t).0.0, 1.0, "and back to fitting the view");
 
     // ⌘ and the wheel, over them.
@@ -660,9 +655,9 @@ fn pages_zoom_and_scroll_across_on_their_own(cx: &mut TestAppContext) {
     wheel(&mut t, 0., -2000., gpui::Modifiers::command());
     assert_eq!(zooms(&mut t).0, (0.1, gpui::px(0.)), "out only so far, and narrower than the view there's nothing to scroll across");
 
-    t.keys("cmd-shift-[");
+    t.app_keys("cmd-shift-[");
     t.cx.update(|_, cx| editor.update(cx, |e, cx| e.open_paths(vec![t.dir.join("doc.txt")], cx)));
-    t.keys("cmd-=");
+    t.app_keys("cmd-=");
     assert_eq!(zooms_of_editor(&mut t), 1.1, "in the code, it's the editor's zoom");
 }
 

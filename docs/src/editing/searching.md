@@ -16,7 +16,7 @@ The search goes round the end of the file. In select mode, `n` and `N` add the m
 
 ## In the project
 
-`space /` asks for a pattern and searches the whole project. `:grep pattern` does the same (`:g` and `:search` too).
+⌘⇧F asks for a pattern and searches the whole project. `:grep pattern` does the same (`:g` and `:search` too).
 
 The matches come up one at a time, like a [story](../stories/README.md): each is a note at its line. Tab goes on to the next. Enter asks the model about the match you're on, and the model takes over from there.
 

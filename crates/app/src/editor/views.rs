@@ -90,8 +90,8 @@ impl Editor {
         }
     }
 
-    /// Before a key: the keys are where [`Self::view_now`] says, and on the terminal,
-    /// out of typing, there's its text to move through.
+    /// Before a key: the keys are where [`Self::view_now`] says, and on the terminal
+    /// they type in its shell (unless a story has them reading its text).
     pub(super) fn settle_view(&mut self, cx: &mut Context<Self>) {
         let now = self.view_now();
         // The view the keys were on went away.
@@ -100,7 +100,7 @@ impl Editor {
         }
         self.modal.view = now;
         if now == ViewKind::Terminal && self.modal.mode != Mode::Insert && self.terminal.reading.is_none() {
-            self.start_reading(false, cx);
+            self.type_in_terminal(cx);
         }
     }
 
@@ -118,8 +118,6 @@ impl Editor {
             ViewKind::Files => self.stop_naming(),
             ViewKind::Terminal => {
                 if self.modal.mode == Mode::Insert {
-                    self.terminal.held_escape = None;
-                    self.terminal.held_quit = None;
                     self.modal.leave(Mode::Insert);
                 }
                 self.stop_reading();

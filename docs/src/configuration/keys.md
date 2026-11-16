@@ -25,7 +25,7 @@ The command names are the last column of each page of the [key reference](../key
 
 ## Writing keys
 
-Keys pressed one after another are written apart: `"space w v"`, `"g x"`, `"Z Z"`. A key can lead on to keys of your own: binding `"Z Z"` makes `Z` a key that waits for another.
+Keys pressed one after another are written apart: `"space w q"`, `"g x"`, `"Z Z"`. A key can lead on to keys of your own: binding `"Z Z"` makes `Z` a key that waits for another.
 
 | Write | For |
 | --- | --- |
@@ -37,7 +37,7 @@ Keys pressed one after another are written apart: `"space w v"`, `"g x"`, `"Z Z"
 
 ## Checking
 
-`space ?` shows your keys: on the line of the command they run, if the cheatsheet has one, or under **Your keys** at the end.
+⌘/ shows your keys: on the line of the command they run, if the cheatsheet has one, or under **Your keys** at the end.
 
 A key that can't be bound (a command name that isn't one, keys that aren't keys, or keys that lead on to others, such as `space w` or `g`: bind keys after them instead, as `space w x`) is said when Ghostwrite starts, and that key stays as it was.
 

@@ -419,15 +419,15 @@ impl Editor {
             // The ask field had the keys: the code gets them back.
             self.refocus = true;
         }
-        // It ended with a command: the keys stay on the terminal, in normal mode, to read what it prints.
+        // It ended with a command: the keys stay on the terminal, typing in its shell.
         if ran && self.terminal.shown && !self.terminal.shells.is_empty() {
             self.back_to_the_command();
-            self.start_reading(false, cx);
+            self.type_in_terminal(cx);
         } else if self.in_code() {
             // Back to the view it was asked from, if it's still there.
             match came_from {
                 ViewKind::Files if self.tree_pane.shown => self.focus_on(ViewKind::Files, cx),
-                ViewKind::Terminal if self.terminal.shown && !self.terminal.shells.is_empty() => self.start_reading(false, cx),
+                ViewKind::Terminal if self.terminal.shown && !self.terminal.shells.is_empty() => self.type_in_terminal(cx),
                 // The debugger, or a plugin's view, if it's still there.
                 view @ (ViewKind::Debugger | ViewKind::Plugin(_)) => self.focus_on(view, cx),
                 _ => {}

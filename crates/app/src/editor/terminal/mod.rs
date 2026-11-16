@@ -1,10 +1,9 @@
-//! The terminal under the code: the user's own shell, a view of its own. `space t`,
-//! `:term`, `cmd-j` or a click puts the keys there in insert mode, typing in the
-//! shell; Esc Esc, or `ctrl-\ ctrl-n` as in Neovim, goes to normal mode (or the mode
-//! it was entered from), to move through what it shows with the editor's keys (see
-//! [`super::reading`]). While a full-screen program like vim has it, Esc is the
-//! program's, however often: `ctrl-\ ctrl-n` still leaves, and so does a click on the
-//! code. `cmd-j` hides it. Dragging the mouse selects (a double click a word,
+//! The terminal under the code: the user's own shell, a view of its own. `cmd-j`,
+//! `:term` or a click puts the keys there in insert mode, typing in the
+//! shell. As in Zed, every key but the app's (⌘) goes to the shell, Esc included:
+//! there are no editor modes here. A click on the code, or `cmd-j`, leaves it; a
+//! story reviewing a command still reads its text (see [`super::reading`]).
+//! `cmd-j` hides it. Dragging the mouse selects (a double click a word,
 //! a triple click a line), and `cmd-c` copies it.
 //! The model is shown what's on it with every request (and, in a follow-up,
 //! what's come since the last command, when that's changed); what it types there is only a command the
@@ -56,9 +55,6 @@ const MAX_CONTEXT: usize = 8_000;
 const HEIGHT: f32 = 290.;
 const MIN_HEIGHT: f32 = 60.;
 const ROOM_ABOVE: f32 = 120.;
-/// How long an Esc (or a `ctrl-\`) typed in the terminal waits for a second Esc (or a
-/// `ctrl-n`), which would leave typing, before it goes to the shell.
-const ESCAPE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 /// How long the shell has to have printed nothing, back at its prompt, to be done.
 const QUIET: Duration = Duration::from_millis(250);
 /// How long a story's command is waited for before the story goes on without it.
@@ -77,13 +73,6 @@ pub(super) struct TerminalPane {
     pub(super) active: usize,
     /// The number of the shell the story's command last ran in.
     pub(super) ran_in: Option<usize>,
-    /// An Esc that hasn't gone to the shell yet: another straight after leaves
-    /// typing, and the shell never sees either (zsh would take the next key
-    /// as Alt and it); anything else, or a moment, and it goes on its way.
-    pub(super) held_escape: Option<(Vec<u8>, Task<()>)>,
-    /// The same for a `ctrl-\`: a `ctrl-n` straight after leaves typing, as in Neovim, even
-    /// in a full-screen program.
-    pub(super) held_quit: Option<(Vec<u8>, Task<()>)>,
     /// Scrolling that hasn't added up to a line yet.
     scrolled: f32,
     /// Where its cells are on screen, as last drawn: the top left one, and a cell's size.
@@ -165,8 +154,6 @@ impl Default for TerminalPane {
             shells: vec![],
             active: 0,
             ran_in: None,
-            held_escape: None,
-            held_quit: None,
             scrolled: 0.,
             cells: None,
             selecting: false,
@@ -188,8 +175,6 @@ impl TerminalPane {
     /// Another shell is in front: what was going on in the last one stops here.
     pub(super) fn switch_to(&mut self, ix: usize) {
         self.active = ix.min(self.shells.len().saturating_sub(1));
-        self.held_escape = None;
-        self.held_quit = None;
         self.selecting = false;
         self.scrolled = 0.;
     }
@@ -213,8 +198,6 @@ impl Editor {
         self.terminal.shown = true;
         self.focus_on(ViewKind::Terminal, cx);
         self.stop_reading();
-        self.terminal.held_escape = None;
-        self.terminal.held_quit = None;
         self.modal.enter(Mode::Insert);
         cx.notify();
     }
@@ -531,81 +514,20 @@ impl Editor {
         (!text.trim().is_empty()).then(|| TerminalNow { text, since_command: terminal.since_command(MAX_CONTEXT) })
     }
 
-    /// A key typed in the terminal: to the shell, unless it's the app's (cmd), a
-    /// second Esc in a row or `ctrl-\ ctrl-n`, which leave typing, or Tab with a
-    /// story's command up.
+    /// A key typed in the terminal: to the shell, as in any terminal, unless it's
+    /// the app's (cmd), or Tab with a story's command up.
     pub(super) fn terminal_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
         let Some(terminal) = self.terminal.current() else { return false };
         let modes = terminal.modes();
-        let ctrl = |key: &str| keystroke.key == key && keystroke.modifiers == Modifiers::control();
-        // `ctrl-\ ctrl-n`, as in Neovim: out of typing, whatever's running.
-        if self.terminal.held_quit.take().is_some_and(|_| ctrl("n")) {
-            self.start_reading(false, cx);
-            return true;
-        }
-        self.let_go_of_quit();
-        if ctrl("\\") {
-            let Some(bytes) = key_bytes(keystroke, &modes) else { return false };
-            self.let_go_of_escape();
-            let wait = cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(ESCAPE_WAIT).await;
-                this.update(cx, |this, _| this.let_go_of_quit()).ok();
-            });
-            self.terminal.held_quit = Some((bytes, wait));
-            return true;
-        }
-        // In a full-screen program Esc is the program's, however often.
-        let escape = keystroke.key == "escape" && keystroke.modifiers == Modifiers::none() && !modes.full_screen;
-        if escape {
-            if self.terminal.held_escape.take().is_some() {
-                self.start_reading(false, cx);
-                return true;
-            }
-            let Some(bytes) = key_bytes(keystroke, &modes) else { return false };
-            let wait = cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(ESCAPE_WAIT).await;
-                this.update(cx, |this, _| this.let_go_of_escape()).ok();
-            });
-            self.terminal.held_escape = Some((bytes, wait));
-            return true;
-        }
         if keystroke.key == "tab" && keystroke.modifiers == Modifiers::none() && !modes.full_screen && self.command_proposed() {
-            self.terminal.held_escape = None;
             self.run_from_the_terminal(cx);
             return true;
         }
         let Some(bytes) = key_bytes(keystroke, &modes) else { return false };
-        self.let_go_of_escape();
         if let Some(terminal) = self.terminal.current() {
             terminal.input(bytes);
         }
         true
-    }
-
-    /// An Esc held back goes to the shell after all.
-    fn let_go_of_escape(&mut self) {
-        if let Some((bytes, wait)) = self.terminal.held_escape.take() {
-            wait.detach();
-            if let Some(terminal) = self.terminal.current() {
-                terminal.input(bytes);
-            }
-        }
-    }
-
-    /// A `ctrl-\` held back goes to the shell after all.
-    fn let_go_of_quit(&mut self) {
-        if let Some((bytes, wait)) = self.terminal.held_quit.take() {
-            wait.detach();
-            if let Some(terminal) = self.terminal.current() {
-                terminal.input(bytes);
-            }
-        }
-    }
-
-    /// Out of typing: what's held back goes to the shell first.
-    pub(super) fn let_go_of_held_keys(&mut self) {
-        self.let_go_of_quit();
-        self.let_go_of_escape();
     }
 
     /// `cmd-c` typing in the terminal: what's selected.
@@ -745,7 +667,6 @@ impl Editor {
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r")
         };
-        self.let_go_of_escape();
         if let Some(terminal) = self.terminal.current() {
             terminal.input(text.into_bytes());
         }

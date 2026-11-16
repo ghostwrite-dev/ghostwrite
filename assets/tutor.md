@@ -2,7 +2,7 @@
 
 This is a scratch tab: change anything, and close it with :q! when you're done.
 Ghostwrite is modal: keys move and act, and you only type text in insert mode.
-Press space ? at any time to see every key. j and k scroll it; any other key closes it.
+Press ⌘/ at any time to see every key. j and k scroll it; any other key closes it.
 
 ## Moving
 
@@ -56,25 +56,20 @@ Claude Code works too if it's installed, under its own login.
 
 ## Getting around
 
-space f    pick a file
-space /    search the project
+⌘P         pick a file (⌘E: an open one)
+⌘⇧F        search the project
 :replace old new   change it across the project, step by step
 
-space and a letter goes to a view, and the same again goes back to the code:
-
-space e    Files, the file tree
-space t    the terminal, typing in it
+⌘B         Files, the file tree; again, it hides
+⌘J         the terminal, typing in it; again, it hides
 space v    the file's pages, if a plugin makes them (a Typst file's, say)
 space g    the side view: a plugin's panel (Lean's goals), or the debugger
 
-Each is a view, as the code is, and the keys work the same way in each: the
-mode line says where they are (NOR · files, INS · terminal). A click puts them
-where it is.
+Each is a view, as the code is: the mode line says where the keys are
+(NOR · files, INS · terminal). A click puts them where it is.
 
-space w v        two panes; space w w the other one; space w q only this one
-esc esc          typing in the terminal: back to normal mode, to move through
-                 what it printed (in vim and the like, ctrl-\ ctrl-n)
-i                type in the terminal again
-esc              from Files, the side view or the terminal, back to the code
+⌘\               two panes; ⌘K the other one; space w q only this one
+                 in the terminal, every key but ⌘ goes to the shell, Esc too
+esc              from Files or the side view, back to the code
 
-That's the start. space ? has the rest.
+That's the start. ⌘/ has the rest.

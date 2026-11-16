@@ -51,7 +51,7 @@ Each module starts with a comment saying what it is. `crates/app/src/editor/mod.
 
 ## Where things go
 
-- **Keys.** The default keymap is data: `crates/core/src/modal/keymap.rs`, in the cheatsheet's sections, so `space ?` comes from what's bound. `DEFAULT` is the code's keys and `VIEWS` each other view's layer. Commands and their names are in `command.rs` beside it. What the cheatsheet says by hand (typing, the mouse, the terminal's shell, reviewing, `:` commands, the window) is `BY_HAND` in `crates/app/src/editor/view.rs`, and has to be kept in step. The key reference in these docs is made from the same tables.
+- **Keys.** The default keymap is data: `crates/core/src/modal/keymap.rs`, in the cheatsheet's sections, so the ⌘/ cheatsheet comes from what's bound. `DEFAULT` is the code's keys and `VIEWS` each other view's layer. The app's ⌘ keys, views and pickers among them, are in `crates/app/src/actions.rs`. Commands and their names are in `command.rs` beside it. What the cheatsheet says by hand (typing, the mouse, the terminal's shell, reviewing, `:` commands, the window) is `BY_HAND` in `crates/app/src/editor/view.rs`, and has to be kept in step. The key reference in these docs is made from the same tables.
 - **Views.** Which view has the keys, and the keys of views with no text, are in `crates/core/src/modal/views.rs`; moving between them in `crates/app/src/editor/views.rs`.
 - **`:` commands** are parsed in `crates/state/src/commands.rs` and run in `crates/app/src/editor/commands.rs`.
 - **Settings** are in `crates/state/src/config.rs`.

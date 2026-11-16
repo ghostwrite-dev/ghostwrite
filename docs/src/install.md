@@ -49,7 +49,7 @@ cargo build --release --no-default-features --features wasm-plugins
 
 macOS is what Ghostwrite is used on every day. Windows and Linux are type-checked and tested in CI, so expect rough edges. They differ in a few ways:
 
-- The app's keys use Ctrl+Shift where a Mac has ⌘ (Ctrl+Shift+T for ⌘T), Ctrl+Alt+Shift where it has ⌘⇧, and Ctrl+Alt where it has ⌘⌥. Plain Ctrl belongs to the editor and the shell. `space ?` shows the keys as they are on your system.
+- The app's keys use Ctrl+Shift where a Mac has ⌘ (Ctrl+Shift+T for ⌘T), Ctrl+Alt+Shift where it has ⌘⇧, and Ctrl+Alt where it has ⌘⌥. Plain Ctrl belongs to the editor and the shell. ⌘/ shows the keys as they are on your system.
 - A local model runs on the CPU, so it's slower. Metal is the only GPU it uses so far.
 - The terminal is PowerShell on Windows (`pwsh` if it's installed).
 - Settings live in `%APPDATA%\Ghostwrite` on Windows and `~/.config/ghostwrite` elsewhere. On Linux, `$XDG_CONFIG_HOME/ghostwrite` if that's set. These docs write `~/.config/ghostwrite` for all of them.
@@ -62,7 +62,7 @@ Ghostwrite opens on the projects page. With no recent projects it suggests where
 :tutor        learn the keys, in a few minutes
 :api-key      give it a Claude API key, or use Claude Code if it's installed
 :model        see which models can be asked, and choose one
-space ?       see every key, at any time
+⌘/            see every key, at any time
 ```
 
 Press `o` (or ⌘⇧O) to open a folder. You can also start it from a shell with a folder or files to open:

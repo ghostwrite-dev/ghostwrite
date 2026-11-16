@@ -6,35 +6,30 @@ The terminal is a [view](editing/modes.md#views) under the code with your own sh
 
 | Keys | What they do |
 | --- | --- |
-| `space t` | go to the terminal, typing in it; from there, back to the code |
 | ⌘J | go to the terminal, typing in it; from there, hide it |
 | `:term` | go to the terminal, typing in it |
-| `esc` | in normal mode, back to the code |
 | a click | the keys go to the terminal |
+| a click on the code | the keys go back to the code |
 
 The shell keeps running while the terminal is hidden. When a shell exits its tab closes, and with the last one, the terminal. Drag its top edge to resize it; the height is kept for next time.
 
-## Modes in the terminal
+## Typing in it
 
-The [modes](editing/modes.md) mean the same on the terminal as anywhere, applied to the shell:
+The terminal has no editor modes. Every key goes to the shell, Esc included, so vim, fzf and the rest get their keys as in any terminal. Only the app's ⌘ keys are the editor's: ⌘J or a click on the code leaves it.
 
-- **Insert mode** types into the shell. Press `i` or `a` to start typing on the shell's line.
-- **Normal mode** reads the terminal with the editor's keys.
-- In insert mode, `esc` goes to the program running there, so vim, fzf and the rest get their Esc. `esc esc`, or `ctrl-\ ctrl-n` as in Neovim, goes back to normal mode. A single Esc reaches the program a moment later; two in a row never do. While a full-screen program like vim has the terminal, every Esc is the program's, and `ctrl-\ ctrl-n` still leaves.
+The status line shows `INS · terminal`.
 
-The status line shows `INS · terminal` or `NOR · terminal`.
+Dragging the mouse selects (a double click a word, a triple click a line) and ⌘C copies.
 
-## Reading it in normal mode
+## Reading it during a story
 
-In normal mode the terminal's scrollback and screen are text, like a file that can't be edited:
+While a story's command waits on the terminal for review, the keys read what's on it in AI mode, like a file that can't be edited:
 
 - the motions, select mode, `x`, `/` and `n`, and `y` all work as in a file, and the selection shows on the terminal;
 - what's printed meanwhile comes in under it, and the selection stays on its text;
-- Enter or `gf` opens the file a line names, at its line and column (`src/main.rs:12:5`);
-- `space a` asks the model about what's selected, from an empty tab of its own, since the code in front isn't what it's about;
-- `i`, `a`, `o` or `c` go back to typing on the shell's line, and `esc` goes back to the code.
+- Enter or `gf` opens the file a line names, at its line and column (`src/main.rs:12:5`).
 
-In insert mode, dragging the mouse selects (a double click a word, a triple click a line) and ⌘C copies.
+Tab runs the command. See [Commands in the terminal](stories/commands.md).
 
 ## Links
 

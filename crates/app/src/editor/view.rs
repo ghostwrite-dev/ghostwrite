@@ -5,7 +5,7 @@
 //! Also the panes' edges being dragged, and the menu actions, which act on
 //! the active document.
 
-use ghostwrite_core::{Mode, Range, ViewKind};
+use ghostwrite_core::{Effect, Mode, Range, ViewKind};
 use gpui::{AnyElement, ClipboardItem, Context, FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, SharedString, Window, div, prelude::*};
 
 use super::element::{CodeView, Decoration};
@@ -47,7 +47,7 @@ pub(super) struct Row {
     pub bound: Vec<Vec<ghostwrite_core::Key>>,
 }
 
-/// The `space ?` cheatsheet: every key, as the keymap has them (and yours
+/// The ⌘/ cheatsheet: every key, as the keymap has them (and yours
 /// with them), and what it can't say: [`BY_HAND`]. Sections are in its order; those
 /// it hasn't (plugins' views'), after the one the keymap has before them.
 pub(super) fn cheatsheet(keymap: &ghostwrite_core::Keymap) -> Vec<(String, Vec<Row>)> {
@@ -66,7 +66,9 @@ pub(super) fn cheatsheet(keymap: &ghostwrite_core::Keymap) -> Vec<(String, Vec<R
         sections[at].1.extend(rows);
         after = Some(at);
     }
-    for ((_, lines), (_, by_hand)) in sections.iter_mut().zip(BY_HAND) {
+    // By title: plugins' views' sections are in among them.
+    for (title, by_hand) in BY_HAND {
+        let Some((_, lines)) = sections.iter_mut().find(|(t, _)| t == title) else { continue };
         let view = lines.first().map_or(ViewKind::Code, |row| row.view);
         lines.extend(by_hand.iter().map(|(keys, what)| Row { view, keys: keys.to_string(), what: what.to_string(), bound: vec![] }));
     }
@@ -92,15 +94,12 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
     ("Match  m", &[]),
     ("Search", &[]),
     ("Space", &[]),
-    ("Views and panes", &[("click", "the keys go to the view clicked"), ("mode line", "the mode, and the view: NOR · terminal, a plugin's by its title")]),
-    ("Files  space e", &[]),
+    ("Views and panes", &[("click", "the keys go to the view clicked"), ("mode line", "the mode, and the view: INS · terminal, a plugin's by its title")]),
+    ("Files  ⌘B", &[]),
     (
-        "Terminal  space t",
+        "Terminal  ⌘J",
         &[
-            ("i a o c", "insert mode: type in its shell; the model runs only what you accept"),
-            ("esc esc  ctrl-\\ ctrl-n", "(typing) normal mode, to move through it (in vim & co, esc is theirs)"),
-            ("motions  / n y", "move, select, search, yank, as in a file"),
-            ("space a", "ask about what's selected"),
+            ("any key", "goes to its shell, Esc too: no modes here; the model runs only what you accept"),
             ("⌘-click", "open a web address or file it shows"),
             ("drag  ⌘C", "select, copy"),
             ("⌘J", "hide it"),
@@ -109,7 +108,7 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
             ("⌘⌥←  ⌘⌥→", "move the tab, or drag it"),
         ],
     ),
-    ("Debugger  space x", &[]),
+    ("Debugger  ⌘⇧D", &[]),
     (
         "Reviewing",
         &[
@@ -152,9 +151,13 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
             ("⌘⇧[ ⌘⇧]", "previous, next tab"),
             ("⌘O ⌘⇧O ⌘⇧N", "open file, folder; new window"),
             ("⌘S ⌘⇧S", "save, save as"),
-            ("⌘B", "show or hide Files"),
+            ("⌘B  ⌘J  ⌘⇧D", "Files, the terminal, the debugger: go there; again, hide it"),
+            ("⌘P  ⌘E", "pick a file, an open file"),
+            ("⌘⇧F", "search the project"),
+            ("⌘\\  ⌘K", "split the pane; the other pane"),
             ("⌘= ⌘- ⌘0", "zoom in, out, actual size (pages in front: theirs)"),
             ("⌘ scroll", "zoom the pages under the pointer"),
+            ("⌘/", "these keys, from any view"),
         ],
     ),
 ];
@@ -183,11 +186,11 @@ impl Editor {
     /// With no file open: a few ways in.
     fn render_empty(&self, cx: &Context<Self>) -> AnyElement {
         let theme = theme(cx);
-        let hint = |keys: &'static str, what: &'static str| {
+        let hint = |keys: &str, what: &'static str| {
             div()
                 .flex()
                 .gap_3()
-                .child(div().w(pt(96.)).text_right().font_family(theme.mono_font.clone()).text_color(theme.foreground).child(keys))
+                .child(div().w(pt(96.)).text_right().font_family(theme.mono_font.clone()).text_color(theme.foreground).child(keys.to_string()))
                 .child(div().text_color(theme.muted_foreground).child(what))
         };
         div()
@@ -198,11 +201,11 @@ impl Editor {
             .justify_center()
             .gap_2()
             .text_sm()
-            .child(hint("space e", "browse the file tree"))
-            .child(hint(":e <path>", "open a file"))
+            .child(hint(&crate::keys::shown("⌘B"), "browse the file tree"))
+            .child(hint(&crate::keys::shown("⌘P"), "open a file"))
             .child(hint(":n", "new buffer"))
             .child(hint(":project", "switch project"))
-            .child(hint("space ?", "every key"))
+            .child(hint(&crate::keys::shown("⌘/"), "every key"))
             .into_any_element()
     }
 
@@ -763,6 +766,13 @@ impl gpui::Render for Editor {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, _, cx| this.toggle_terminal(cx)))
+            .on_action(cx.listener(|this, _: &ToggleDebugger, window, cx| this.effect(Effect::Debugger, window, cx)))
+            .on_action(cx.listener(|this, _: &FilePicker, window, cx| this.effect(Effect::PickFile, window, cx)))
+            .on_action(cx.listener(|this, _: &BufferPicker, window, cx| this.effect(Effect::PickBuffer, window, cx)))
+            .on_action(cx.listener(|this, _: &ProjectSearch, window, cx| this.effect(Effect::Search, window, cx)))
+            .on_action(cx.listener(|this, _: &SplitPane, window, cx| this.effect(Effect::SplitRight, window, cx)))
+            .on_action(cx.listener(|this, _: &OtherPane, window, cx| this.effect(Effect::OtherPane, window, cx)))
+            .on_action(cx.listener(|this, _: &Cheatsheet, window, cx| this.effect(Effect::Cheatsheet, window, cx)))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo_redo(false, cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.undo_redo(true, cx)))
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(false, cx)))

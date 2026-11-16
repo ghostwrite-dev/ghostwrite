@@ -265,7 +265,7 @@ fn files_drives_the_file_tree(cx: &mut TestAppContext) {
     std::fs::write(t.dir.join("src/main.rs"), "fn main() {}\n").unwrap();
     t.editor.update(t.cx, |e, _| e.project.tree.refresh());
     // Rows: src/, doc.txt (the active file, under the cursor).
-    t.keys("space e");
+    t.app_keys("cmd-b");
     assert_eq!(t.at(), (ViewKind::Files, Mode::Normal));
     t.keys("k l");
     assert_eq!(t.read(|e| e.project.tree.rows().len()), 3, "l opens the folder");
@@ -275,21 +275,21 @@ fn files_drives_the_file_tree(cx: &mut TestAppContext) {
     t.keys("j enter");
     assert_eq!(t.active().as_deref(), Some("doc.txt"));
     assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "enter opens it and goes to the code");
-    t.keys("space e escape");
-    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal));
-    t.keys("space e");
-    assert_eq!(t.at(), (ViewKind::Files, Mode::Normal), "space e goes to Files");
-    t.keys("space e");
-    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "and back");
+    t.app_keys("cmd-b escape");
+    assert_eq!((t.at(), t.read(|e| e.tree_pane.shown)), ((ViewKind::Code, Mode::Normal), true), "esc goes back to the code, Files still up");
+    t.app_keys("cmd-b");
+    assert_eq!(t.at(), (ViewKind::Files, Mode::Normal), "⌘B goes to Files");
+    t.app_keys("cmd-b");
+    assert_eq!((t.at(), t.read(|e| e.tree_pane.shown)), ((ViewKind::Code, Mode::Normal), false), "and from there hides it, back in the code");
 }
 
 #[gpui::test]
 fn files_adds_and_renames(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[], cx);
-    t.keys("space e a").input("notes/todo.md").keys("enter");
+    t.app_keys("cmd-b").keys("a").input("notes/todo.md").keys("enter");
     assert!(t.dir.join("notes/todo.md").is_file());
     assert_eq!(t.active().as_deref(), Some("notes/todo.md"), "a new file opens");
-    t.keys("space e r").keys(&crate::keys::in_field("cmd-a")).input("done.md").keys("enter");
+    t.app_keys("cmd-b").keys("r").keys(&crate::keys::in_field("cmd-a")).input("done.md").keys("enter");
     assert!(t.dir.join("notes/done.md").is_file());
     assert_eq!(t.active().as_deref(), Some("notes/done.md"), "the tab follows the rename");
 }
@@ -449,11 +449,11 @@ fn draw(t: &mut Setup) {
 #[gpui::test]
 fn two_panes_show_two_tabs_and_the_keys_move_between_them(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[], cx);
-    t.keys("space w v");
+    t.app_keys("cmd-\\");
     assert!(t.status().is_some_and(|s| s.contains("open another file")), "one tab: nothing to show beside it");
     let names = three_tabs(&mut t);
     let start = t.active();
-    t.keys("space w v");
+    t.app_keys("cmd-\\");
     draw(&mut t);
     let other = t.read(|e| e.other_pane_doc()).expect("a second pane");
     assert!(t.cx.debug_bounds("other-pane").is_some(), "and it's drawn");
@@ -461,11 +461,11 @@ fn two_panes_show_two_tabs_and_the_keys_move_between_them(cx: &mut TestAppContex
     let here = id(&mut t);
     assert_ne!(here, other);
 
-    t.keys("space w w");
+    t.app_keys("cmd-k");
     assert_eq!(id(&mut t), other, "the keys went over");
     assert_eq!(t.read(|e| e.other_pane_doc()), Some(here), "and what they left stays in its pane");
     assert!(!t.read(|e| e.split.as_ref().unwrap().other_on_right), "on the left now");
-    t.keys("space w w");
+    t.app_keys("cmd-k");
     assert_eq!(id(&mut t), here);
     assert!(t.read(|e| e.split.as_ref().unwrap().other_on_right), "back where it was");
 

@@ -296,7 +296,7 @@ fn ai_mode_reviews_and_goes_back_to_where_you_were(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_story_asked_from_files_goes_back_to_files(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), &hints(), DONE], cx);
-    t.keys("space e");
+    t.app_keys("cmd-b");
     assert_eq!(t.at(), (ViewKind::Files, Mode::Normal));
     t.keys("space a");
     assert_eq!(t.at(), (ViewKind::Code, Mode::Ai), "asked in the code");
@@ -676,8 +676,8 @@ fn having_looked_away_from_a_step_tab_comes_back_to_it_first(cx: &mut TestAppCon
 fn files_can_be_opened_while_a_story_is_up(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), DONE], cx);
     t.ask("implement it");
-    t.keys("space f");
-    assert!(t.read(|e| e.picker.is_some()), "space f opens the file picker in AI mode too");
+    t.app_keys("cmd-p");
+    assert!(t.read(|e| e.picker.is_some()), "⌘P opens the file picker in AI mode too");
 }
 
 #[gpui::test]
@@ -687,8 +687,8 @@ fn the_tree_can_be_used_while_a_story_is_up(cx: &mut TestAppContext) {
     t.editor.update(t.cx, |e, _| e.project.tree.refresh());
     t.ask("implement it");
     let at = t.cursor();
-    t.keys("space e");
-    assert_eq!(t.at(), (ViewKind::Files, Mode::Ai), "space e goes to Files, the story still up");
+    t.app_keys("cmd-b");
+    assert_eq!(t.at(), (ViewKind::Files, Mode::Ai), "⌘B goes to Files, the story still up");
     let row = t.read(|e| e.project.tree.rows().iter().position(|r| r.name == "notes.txt")).expect("in the tree");
     t.editor.update(t.cx, |e, _| e.project.tree.move_to(row));
     t.keys("enter");
@@ -705,7 +705,9 @@ fn the_tree_can_be_used_while_a_story_is_up(cx: &mut TestAppContext) {
 fn esc_out_of_files_goes_back_to_the_story(cx: &mut TestAppContext) {
     let mut t = open(ADD, &[&fix(), DONE], cx);
     t.ask("implement it");
-    t.keys("space e escape");
+    t.app_keys("cmd-b");
+    assert_eq!(t.at(), (ViewKind::Files, Mode::Ai), "⌘B goes to Files, the review still up");
+    t.app_keys("escape");
     assert_eq!(t.at(), (ViewKind::Code, Mode::Ai));
     assert!(t.reviewing());
 }

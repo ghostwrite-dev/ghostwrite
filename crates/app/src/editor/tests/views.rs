@@ -1,11 +1,12 @@
-//! Views: the keys going from the code to Files, the terminal, the debugger and a
-//! plugin's views and back with `space` and a letter, the panes under `space w`, the mode line saying where they are, each view's own keys (yours, and a
+//! Views: the keys going from the code to Files, the terminal, the debugger (the app's
+//! ⌘ keys) and a plugin's views (`space` and a letter) and back, the panes (⌘\, ⌘K,
+//! `space w`), the mode line saying where they are, each view's own keys (yours, and a
 //! plugin's), and a story reviewed in whichever view has them.
 
 use ghostwrite_core::{Language, PluginView, Shows, ViewId, ViewPlace};
 use ghostwrite_plugin::{Binding, Block, Panel, Plugin};
 
-use super::terminal::{printed, wait_for};
+use super::terminal::{leave_terminal, printed, wait_for};
 use super::*;
 use crate::editor::document::Document;
 
@@ -117,7 +118,7 @@ fn draw(t: &mut Setup) {
 }
 
 #[gpui::test]
-fn space_w_v_w_q_o_are_the_panes_and_ctrl_w_moves_nowhere(cx: &mut TestAppContext) {
+fn cmd_backslash_cmd_k_and_space_w_q_o_are_the_panes_and_ctrl_w_moves_nowhere(cx: &mut TestAppContext) {
     let mut t = open("xy\n", &[], cx);
     std::fs::write(t.dir.join("b.txt"), "b\n").unwrap();
     t.command("e b.txt");
@@ -128,21 +129,21 @@ fn space_w_v_w_q_o_are_the_panes_and_ctrl_w_moves_nowhere(cx: &mut TestAppContex
     t.keys("l");
     assert_eq!(t.cursor(), 1, "so l after it is the code's own");
     assert_eq!((t.at(), t.active().as_deref()), ((ViewKind::Code, Mode::Normal), Some("doc.txt")));
-    t.keys("space e ctrl-w l");
+    t.app_keys("cmd-b").keys("ctrl-w l");
     assert_eq!(t.at().0, ViewKind::Files, "nor from Files");
     t.keys("escape");
 
-    t.keys("space w v");
-    assert_eq!(t.active().as_deref(), Some("doc.txt"), "space w v: two panes, the keys where they were");
+    t.app_keys("cmd-\\");
+    assert_eq!(t.active().as_deref(), Some("doc.txt"), "⌘\\: two panes, the keys where they were");
     let other = |t: &mut Setup| t.read(|e| e.other_pane_doc().and_then(|doc| e.project.tabs.by_id(doc)).map(|tab| tab.doc.name().to_string()));
     assert_eq!(other(&mut t).as_deref(), Some("b.txt"), "the next tab in the other");
-    t.keys("space w w");
-    assert_eq!(t.active().as_deref(), Some("b.txt"), "space w w: the other pane");
-    t.keys("space w w");
+    t.app_keys("cmd-k");
+    assert_eq!(t.active().as_deref(), Some("b.txt"), "⌘K: the other pane");
+    t.app_keys("cmd-k");
     assert_eq!(t.active().as_deref(), Some("doc.txt"), "and back");
     t.keys("space w q");
     assert!(t.read(|e| e.split.is_none()), "space w q: only this one");
-    t.keys("space w v");
+    t.app_keys("cmd-\\");
     assert!(t.read(|e| e.split.is_some()));
     t.keys("space w o");
     assert!(t.read(|e| e.split.is_none()), "space w o too");
@@ -150,55 +151,38 @@ fn space_w_v_w_q_o_are_the_panes_and_ctrl_w_moves_nowhere(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn space_e_and_space_t_go_there_and_again_back_to_the_code(cx: &mut TestAppContext) {
+fn cmd_b_and_cmd_j_go_there_and_again_hide_it(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
-    t.keys("space e");
-    assert_eq!(t.at(), (ViewKind::Files, Mode::Normal));
-    t.keys("space e");
-    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal));
-    t.keys("space t");
+    t.app_keys("cmd-b");
+    assert_eq!((t.at(), t.read(|e| e.tree_pane.shown)), ((ViewKind::Files, Mode::Normal), true));
+    t.app_keys("cmd-b");
+    assert_eq!((t.at(), t.read(|e| e.tree_pane.shown)), ((ViewKind::Code, Mode::Normal), false), "⌘B again: back to the code, hiding it");
+    t.app_keys("cmd-j");
     assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "the terminal, typing in it");
-    t.keys("escape escape");
-    t.keys("space e");
+    t.app_keys("cmd-b");
     assert_eq!(t.at(), (ViewKind::Files, Mode::Normal), "from the terminal to Files");
-    t.keys("space t");
-    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "and from Files to the terminal");
-    t.keys("escape escape space t");
-    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "space t on the terminal goes back to the code");
     assert!(t.read(|e| e.terminal.shown), "which leaves it up");
+    t.app_keys("cmd-j");
+    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "and from Files to the terminal");
+    t.keys("space t");
+    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "space t in the shell is the shell's");
+    leave_terminal(&mut t);
+    assert_eq!((t.at(), t.read(|e| e.terminal.shown)), ((ViewKind::Code, Mode::Normal), false), "cmd-j goes back to the code, hiding it");
 }
 
 #[gpui::test]
 #[cfg_attr(windows, ignore = "needs a POSIX shell and its tools")]
-fn esc_esc_or_ctrl_backslash_ctrl_n_stop_typing_in_the_terminal(cx: &mut TestAppContext) {
+fn every_key_but_cmd_goes_to_the_shell(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
-    // A program that takes an Esc as it comes (the shell would take it as alt with the next key).
-    t.keys("space t").input("cat -v").keys("enter");
+    t.app_keys("cmd-j").input("cat -v").keys("enter");
     wait_for(&mut t, |e| e.terminal.current().unwrap().busy() == Some(true));
-    t.keys("escape");
-    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "one Esc is the shell's");
-    t.cx.executor().advance_clock(std::time::Duration::from_millis(300));
-    t.cx.run_until_parked();
-    assert!(t.read(|e| e.terminal.held_escape.is_none()), "and goes to it after a moment");
-    t.keys("escape escape");
-    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Normal), "two leave typing");
-    t.keys("i");
-    t.keys("ctrl-\\ ctrl-n");
-    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Normal), "so does ctrl-\\ ctrl-n, as in Neovim");
-    assert!(t.read(|e| e.reading()), "to move through its text");
-    t.keys("i ctrl-c");
+    t.keys("escape escape ctrl-\\ ctrl-n");
+    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "Esc and ctrl-\\ ctrl-n are the shell's: no modes here");
+    assert!(!t.read(|e| e.reading()));
+    t.keys("ctrl-c");
     wait_for(&mut t, |e| e.terminal.current().unwrap().busy() == Some(false));
-
-    // A full-screen program: Esc is its own, however often, and ctrl-\ ctrl-n still leaves.
-    t.input("printf '\\033[?1049h'; cat -v").keys("enter");
-    wait_for(&mut t, |e| e.terminal.current().unwrap().modes().full_screen);
-    t.keys("escape escape escape");
-    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "the program has every Esc");
-    t.keys("ctrl-\\ ctrl-n");
-    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Normal));
-    t.keys("i ctrl-c");
 }
 
 #[gpui::test]
@@ -209,15 +193,13 @@ fn the_mode_line_says_the_mode_and_the_view(cx: &mut TestAppContext) {
     assert_eq!(t.mode_line(), "NOR", "the code is just the mode");
     t.keys("i");
     assert_eq!(t.mode_line(), "INS");
-    t.keys("escape space t");
+    t.keys("escape").app_keys("cmd-j");
     assert_eq!(t.mode_line(), "INS · terminal");
     t.keys("escape escape");
-    assert_eq!(t.mode_line(), "NOR · terminal");
-    t.keys("v");
-    assert_eq!(t.mode_line(), "SEL · terminal");
-    t.keys("escape escape");
-    assert_eq!(t.mode_line(), "NOR", "Esc ends select mode, then goes back to the code");
-    t.keys("space e");
+    assert_eq!(t.mode_line(), "INS · terminal", "Esc is the shell's: no modes here");
+    leave_terminal(&mut t);
+    assert_eq!(t.mode_line(), "NOR", "cmd-j goes back to the code");
+    t.app_keys("cmd-b");
     assert_eq!(t.mode_line(), "NOR · files");
     t.keys("a");
     assert_eq!(t.mode_line(), "INS · files", "naming a file is typing");
@@ -259,7 +241,7 @@ fn a_views_key_puts_the_keys_beside_the_file_where_j_scrolls_and_its_key_or_esc_
     assert!(t.read(|e| e.aside_showing()), "which leaves it up");
     t.keys("space g escape");
     assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "esc goes back too");
-    t.keys("space e space g");
+    t.app_keys("cmd-b").keys("space g");
     assert_eq!(t.at().0, GOALS.kind(), "from Files too");
     t.keys("escape");
     let aside = t.cx.debug_bounds("aside").expect("it's drawn");
@@ -291,12 +273,12 @@ fn a_files_plugins_view_beside_it_opens_with_its_key(cx: &mut TestAppContext) {
 /// While something's being debugged, the debugger is a view of its own beside the code:
 /// alone, or over a plugin's panel.
 #[gpui::test]
-fn the_debugger_is_a_view_beside_the_code_on_space_x(cx: &mut TestAppContext) {
+fn the_debugger_is_a_view_beside_the_code_on_cmd_shift_d(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
     test_keys(&mut t);
     t.cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(600.)));
-    t.keys("space x");
+    t.app_keys("cmd-shift-d");
     assert_eq!(t.at().0, ViewKind::Code, "nothing's being debugged");
     assert!(t.status().is_some_and(|said| said.starts_with("nothing's being debugged")), "{:?}", t.status());
     // A debugger that answers `initialize`, and then listens.
@@ -314,10 +296,10 @@ fn the_debugger_is_a_view_beside_the_code_on_space_x(cx: &mut TestAppContext) {
     assert!(pane.size.height > aside.size.height * 0.9, "alone, it has the whole of it: {pane:?} in {aside:?}");
     let code = t.cx.debug_bounds("code-view").unwrap();
     assert!(pane.origin.x >= code.origin.x + code.size.width, "beside the code, not under it");
-    t.keys("space x");
-    assert_eq!(t.at(), (ViewKind::Debugger, Mode::Normal), "space x goes there");
+    t.app_keys("cmd-shift-d");
+    assert_eq!(t.at(), (ViewKind::Debugger, Mode::Normal), "⌘⇧D goes there");
     assert_eq!(t.mode_line(), "NOR · debugger");
-    t.keys("space x");
+    t.app_keys("cmd-shift-d");
     assert_eq!(t.at().0, ViewKind::Code, "and back");
 
     // With a plugin's panel: the debugger on top, each a view.
@@ -333,7 +315,7 @@ fn the_debugger_is_a_view_beside_the_code_on_space_x(cx: &mut TestAppContext) {
     assert_eq!(t.at().0, ViewKind::Debugger, "and on the debugger, there");
     t.keys("space g");
     assert_eq!(t.at().0, GOALS.kind(), "from one to the other with their keys");
-    t.keys("space x");
+    t.app_keys("cmd-shift-d");
     assert_eq!(t.at().0, ViewKind::Debugger);
     t.command("stop");
     draw(&mut t);
@@ -352,7 +334,7 @@ fn your_keys_can_be_a_views_own(cx: &mut TestAppContext) {
     let (keymap, _) = keymap.with_yours_in(pages_of_none(), &keys(&[("n", "scroll_page_down")]));
     let keymap: &'static ghostwrite_core::Keymap = Box::leak(Box::new(keymap));
     t.editor.update(t.cx, |e, _| e.use_keys(keymap, &[]));
-    t.keys("space e g g");
+    t.app_keys("cmd-b").keys("g g");
     let row = |t: &mut Setup| t.read(|e| e.project.tree.cursor());
     t.keys("J");
     assert_eq!(row(&mut t), 1, "J is a row down in Files");
@@ -438,14 +420,13 @@ fn focus_view_is_a_key_of_yours_for_a_view(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_views_key_thats_taken_is_said_at_the_start_and_in_the_list(cx: &mut TestAppContext) {
     let mut t = open("x\n", &[], cx);
-    let taken = PluginView { key: Some("space f"), ..GOALS };
+    let taken = PluginView { key: Some("space k"), ..GOALS };
     let rival = PluginView { id: ViewId { plugin: "rival-test", name: "proofs", shows: Shows::Blocks }, ..GOALS };
     t.editor.update(t.cx, |e, _| e.make_keys(&[PAGES, taken], true));
     let said = t.status().unwrap_or_default();
-    assert!(said.starts_with("plugins' keys: views-test's goals view has no key: space f is the editor's (file_picker)"), "{said}");
-    t.keys("space f");
-    assert!(t.read(|e| e.picker.is_some()), "the editor's comes first");
-    t.keys("escape");
+    assert!(said.starts_with("plugins' keys: views-test's goals view has no key: space k is the editor's (hover)"), "{said}");
+    t.keys("space k");
+    assert_eq!(t.at().0, ViewKind::Code, "the editor's comes first");
     t.editor.update(t.cx, |e, _| e.make_keys(&[GOALS, rival], true));
     let said = t.status().unwrap_or_default();
     assert!(said.contains("rival-test's proofs view has no key: space g is views-test's goals view's"), "the plugin installed first has it: {said}");
@@ -459,33 +440,40 @@ fn the_cheatsheet_has_each_views_keys_and_every_section(cx: &mut TestAppContext)
     let mut t = open("", &[], cx);
     let sheet = crate::editor::view::cheatsheet(t.read(|e| e.modal.keymap()));
     let section = |title: &str| sheet.iter().find(|(t, _)| t == title).map(|(_, rows)| rows.iter().map(|row| (row.view, row.keys.clone())).collect::<Vec<_>>());
-    let files = section("Files  space e").expect("Files has a section");
+    let files = section("Files  ⌘B").expect("Files has a section");
     assert!(files.contains(&(ViewKind::Files, "j down k up".into())), "{files:?}");
     assert!(files.contains(&(ViewKind::Files, "a r d".into())), "{files:?}");
-    let terminal = section("Terminal  space t").expect("so does the terminal");
+    let terminal = section("Terminal  ⌘J").expect("so does the terminal");
     assert!(terminal.contains(&(ViewKind::Terminal, "enter".into())), "{terminal:?}");
-    assert!(terminal.iter().any(|(_, keys)| keys.contains("ctrl-\\ ctrl-n")), "{terminal:?}");
-    let debugger = section("Debugger  space x").expect("and the debugger");
+    assert!(terminal.iter().any(|(_, keys)| keys == "any key"), "every key is its shell's: {terminal:?}");
+    let debugger = section("Debugger  ⌘⇧D").expect("and the debugger");
     assert!(debugger.contains(&(ViewKind::Debugger, "esc".into())), "{debugger:?}");
     let pages = section("Pages  space v").expect("a plugin's view, by its title and key");
     assert!(pages.iter().any(|(view, keys)| matches!(view, ViewKind::Plugin(id) if id.shows == Shows::Pages) && keys == "+ - ="), "{pages:?}");
     assert!(sheet.iter().any(|(title, _)| title.ends_with("  space g")), "and the other plugin's");
-    assert!(section("Window  ⌘").is_some());
+    let window = section("Window  ⌘").expect("the app's keys");
+    for keys in ["⌘B  ⌘J  ⌘⇧D", "⌘P  ⌘E", "⌘⇧F", "⌘\\  ⌘K", "⌘/"] {
+        assert!(window.iter().any(|(_, shown)| shown == keys), "{keys}: {window:?}");
+    }
     let views = section("Views and panes").expect("going from view to view, and the panes");
-    for keys in ["space e", "space t", "space x", "space v", "space g", "space w v", "space w w", "space w q  space w o", "click"] {
+    for keys in ["space v", "space g", "space w q  space w o", "click"] {
         assert!(views.iter().any(|(_, shown)| shown == keys), "{keys}: {views:?}");
     }
+    assert!(
+        views.iter().all(|(_, shown)| !["space e", "space t", "space x", "space w v", "space w w"].contains(&shown.as_str())),
+        "those are ⌘ keys now: {views:?}"
+    );
     assert!(sheet.iter().flat_map(|(_, rows)| rows).all(|row| !row.keys.starts_with("ctrl-w") || row.keys.contains('⌫')), "no ctrl-w but typing's");
     // Every section has a place in the columns, in order, the plugins' views' after the editor's.
     let titles: Vec<String> = sheet.iter().map(|(title, _)| title.clone()).collect();
     let at = |title: &str| titles.iter().position(|t| t == title);
-    assert!(at("Debugger  space x") < at("Pages  space v") && at("Pages  space v") < at("Reviewing"), "{titles:?}");
+    assert!(at("Debugger  ⌘⇧D") < at("Pages  space v") && at("Pages  space v") < at("Reviewing"), "{titles:?}");
     let columns = crate::editor::view::columns(sheet, 3);
     assert_eq!(columns.len(), 3);
     let placed: Vec<String> = columns.into_iter().flatten().map(|(title, _)| title).collect();
     assert_eq!(placed, titles);
     // Drawn, too.
-    t.keys("space ?");
+    t.app_keys("cmd-/");
     t.cx.update(|window, _| window.refresh());
     t.cx.run_until_parked();
     assert!(t.read(|e| e.cheatsheet));
@@ -497,10 +485,10 @@ fn a_story_goes_from_the_code_to_files_to_the_terminal_reviewed_wherever_the_key
     let create = "<create>\nnew.txt\n</create>\n<say>\nA new file.\n</say>\n<new>\nhello\n</new>\n";
     let run = "<run>\necho ran-$((40 + 2))\n</run>\n<say>\nCheck.\n</say>\n";
     let mut t = open(ADD, &[&fix(), create, run, DONE], cx);
-    t.keys("space e");
+    t.app_keys("cmd-b");
     t.keys("space a").input("go on").keys("enter");
     assert_eq!(t.at(), (ViewKind::Code, Mode::Ai), "the first step, in the code");
-    t.keys("space e");
+    t.app_keys("cmd-b");
     assert_eq!(t.at(), (ViewKind::Files, Mode::Ai), "the keys can go elsewhere, the story still up");
     t.keys("tab");
     assert_eq!(t.text(), "def add(a, b):\n    return a + b\n", "and Tab accepts from there");
@@ -512,5 +500,5 @@ fn a_story_goes_from_the_code_to_files_to_the_terminal_reviewed_wherever_the_key
     t.keys("tab");
     wait_for(&mut t, |e| e.story.is_none());
     wait_for(&mut t, printed("ran-42"));
-    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Normal), "it ended with a command: the keys stay on the terminal");
+    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "it ended with a command: the keys stay in the shell");
 }

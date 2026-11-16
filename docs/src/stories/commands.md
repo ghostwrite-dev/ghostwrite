@@ -4,7 +4,7 @@ The model can run commands, but only in your terminal, and only the ones you acc
 
 ## How a command step looks
 
-A command the model proposes shows on the terminal, as a step does in a file: its reason above the prompt, the command in grey at the cursor, and the keys under it. You can look over what's on the terminal with the motions first, as in normal mode. Tab sets it going. The terminal comes up if it was hidden.
+A command the model proposes shows on the terminal, as a step does in a file: its reason above the prompt, the command in grey at the cursor, and the keys under it. The keys read the terminal meanwhile, in AI mode: the motions, `/`, `y` and `gf` work on what's on it as in a file. Tab sets it going. The terminal comes up if it was hidden.
 
 ## What runs
 
@@ -19,7 +19,7 @@ The next item is asked for once the command is done: the shell back at its promp
 
 A command that keeps going (a server, a watcher) is waited for 30 seconds, then the story goes on, the model told it's still running. Tab goes on sooner.
 
-If the story ends with a command, the keys stay on the terminal in normal mode, so you can read what it printed.
+If the story ends with a command, the keys stay in the shell, typing.
 
 ## What the model sees of the terminal
 

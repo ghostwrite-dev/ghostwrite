@@ -73,9 +73,9 @@ pub(super) struct Annex {
 
 impl Editor {
     /// ⌘B, `:tree`: as ⌘J for the terminal, to Files (showing it), or from
-    /// there, hiding it. During a review it only shows or hides.
+    /// there, hiding it. During a review too: a story is reviewed from Files as well.
     pub(super) fn toggle_tree(&mut self, cx: &mut Context<Self>) {
-        if self.modal.view != ViewKind::Files && !self.modal.mode.reviewing() {
+        if self.modal.view != ViewKind::Files {
             return self.enter_files(cx);
         }
         self.tree_pane.shown = !self.tree_pane.shown;

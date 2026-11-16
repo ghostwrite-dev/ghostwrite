@@ -4,7 +4,7 @@ Two things decide what a key does: the **mode** you're in, and the **view** that
 
 ## Modes
 
-The modes are the same in every view.
+The modes are the same in every view but the terminal, which has none: its keys are the shell's.
 
 | Mode | Shown | What the keys do |
 | --- | --- | --- |
@@ -50,25 +50,25 @@ A view is a place on screen that takes the keys:
 | --- | --- | --- |
 | Code | `NOR` | a file's text, in either pane of a split |
 | Files | `NOR · files` | the file tree, left of the code |
-| Terminal | `NOR · terminal` | your shell, under the code |
+| Terminal | `INS · terminal` | your shell, under the code |
 | Debugger | `NOR · debugger` | where a program being debugged is stopped, right of the code |
 | A plugin's | by its title: `NOR · pages`, `NOR · goals` | a view a plugin declares for its files: a tab of a file's pages (Typst's), or what's beside a file (Lean's goals) |
 
-Each view has its own layer of keys over the code's. A key is looked up in the layer of the view with the keys first, then in the code's, so `:` and the `space` keys work everywhere. In Files, the debugger and beside the file there's no text, so only their own keys and those that work anywhere do something. On the terminal and on pages, the code's motions move through what's there. The [key reference](../keys/README.md) has each view's layer, and you can [remap keys in one view](../configuration/keys.md#keys-for-one-view).
+Each view has its own layer of keys over the code's. A key is looked up in the layer of the view with the keys first, then in the code's, so `:` and the `space` keys work everywhere but the terminal. In Files, the debugger and beside the file there's no text, so only their own keys and those that work anywhere do something. On pages, the code's motions move through what's there. In the terminal every key but ⌘ goes to the shell. The [key reference](../keys/README.md) has each view's layer, and you can [remap keys in one view](../configuration/keys.md#keys-for-one-view).
 
 ### Moving between views
 
-`space` and a letter is the one way to move between views, and the same key in that view goes back to the code.
+The app's ⌘ keys go to the editor's views, from any view. A plugin's views have the `space` keys they declare.
 
 | Keys | What they do |
 | --- | --- |
-| `space e` | go to Files; again, back to the code |
-| `space t` | go to the terminal, typing in it; again, back to the code |
-| `space x` | go to the debugger, while something's being debugged; again, back to the code |
-| a plugin's view's key | go to that view of this file, opening it if it isn't shown yet (`space v` Typst's pages, `space g` Lean's goals); again, back to the code |
-| `esc` | from Files, the terminal (in normal mode), the debugger or beside the file, back to the code |
 | ⌘B | go to Files; from Files, hide it |
-| ⌘J | go to the terminal; from there, hide it |
+| ⌘J | go to the terminal, typing in it; from there, hide it |
+| ⌘⇧D | go to the debugger, while something's being debugged; from there, back to the code |
+| a plugin's view's key | go to that view of this file, opening it if it isn't shown yet (`space v` Typst's pages, `space g` Lean's goals); again, back to the code |
+| `esc` | from Files, the debugger or beside the file, back to the code |
+| ⌘\\ | split the pane: this file's pages, or the next tab |
+| ⌘K | the keys to the other pane |
 | a click | the keys go to what you clicked |
 
 Whatever was going on in a view ends as the keys leave it: typing and selecting in the code, typing in the shell, naming a file in Files.
@@ -94,9 +94,8 @@ Files has the tree's keys as its own layer:
 
 ### Terminal
 
-- **Insert mode** types in the shell. `space t`, `:term`, ⌘J or a click goes there typing, and from normal mode `i`, `a`, `o` or `c` do.
-- In insert mode, `esc` goes to the program running there (vim, fzf, a REPL). `esc esc`, or `ctrl-\ ctrl-n` as in Neovim, goes to normal mode. While a full-screen program has the terminal, every Esc is the program's, and `ctrl-\ ctrl-n` still leaves.
-- **Normal mode** moves through the scrollback. Its scrollback and screen are text you move over with the editor's motions, like a file that can't be edited: `/` and `n` search, `y` yanks, `gf` or Enter opens a `path:line:col`, and `space a` asks the model about what's selected. `esc` goes back to the code.
+- The terminal has no modes. ⌘J, `:term` or a click goes there typing, and every key but ⌘ goes to the shell, Esc included. ⌘J or a click on the code leaves it.
+- While a story's command waits there for review, the keys read what's on it in AI mode, like a file that can't be edited: the motions, `/` and `n` search, `y` yanks, and `gf` or Enter opens a `path:line:col`. Tab runs the command. When a story ends with a command, the keys stay in the shell, typing.
 
 See [The terminal](../terminal.md).
 
@@ -106,4 +105,4 @@ A plugin declares its views of its own languages' files, each with a name, a tit
 
 ### Debugger
 
-While a program's being debugged, the debugger is beside the code, over a plugin's panel if there's one. `space x` goes there; `j` `k` scroll it, and `esc` goes back. See [Debugging](../languages/debugger.md).
+While a program's being debugged, the debugger is beside the code, over a plugin's panel if there's one. ⌘⇧D goes there; `j` `k` scroll it, and `esc` goes back. See [Debugging](../languages/debugger.md).

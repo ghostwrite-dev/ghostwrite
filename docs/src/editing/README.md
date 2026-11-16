@@ -14,4 +14,4 @@ This chapter covers:
 - [Searching](searching.md): in the file and across the project.
 - [Files, tabs and panes](files.md): pickers, the file tree, tabs, splits.
 
-The [key reference](../keys/README.md) lists every key, section by section, as `space ?` shows them.
+The [key reference](../keys/README.md) lists every key, section by section, as ⌘/ shows them.

@@ -971,6 +971,7 @@ impl Editor {
             Effect::Cheatsheet => {
                 self.cheatsheet = true;
                 self.cheatsheet_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+                cx.notify();
             }
             Effect::Find { backward } => self.start_find(backward, window, cx),
             Effect::FindNext { backward, count } => self.find_next(backward, count, self.modal.mode == Mode::Select, cx),

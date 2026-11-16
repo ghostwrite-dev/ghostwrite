@@ -1,35 +1,28 @@
 # Terminal
 
-The keys of the terminal, over the code's. `space t` goes there, typing in it, and again back to the code. See [The terminal](../terminal.md).
+⌘J goes to the terminal, typing in it, and from there hides it. See [The terminal](../terminal.md).
 
-## Normal mode: reading it
+## Typing in it
 
-In normal mode the terminal's scrollback and screen are text, and the code's keys move through it. Its own layer adds:
+The terminal has no editor modes.
+
+| Keys | What they do |
+| --- | --- |
+| any key but ⌘ | goes to your shell, Esc too |
+| ⌘J, a click on the code | back to the code |
+| drag, ⌘C | select, copy |
+| ⌘-click | open a web address or file it shows |
+
+## Reading it during a story
+
+While a story's command waits on the terminal for review, the keys read what's on it in AI mode, and the code's keys move through it. Its own layer adds:
 
 | Keys | What they do | Commands |
 | --- | --- | --- |
 | `enter` | open the file a line names, at its line (gf too) | `goto_file` |
 | `esc` | back to the code (from select mode, normal mode) | `focus_code` |
 
-And from the cheatsheet:
-
-| Keys | What they do |
-| --- | --- |
-| `i` `a` `o` `c` | insert mode: type in its shell; the model runs only what you accept |
-| motions, `/` `n` `y` | move, select, search, yank, as in a file |
-| `space a` | ask about what's selected |
-| ⌘-click | open a web address or file it shows |
-
-## Insert mode: typing in it
-
-| Keys | What they do |
-| --- | --- |
-| any key | goes to your shell |
-| `esc` | goes to the program running there (vim, fzf…), a moment later |
-| `esc` `esc`, `ctrl-\ ctrl-n` | back to normal mode, to move through it |
-| drag, ⌘C | select, copy |
-
-While a full-screen program like vim has the terminal, every Esc is the program's. `ctrl-\ ctrl-n` still leaves.
+The motions, `/` `n` and `y` move, select, search and yank as in a file. Tab runs the command.
 
 ## Tabs
 
@@ -42,4 +35,4 @@ The terminal has tabs, a shell in each. With the keys on the terminal, the app's
 | ⌘⌥←, ⌘⌥→ | move the tab, or drag it |
 | ⌘J | hide the terminal |
 
-The names in the first table are what you use to [remap a key](../configuration/keys.md), here under `"terminal"`.
+The names in the layer's table are what you use to [remap a key](../configuration/keys.md), here under `"terminal"`.

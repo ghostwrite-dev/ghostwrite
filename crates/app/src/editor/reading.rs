@@ -1,16 +1,12 @@
-//! The terminal's text: in normal, select or AI mode with the keys on the
-//! terminal, its scrollback and screen are a text the editor's own keys go
-//! through, as they would a file that can't be edited. Motions, selecting,
-//! `y`, `/` and `n` work as in a file, and the selection shows on the
-//! terminal; what's printed meanwhile comes in under it, and the selection
-//! stays on its chars. `i`, `a` (and the other keys that would type) go into
-//! insert mode, which types in the shell: Esc Esc there (or `ctrl-\ ctrl-n`)
-//! comes back here, and Esc from here goes back to the code. `gf` or Enter
-//! opens the file a line names (`src/main.rs:12:5`), and `space a` asks about
-//! what's selected.
-//!
-//! A story's command waiting in the terminal is reviewed here in AI mode:
-//! look through what's on it, and Tab runs it as ever.
+//! The terminal's text: while a story's command waits in the terminal for
+//! review, in AI mode, its scrollback and screen are a text the editor's own
+//! keys go through, as they would a file that can't be edited. Otherwise the
+//! terminal has no modes: every key but ⌘ types in its shell. Motions,
+//! selecting, `y`, `/` and `n` work as in a file, and the selection shows on
+//! the terminal; what's printed meanwhile comes in under it, and the selection
+//! stays on its chars. `gf` or Enter opens the file a line names
+//! (`src/main.rs:12:5`), and Tab runs the command as ever. When the story ends
+//! with it, the keys stay in the shell, typing.
 //!
 //! Reading it again is the whole scrollback, on the UI thread: while the shell
 //! prints, that's done at most every [`REREAD`].
@@ -124,7 +120,6 @@ impl Editor {
         self.terminal.shown = true;
         self.focus_on(ViewKind::Terminal, cx);
         if self.modal.mode == Mode::Insert {
-            self.let_go_of_held_keys();
             self.modal.leave(Mode::Insert);
         }
         self.stop_reading();

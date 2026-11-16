@@ -1,16 +1,16 @@
-//! The editor's stops (`space /`, `space d`), and the terminal: what the model is told of it.
+//! The editor's stops (⌘⇧F, `space d`), and the terminal: what the model is told of it.
 
 use super::*;
 
 #[gpui::test]
-fn space_slash_goes_through_the_projects_matches(cx: &mut TestAppContext) {
+fn cmd_shift_f_goes_through_the_projects_matches(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("let total = 1;\n", &[], cx);
     std::fs::write(t.dir.join("b.txt"), "nothing\nprint(total)\n").unwrap();
-    t.keys("space /").input("TOTAL").keys("enter");
+    t.app_keys("cmd-shift-f").input("TOTAL").keys("enter");
     t.cx.run_until_parked();
     assert_eq!(t.status().as_deref(), Some("no matches for TOTAL"), "a capital makes it exact");
-    t.keys("space /").input("total").keys("enter");
+    t.app_keys("cmd-shift-f").input("total").keys("enter");
     t.cx.run_until_parked();
     assert_eq!((t.active(), t.cursor()), (Some("b.txt".into()), "nothing\n".len()), "files in order, at the match's line");
     t.keys("tab");
@@ -39,21 +39,14 @@ fn asking_about_a_stop_hands_over_to_the_model(cx: &mut TestAppContext) {
 fn the_model_reads_the_terminal_but_only_the_user_types_in_it(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[&note("doc.txt", "x", "It printed ok."), DONE], cx);
-    t.keys("space t");
-    assert_eq!((t.read(|e| e.terminal.shown), t.at()), (true, (ViewKind::Terminal, Mode::Insert)), "space t types in the terminal");
+    t.app_keys("cmd-j");
+    assert_eq!((t.read(|e| e.terminal.shown), t.at()), (true, (ViewKind::Terminal, Mode::Insert)), "⌘J types in the terminal");
     t.keys("e c h o space o k enter");
     wait_for(&mut t, printed("ok"));
     assert_eq!(t.text(), "x\n", "the keys went to the shell, not the file");
-    t.keys("escape");
-    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "one Esc is the shell's");
-    t.keys("escape");
-    assert_eq!(t.read(|e| (e.terminal.shown, e.modal.mode, e.reading())), (true, Mode::Normal, true), "a second reads it in normal mode");
-    t.keys("escape");
-    assert_eq!(t.read(|e| (e.terminal.shown, e.reading())), (true, false), "and Esc from there is back in the code, the terminal still up");
-    t.cx.update(|_, cx| cx.bind_keys([gpui::KeyBinding::new("cmd-j", crate::actions::ToggleTerminal, Some("Editor"))]));
-    t.keys("cmd-j");
-    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "cmd-j goes back in");
-    t.keys("cmd-j");
+    t.keys("escape escape escape");
+    assert_eq!((t.at(), t.read(|e| e.reading())), ((ViewKind::Terminal, Mode::Insert), false), "Esc is the shell's, however often: no modes here");
+    t.app_keys("cmd-j");
     assert_eq!((t.read(|e| e.terminal.shown), t.at()), (false, (ViewKind::Code, Mode::Normal)), "and from there hides it");
     t.ask("what did it print?");
     let told = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap().surroundings.terminal);
@@ -95,9 +88,9 @@ fn tab_with_a_program_running_in_front_runs_the_command_in_a_new_tab(cx: &mut Te
     cx.executor().allow_parking();
     let run = "<run>\necho beside-$((40 + 2))\n</run>\n<say>\nMeanwhile.\n</say>\n";
     let mut t = open("x\n", &[run, DONE], cx);
-    t.keys("space t").input("sleep 100").keys("enter");
+    t.app_keys("cmd-j").input("sleep 100").keys("enter");
     wait_for(&mut t, |e| e.terminal.current().unwrap().busy() == Some(true));
-    t.keys("escape escape escape");
+    leave_terminal(&mut t);
     t.ask("go");
     assert!(!t.read(|e| e.command_proposed()), "it isn't shown at the program's cursor");
     assert!(t.read(|e| e.command_elsewhere()).is_some_and(|said| said.contains("shell 1 is busy")), "the corner says where it'll go");
@@ -114,9 +107,9 @@ fn more_of_the_reply_leaves_the_terminal_where_the_user_put_it(cx: &mut TestAppC
     cx.executor().allow_parking();
     let run = "<run>\necho hi\n</run>\n<say>\nCheck.\n</say>\n";
     let mut t = open("x\n", &[run, DONE], cx);
-    t.keys("space t").input("seq 1 100").keys("enter");
+    t.app_keys("cmd-j").input("seq 1 100").keys("enter");
     wait_for(&mut t, printed("100"));
-    t.keys("escape escape escape");
+    leave_terminal(&mut t);
     t.ask("go");
     assert!(t.read(|e| e.terminal.shown && e.command_proposed()), "the command shows, in the terminal");
     let top = |e: &Editor| e.terminal.current().unwrap().screen().cells.iter().map(|c| c.c).take(20).collect::<String>();
@@ -158,37 +151,16 @@ fn a_ctrl_c_goes_to_the_shell_its_command_ran_in_after_switching_tabs(cx: &mut T
 }
 
 #[gpui::test]
-fn space_a_about_the_terminal_leaves_the_code_alone(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let mut t = open("one\ntwo\n", &[&note("doc.txt", "one", "It's five."), DONE], cx);
-    // A tab the model doesn't comment on is in front (only pages, say).
-    t.editor.update(t.cx, |e, _| e.tab_mut().unwrap().doc.output = true);
-    t.keys("space t").input("seq 3 5").keys("enter");
-    wait_for(&mut t, printed("5"));
-    t.keys("escape escape");
-    t.keys("/").input("(?m)^5$").keys("enter");
-    t.keys("v");
-    assert_eq!(t.read(|e| (e.modal.mode, e.reading())), (Mode::Select, true), "selecting on the terminal");
-    t.keys("space a");
-    assert!(t.reviewing(), "asked: {:?} {:?}", t.status(), t.read(|e| (e.modal.mode, e.reading(), e.asking())));
-    t.input("what is it?").keys("enter");
-    let req = t.read(|e| e.story.as_ref().unwrap().request(&e.project).unwrap());
-    assert_eq!(req.instruction, "About this, in the terminal:\n```\n5\n```\nwhat is it?");
-    assert!(req.path.is_none() && req.text.is_empty(), "the code isn't what it's about: {:?}", req.path);
-    t.keys("tab");
-    wait_for(&mut t, |e| e.story.is_none());
-    assert_eq!(t.active().as_deref(), Some("doc.txt"));
-    assert_eq!(t.read(|e| e.tab().unwrap().view.selection.head), 0, "its selection as it was");
-    assert_eq!(t.read(|e| e.project.tabs.len()), 1, "the empty tab it was asked from went with it");
-}
-
-#[gpui::test]
 fn reading_the_terminal_is_read_again_at_most_so_often(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let mut t = open("x\n", &[], cx);
-    t.keys("space t").input("echo here").keys("enter");
+    let run = "<run>\necho ran\n</run>\n<say>\nCheck.\n</say>\n";
+    let mut t = open("x\n", &[run, DONE], cx);
+    t.app_keys("cmd-j").input("echo here").keys("enter");
     wait_for(&mut t, printed("here"));
-    t.keys("escape escape");
+    leave_terminal(&mut t);
+    // Its text is read while a story's command waits on it.
+    t.ask("go");
+    assert!(t.read(|e| e.reading()));
     let number = t.read(|e| e.terminal.shells[0].number);
     let reads = |e: &Editor| e.terminal.reading.as_ref().unwrap().reads;
     let before = t.read(reads);
@@ -243,7 +215,6 @@ fn a_command_can_go_in_a_new_tab_and_a_ctrl_c_stops_what_the_story_started(cx: &
     let then = "<run>\necho after-$((40 + 2))\n</run>\n<say>\nIt's free again.\n</say>\n";
     let mut t = open("x\n", &[first, second, stop, then, DONE], cx);
     quick(&mut t);
-    bind_tab_keys(&mut t);
     t.ask("go");
     t.keys("tab");
     assert_eq!(shells(&mut t), (vec![1], 0));
@@ -294,33 +265,20 @@ fn a_last_command_ends_the_story_and_then_tab_is_the_shells(cx: &mut TestAppCont
     t.ask("does it work?");
     t.keys("tab");
     wait_for(&mut t, |e| e.story.is_none());
-    assert!(t.read(|e| e.reading() && e.modal.mode == Mode::Normal), "it was the last thing to do: the keys stay on the terminal, in normal mode");
-    t.keys("escape");
-    assert!(!t.read(|e| e.reading()), "Esc goes back to the code");
+    assert_eq!((t.at(), t.read(|e| e.reading())), ((ViewKind::Terminal, Mode::Insert), false), "it was the last thing to do: the keys stay in the shell");
 
-    t.keys("space t");
     t.keys("tab");
     assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "no story waiting: Tab completes in the shell");
-}
-
-/// The ⌘ keys, as the app binds them.
-fn bind_tab_keys(t: &mut Setup) {
-    use crate::actions::{CloseTab, MoveTabLeft, MoveTabRight, NewTab, NextTab, PrevTab};
-    t.cx.update(|_, cx| {
-        cx.bind_keys([
-            gpui::KeyBinding::new("cmd-t", NewTab, Some("Editor")),
-            gpui::KeyBinding::new("cmd-w", CloseTab, Some("Editor")),
-            gpui::KeyBinding::new("cmd-shift-]", NextTab, Some("Editor")),
-            gpui::KeyBinding::new("cmd-shift-[", PrevTab, Some("Editor")),
-            gpui::KeyBinding::new("cmd-alt-left", MoveTabLeft, Some("Editor")),
-            gpui::KeyBinding::new("cmd-alt-right", MoveTabRight, Some("Editor")),
-        ])
-    });
 }
 
 /// A story's command is waited for a second, not half a minute.
 fn quick(t: &mut Setup) {
     t.editor.update(t.cx, |e, _| e.terminal.command_wait = std::time::Duration::from_secs(1));
+}
+
+/// Out of the shell, back to the code, as the user would: cmd-j hides the terminal.
+pub(super) fn leave_terminal(t: &mut Setup) {
+    t.app_keys("cmd-j");
 }
 
 /// Once the shell in front has printed something since its count of changes was `after`,
@@ -352,37 +310,36 @@ pub(super) fn wait_for(t: &mut Setup, what: impl Fn(&Editor) -> bool) {
 fn the_terminal_has_tabs_and_the_tab_keys_are_theirs_in_terminal_mode(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
-    bind_tab_keys(&mut t);
     let files = t.read(|e| e.project.tabs.len());
-    t.keys("space t");
+    t.app_keys("cmd-j");
     assert_eq!(shells(&mut t), (vec![1], 0));
-    t.keys("cmd-t cmd-t");
+    t.app_keys("cmd-t cmd-t");
     assert_eq!(shells(&mut t), (vec![1, 2, 3], 2), "a new one opens right of the one in front, in front");
-    t.keys("cmd-shift-]");
+    t.app_keys("cmd-shift-]");
     assert_eq!(shells(&mut t), (vec![1, 2, 3], 0), "around the end");
-    t.keys("cmd-shift-[");
+    t.app_keys("cmd-shift-[");
     assert_eq!(shells(&mut t), (vec![1, 2, 3], 2));
-    t.keys("cmd-alt-left");
+    t.app_keys("cmd-alt-left");
     assert_eq!(shells(&mut t), (vec![1, 3, 2], 1), "it moves, and it's still in front");
-    t.keys("cmd-alt-left cmd-alt-left");
+    t.app_keys("cmd-alt-left cmd-alt-left");
     assert_eq!(shells(&mut t), (vec![3, 1, 2], 0), "and stops at the end");
 
     t.keys("e c h o space o n l y - h e r e enter");
     let printed = |e: &Editor| e.terminal_context().is_some_and(|text| text.lines().any(|l| l.trim() == "only-here"));
     wait_for(&mut t, printed);
-    t.keys("cmd-shift-]");
+    t.app_keys("cmd-shift-]");
     assert!(!t.read(printed), "each is a shell of its own, and the model reads the one in front");
 
-    t.keys("cmd-w");
+    t.app_keys("cmd-w");
     assert_eq!(shells(&mut t), (vec![3, 2], 1), "⌘W closes the shell in front");
     assert_eq!(t.read(|e| e.project.tabs.len()), files, "the file tabs are left alone");
     t.keys("e x i t enter");
     wait_for(&mut t, |e| e.terminal.shells.len() == 1);
     assert_eq!((t.read(|e| e.terminal.shown), t.at()), (true, (ViewKind::Terminal, Mode::Insert)), "one of two exits: the other is still here");
-    t.keys("cmd-w");
+    t.app_keys("cmd-w");
     assert_eq!((t.read(|e| e.terminal.shown), t.at()), (false, (ViewKind::Code, Mode::Normal)), "the last goes: so does the pane");
 
-    t.keys("cmd-t");
+    t.app_keys("cmd-t");
     assert_eq!(t.read(|e| e.project.tabs.len()), files + 1, "out of the terminal ⌘T is a file tab");
 }
 
@@ -390,8 +347,7 @@ fn the_terminal_has_tabs_and_the_tab_keys_are_theirs_in_terminal_mode(cx: &mut T
 fn a_tab_of_the_terminal_is_drawn_and_dragged_and_the_screen_keeps_its_room(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
-    bind_tab_keys(&mut t);
-    t.keys("space t");
+    t.app_keys("cmd-j");
     let draw = |t: &mut Setup| {
         t.cx.update(|window, _| window.refresh());
         t.cx.run_until_parked();
@@ -399,7 +355,7 @@ fn a_tab_of_the_terminal_is_drawn_and_dragged_and_the_screen_keeps_its_room(cx: 
     draw(&mut t);
     assert!(t.cx.debug_bounds("shell-tab-0").is_none(), "one shell: no tabs");
     let alone = t.cx.debug_bounds("terminal-screen").expect("the screen is drawn").size.height;
-    t.keys("cmd-t cmd-t");
+    t.app_keys("cmd-t cmd-t");
     draw(&mut t);
     let beside = t.cx.debug_bounds("terminal-screen").expect("the screen is drawn").size.height;
     assert!(beside > gpui::px(100.) && beside < alone, "the tabs take their room from the screen: {beside:?} of {alone:?}");
@@ -511,9 +467,9 @@ fn a_program_is_debugged_from_the_editor(cx: &mut TestAppContext) {
     let pane = t.cx.debug_bounds("debug-pane").expect("and the debugger is drawn");
     let aside = t.cx.debug_bounds("aside").expect("beside the code");
     assert!(aside.contains(&pane.center()), "{pane:?} in {aside:?}");
-    t.keys("space x");
-    assert_eq!(t.at().0, ViewKind::Debugger, "space x goes there");
-    t.keys("space x");
+    t.app_keys("cmd-shift-d");
+    assert_eq!(t.at().0, ViewKind::Debugger, "⌘⇧D goes there");
+    t.app_keys("cmd-shift-d");
 
     t.command("over");
     wait_for(&mut t, |e| stopped_on(e) == Some(3));
@@ -531,14 +487,14 @@ fn a_command_takes_the_place_of_what_the_user_had_typed(cx: &mut TestAppContext)
     cx.executor().allow_parking();
     let run = "<run>\necho ran-$((40 + 2))\n</run>\n<say>\nCheck the sum.\n</say>\n";
     let mut t = open("x\n", &[run, DONE], cx);
-    t.keys("space t");
+    t.app_keys("cmd-j");
     let cursor = |e: &Editor| e.terminal.current().and_then(|t| t.screen().cursor).map(|c| (c.line, c.col));
     // The prompt has settled where it is.
     idle_after(&mut t, 0);
     let last = t.read(cursor);
     t.keys("e c h o space h a l f");
     wait_for(&mut t, |e| e.terminal_context().is_some_and(|text| text.contains("echo half")));
-    t.keys("escape escape");
+    leave_terminal(&mut t);
     t.ask("does it add up?");
     assert!(t.read(|e| e.command_proposed()), "it's in the terminal");
     let from = t.read(|e| e.terminal.current().and_then(|t| t.typed_from()));
@@ -573,7 +529,7 @@ fn tab_goes_on_without_waiting_for_a_long_command(cx: &mut TestAppContext) {
 fn control_keys_reach_a_program_in_the_terminal(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
-    t.keys("space t");
+    t.app_keys("cmd-j");
     idle_after(&mut t, 0);
     // One line, so the shell's own handling of the terminal between commands (bash's
     // differs from zsh's) can't undo the raw mode before `od` reads.
@@ -589,7 +545,7 @@ fn control_keys_reach_a_program_in_the_terminal(cx: &mut TestAppContext) {
 fn a_program_that_asks_for_kittys_keyboard_gets_it(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
-    t.keys("space t");
+    t.app_keys("cmd-j");
     idle_after(&mut t, 0);
     // Ask for the protocol (flag 1), then show what the keys send, once the terminal's raw.
     t.input("printf '\\033[>1u'; stty -ixon raw -echo; echo raw-$((40 + 2)); od -c").keys("enter");
@@ -611,14 +567,16 @@ fn read_selected(e: &Editor) -> String {
 }
 
 #[gpui::test]
-fn esc_esc_reads_the_terminal_with_the_editors_keys(cx: &mut TestAppContext) {
+fn a_command_waiting_is_read_with_the_editors_keys(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let mut t = open("x\n", &[], cx);
-    t.keys("space t");
+    let run = "<run>\necho ran\n</run>\n<say>\nCheck.\n</say>\n";
+    let mut t = open("x\n", &[run, DONE], cx);
+    t.app_keys("cmd-j");
     t.keys("s e q space 3 space 5 enter");
     wait_for(&mut t, printed("5"));
-    t.keys("escape escape");
-    assert_eq!(t.read(|e| (e.modal.mode, e.reading())), (Mode::Normal, true), "reading it, in normal mode");
+    leave_terminal(&mut t);
+    t.ask("go");
+    assert_eq!((t.at(), t.read(|e| e.reading())), ((ViewKind::Terminal, Mode::Ai), true), "reading it, in AI mode");
 
     t.keys("/").input("(?m)^4$").keys("enter");
     assert_eq!(t.read(read_selected), "4", "/ searches what's on it");
@@ -632,12 +590,9 @@ fn esc_esc_reads_the_terminal_with_the_editors_keys(cx: &mut TestAppContext) {
     assert_eq!(t.read(|e| e.keyed().unwrap().doc.buffer.to_string().lines().filter(|l| l.trim() == "4").count()), 1, "it can't be edited");
     assert_eq!(t.text(), "x\n");
 
-    t.keys("i");
-    assert_eq!((t.at(), t.read(|e| e.reading())), ((ViewKind::Terminal, Mode::Insert), false), "i types on the shell's line");
-    t.keys("escape escape");
-    assert!(t.read(|e| e.reading()), "and Esc Esc is back to reading");
-    t.keys("escape");
-    assert_eq!((t.at(), t.read(|e| (e.reading(), e.terminal.shown))), ((ViewKind::Code, Mode::Normal), (false, true)), "Esc goes back to the code");
+    t.keys("tab");
+    wait_for(&mut t, |e| e.story.is_none());
+    assert_eq!((t.at(), t.read(|e| e.reading())), ((ViewKind::Terminal, Mode::Insert), false), "run, the story's over: typing in the shell");
     assert_eq!(t.read(|e| e.terminal.current().unwrap().selected()), None, "and nothing's marked on the terminal");
 }
 
@@ -645,58 +600,46 @@ fn esc_esc_reads_the_terminal_with_the_editors_keys(cx: &mut TestAppContext) {
 #[cfg_attr(windows, ignore = "needs a POSIX shell and its tools")]
 fn what_comes_in_while_reading_leaves_the_selection_on_its_text(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let mut t = open("x\n", &[], cx);
-    t.keys("space t");
+    let run = "<run>\necho ran\n</run>\n<say>\nCheck.\n</say>\n";
+    let mut t = open("x\n", &[run, DONE], cx);
+    t.app_keys("cmd-j");
     t.keys("s e q space 3 space 5 enter");
     wait_for(&mut t, printed("5"));
-    t.keys("escape escape");
-    t.keys("/").input("(?m)^3$").keys("enter");
-    t.keys("i");
-    t.keys("s e q space 7 space 8 enter");
-    wait_for(&mut t, printed("8"));
-    t.keys("escape escape");
-    t.keys("/").input("(?m)^7$").keys("enter");
-    t.keys("enter");
-    // Not a file: Enter says so, and the keys are still here.
-    assert!(t.read(|e| e.reading()));
-    // More printed while reading: the text grows under the selection.
-    t.keys("i").keys("s e q space 9 space 9 enter");
-    wait_for(&mut t, printed("9"));
-    t.keys("escape escape");
-    t.keys("/").input("(?m)^9$").keys("enter");
+    // Something that prints later, with the shell back at its prompt meanwhile.
+    t.input("(sleep 2; seq 11 12) &").keys("enter");
+    leave_terminal(&mut t);
+    t.ask("go");
+    assert!(t.read(|e| e.reading()), "a story's command has the keys reading the terminal");
+    t.keys("/").input("(?m)^4$").keys("enter");
     let from = t.read(|e| e.keyed().unwrap().view.selection);
     let shell = t.read(|e| e.terminal.shells[e.terminal.active].number);
-    t.cx.update(|_, cx| {
-        t.editor.update(cx, |e, _| {
-            e.terminal.current().unwrap().input(b"seq 11 12\r".to_vec());
-        })
-    });
     wait_for(&mut t, printed("12"));
     t.editor.update(t.cx, |e, _| e.read_again(shell));
     assert!(t.read(|e| e.reading()));
     let now = t.read(|e| e.keyed().unwrap().view.selection);
     assert_eq!(now, from, "the selection stays on its text");
-    assert_eq!(t.read(read_selected), "9");
+    assert_eq!(t.read(read_selected), "4");
 }
 
 #[gpui::test]
-fn enter_or_gf_on_the_terminal_opens_the_file_at_its_line(cx: &mut TestAppContext) {
+fn gf_reading_the_terminal_opens_the_file_at_its_line(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let mut t = open("x\n", &[], cx);
+    let run = "<run>\necho ran\n</run>\n<say>\nCheck.\n</say>\n";
+    let mut t = open("x\n", &[run, DONE], cx);
     std::fs::write(t.dir.join("lib.rs"), "a\nb\nc\n").unwrap();
-    t.keys("space t");
+    t.app_keys("cmd-j");
     t.keys("e c h o space l i b . r s : 3 enter");
     wait_for(&mut t, printed("lib.rs:3"));
-    t.keys("escape escape");
+    leave_terminal(&mut t);
+    t.ask("go");
+    assert!(t.read(|e| e.reading()), "a story's command has the keys reading the terminal");
     t.keys("/").input("(?m)^lib").keys("enter");
-    t.keys("enter");
+    t.keys("g f");
     assert_eq!(t.active().as_deref(), Some("lib.rs"));
     assert_eq!(t.cursor(), 4, "on its third line");
     assert!(!t.read(|e| e.reading()), "the keys are in the file");
-    t.keys("space t escape escape");
-    t.keys("/").input("(?m)^lib").keys("enter");
-    t.keys("g f");
-    assert_eq!(t.active().as_deref(), Some("lib.rs"), "gf does it too");
+    t.keys("tab");
+    assert!(t.read(|e| e.reading() && e.command_proposed()), "Tab comes back to the command");
 }
 
 #[gpui::test]
@@ -713,46 +656,25 @@ fn a_command_proposed_is_reviewed_reading_the_terminal(cx: &mut TestAppContext) 
     assert_eq!(t.text(), "x\n");
     t.keys("tab");
     wait_for(&mut t, |e| e.story.is_none());
-    assert_eq!(
-        t.read(|e| (e.modal.mode, e.reading())),
-        (Mode::Normal, true),
-        "Tab ran it, the last of the story: the keys stay on the terminal, in normal mode"
-    );
-}
-
-#[gpui::test]
-fn space_a_reading_the_terminal_asks_about_what_is_selected(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let mut t = open("x\n", &[&note("doc.txt", "x", "It's five."), DONE], cx);
-    t.keys("space t");
-    t.keys("s e q space 3 space 5 enter");
-    wait_for(&mut t, printed("5"));
-    t.keys("escape escape");
-    t.keys("/").input("(?m)^5$").keys("enter");
-    t.keys("space a").input("what is it?").keys("enter");
-    let asked = t.read(|e| e.story.as_ref().unwrap().story.as_ref().unwrap().instruction.clone());
-    assert_eq!(asked, "About this, in the terminal:\n```\n5\n```\nwhat is it?");
+    assert_eq!(t.read(|e| (e.modal.mode, e.reading())), (Mode::Insert, false), "Tab ran it, the last of the story: the keys stay in the shell");
 }
 
 #[gpui::test]
 #[cfg_attr(windows, ignore = "needs a POSIX shell and its tools")]
-fn a_lone_esc_reaches_the_shell_and_esc_esc_doesnt_eat_the_next_key(cx: &mut TestAppContext) {
+fn esc_goes_straight_to_the_shell_however_often(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let mut t = open("x\n", &[], cx);
-    t.keys("space t");
+    t.app_keys("cmd-j");
     t.keys("c a t space - v enter");
     wait_for(&mut t, |e| e.terminal.current().unwrap().busy() == Some(true));
     t.keys("escape");
-    // The Esc waits for a second, then goes on to the shell, before the keys after it.
-    t.cx.executor().advance_clock(std::time::Duration::from_millis(300));
-    t.cx.run_until_parked();
-    assert!(t.read(|e| e.terminal.held_escape.is_none()), "it's gone to the shell");
+    // The Esc goes straight to the shell, before the keys after it.
     t.keys("x enter");
     wait_for(&mut t, printed("^[x"));
     t.keys("ctrl-c");
     t.keys("escape escape");
-    assert!(t.read(|e| e.reading()), "two leave");
-    t.keys("i e c h o space s a f e enter");
+    assert!(t.read(|e| e.typing_in_terminal() && !e.reading()), "two are the shell's too: no modes here");
+    t.keys("ctrl-u e c h o space s a f e enter");
     wait_for(&mut t, printed("safe"));
 }
 
@@ -760,7 +682,7 @@ fn a_lone_esc_reaches_the_shell_and_esc_esc_doesnt_eat_the_next_key(cx: &mut Tes
 fn command_click_on_a_file_in_the_terminal_opens_it(cx: &mut TestAppContext) {
     let mut t = open("one\n", &[], cx);
     std::fs::write(t.dir.join("other.txt"), "a\nb\nc\n").unwrap();
-    t.keys("space t").input("echo other.txt:3").keys("enter");
+    t.app_keys("cmd-j").input("echo other.txt:3").keys("enter");
     // What echo printed: a line of its own starting with the name.
     wait_for(&mut t, |e| e.terminal.current().unwrap().screen().cells.iter().any(|c| c.c == 'o' && c.col == 0));
     // Where the printed line is on screen: its row, and the cell of its first char.

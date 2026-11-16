@@ -31,7 +31,7 @@ They go from a tenth of the view's width to four times it, and scroll across whe
 
 Opening a `.typ` file without it suggests that command.
 
-`space v` (or `:preview`) opens a Typst file's pages in a tab of their own, compiled as you type, saved or not, and from the pages goes back to the file. `space v` is the key of the plugin's view, `pages`, which the mode line calls `NOR · pages`. `space w v` puts them beside the file instead, and they keep up as you type.
+`space v` (or `:preview`) opens a Typst file's pages in a tab of their own, compiled as you type, saved or not, and from the pages goes back to the file. `space v` is the key of the plugin's view, `pages`, which the mode line calls `NOR · pages`. ⌘\ (or `:vsplit`) puts them beside the file instead, and they keep up as you type.
 
 - The project's files and your system's fonts are used as they are. Packages come from Typst's cache, downloaded from packages.typst.org the first time.
 - The cursor and selection show on the pages too, on the glyphs they're on. Clicking a glyph puts the cursor on the text it came from, ready for when you go back; a double click goes back.

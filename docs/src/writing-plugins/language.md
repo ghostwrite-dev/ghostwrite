@@ -110,7 +110,7 @@ When a language lists several servers, the first one installed is started.
 "rules": "- Prefer `where` clauses over long bounds."
 ```
 
-A key runs a `:` command (with or without its `:`), or one of the editor's commands by name (`zoom_in`), in normal and select mode, for files of the plugin's languages; a plugin with no languages binds it for every file. Keys show under **Plugin keys** in `space ?`. A key only works where the keymap doesn't bind it, so the editor's keys and the user's own come first.
+A key runs a `:` command (with or without its `:`), or one of the editor's commands by name (`zoom_in`), in normal and select mode, for files of the plugin's languages; a plugin with no languages binds it for every file. Keys show under **Plugin keys** in the ⌘/ cheatsheet. A key only works where the keymap doesn't bind it, so the editor's keys and the user's own come first.
 
 A key is for the code (and a tab of its pages) unless it says which [view](../editing/modes.md#views) it's for, with `"in"`: one of its own [views](manifest.md#views), by name, or `"files"`, `"terminal"` or `"debugger"`:
 
