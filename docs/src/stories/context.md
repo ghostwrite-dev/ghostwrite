@@ -22,6 +22,7 @@ Rules that plugins add for their languages are part of the system prompt.
 
 - what you decided about the last item, and what you said, if anything;
 - the terminal, if it's changed since the last command;
+- what the language server says about the files the story has changed: their errors and warnings, with their lines and everything they say (a Lean goal left unsolved, say), or that there are none. The turn waits up to 5 seconds for the server to check the files as they are, so the model doesn't need to run a build to know an edit compiles;
 - the file you asked about and the other files the story is in, as they are now, with what you've accepted in them.
 
 Everything else the model reads, it asks for with [its read-only commands](reading.md), and you see it doing so.

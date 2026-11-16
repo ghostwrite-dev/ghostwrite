@@ -73,6 +73,12 @@ pub struct StoryState {
     used: Used,
     /// The documents its accepted steps changed, one entry a step, in order.
     applied: RefCell<Vec<DocId>>,
+    /// The errors in the files it changed that the model has been told of (or that were
+    /// there before it started), and how many of each.
+    known_errors: std::collections::HashMap<String, usize>,
+    /// The language server found an error the model hasn't been told of: nothing's asked
+    /// ahead till the next request tells it.
+    errors_unseen: bool,
     /// The wait for the model being timed, until there's something to look at.
     pub timer: Option<Timer>,
     /// What the user last said (asked, or said during the review): shown while waiting.
@@ -118,6 +124,8 @@ impl StoryState {
             opened: vec![],
             used: Default::default(),
             applied: Default::default(),
+            known_errors: Default::default(),
+            errors_unseen: false,
             selection: None,
             quoted: None,
             placer: Placer::new(root),

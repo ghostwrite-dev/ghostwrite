@@ -131,6 +131,7 @@ mod tests {
             said: String::new(),
             correction: false,
             terminal: None,
+            diagnostics: None,
         };
         let req = Request { followups: (0..5).map(turn).collect(), ..asked() };
         let all = conversation(&req);
@@ -197,7 +198,14 @@ mod tests {
             local_model().run(&req, &mut out, &AtomicBool::new(false)).unwrap();
             println!("--- round {round} {:?}\n{}", out.1, out.0);
             if followups.iter().any(|f: &crate::FollowUp| f.reply.trim() == out.0.trim()) {
-                followups.push(crate::FollowUp { reply: out.0, decided: vec![], said: protocol::SAID_ALREADY.into(), correction: true, terminal: None });
+                followups.push(crate::FollowUp {
+                    reply: out.0,
+                    decided: vec![],
+                    said: protocol::SAID_ALREADY.into(),
+                    correction: true,
+                    terminal: None,
+                    diagnostics: None,
+                });
                 continue;
             }
             let decided = match protocol::parse(&out.0, true) {
@@ -205,7 +213,7 @@ mod tests {
                     let near = step.line.map_or(0..1, |l| l..l + step.old.len());
                     let Some(edit) = crate::placement::edit(&text, &step, near.clone()) else {
                         let said = protocol::misplaced("calc.py", &text, &step.old, near);
-                        followups.push(crate::FollowUp { reply: out.0, decided: vec![], said, correction: true, terminal: None });
+                        followups.push(crate::FollowUp { reply: out.0, decided: vec![], said, correction: true, terminal: None, diagnostics: None });
                         continue;
                     };
                     let mut text = text;
@@ -220,7 +228,7 @@ mod tests {
                     vec![]
                 }
             };
-            followups.push(crate::FollowUp { reply: out.0, decided, said: String::new(), correction: false, terminal: None });
+            followups.push(crate::FollowUp { reply: out.0, decided, said: String::new(), correction: false, terminal: None, diagnostics: None });
         }
         let text = std::fs::read_to_string(&path).unwrap();
         println!("=== after {done} steps\n{text}");

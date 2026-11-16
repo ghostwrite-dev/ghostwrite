@@ -74,6 +74,8 @@ pub struct Document {
     pub output: bool,
     /// The buffer version the language server (and `dirty`) last saw.
     synced: u64,
+    /// The buffer version the language server last sent diagnostics for.
+    checked: Option<u64>,
     /// The grammar's colors as last worked out, for the text as it was then:
     /// they're shown moved past the edits since.
     colors: Option<Arc<Colors>>,
@@ -128,6 +130,7 @@ impl Document {
             semantic: Default::default(),
             lsp,
             diagnostics: vec![],
+            checked: None,
             view_of: None,
             output: false,
             colors: None,
@@ -392,8 +395,23 @@ impl Document {
         Some(selection)
     }
 
+    /// What the language server says about the text it last saw.
     pub fn set_diagnostics(&mut self, diagnostics: Vec<ghostwrite_lsp::RawDiagnostic>) {
         self.diagnostics = ghostwrite_lsp::convert::diagnostics(self.buffer.rope(), diagnostics);
+        self.checked = Some(self.synced);
+    }
+
+    /// A language server checks it: one's attached, or has sent diagnostics for it.
+    pub fn checked_by_a_server(&self) -> bool {
+        self.lsp.is_some() || self.checked.is_some()
+    }
+
+    /// Its diagnostics are for the text as it is now, or there's no language server to wait for.
+    /// A server that sends them in parts, as it works through the text, has sent them all once
+    /// its plugin's panel says it's working on nothing.
+    pub fn diagnostics_current(&self) -> bool {
+        let working = self.aside.as_ref().and_then(|aside| aside.panel.working_on()).is_some();
+        self.lsp.as_ref().is_none_or(|lsp| !lsp.alive()) || (self.checked == Some(self.buffer.version()) && !working)
     }
 }
 

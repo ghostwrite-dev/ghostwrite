@@ -40,7 +40,7 @@ When the story moves on to a step on other lines, in another file, in the file t
 
 ### Speed
 
-While you review one item, the model is already asked for the next ones, up to ten ahead, each assuming you accept the ones before. Accept, and the next is there or already streaming. Say something, and what was asked ahead is dropped. A command is where asking ahead stops, since what comes next depends on what it prints.
+While you review one item, the model is already asked for the next ones, up to ten ahead, each assuming you accept the ones before. Accept, and the next is there or already streaming. Say something, and what was asked ahead is dropped. A command is where asking ahead stops, since what comes next depends on what it prints. So is a new error: when the language server finds one in a file the story changed, what was asked ahead is dropped, and the next item is asked for with the error in view. And once the story has changed a file a language server checks, a `<done>` asked ahead isn't taken as it is: the model is asked again, told what the server says, so a story doesn't end on an edit that broke something.
 
 A local model is asked one item ahead at most, since it answers one request at a time.
 

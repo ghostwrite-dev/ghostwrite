@@ -251,3 +251,106 @@ fn clear_forgets_what_the_stories_before_left() {
     let prompt = t.state.as_ref().unwrap().request(&t.project).unwrap().prompt();
     assert!(!prompt.contains("what is this") && !prompt.contains("learning Python"), "the next story is told nothing of them");
 }
+
+/// The language server says `doc.txt` has these errors, each on its line: what's said, as
+/// the app hands it on.
+fn server_says(t: &mut Setup, errors: &[(u32, &str)]) -> bool {
+    let path = t.dir.join("doc.txt");
+    let raw = errors
+        .iter()
+        .map(|(line, message)| ghostwrite_lsp::RawDiagnostic {
+            range: ghostwrite_lsp::RawRange::new(ghostwrite_lsp::RawPosition::new(*line, 0), ghostwrite_lsp::RawPosition::new(*line, 1)),
+            message: (*message).into(),
+            ..Default::default()
+        })
+        .collect();
+    assert!(t.project.apply_diagnostics(&path, None, raw));
+    let Setup { project, state, .. } = t;
+    state.as_mut().unwrap().diagnostics_came(project, &path)
+}
+
+#[test]
+fn after_an_edit_the_model_is_told_what_the_language_server_says_about_it() {
+    let mut t = open(ADD);
+    t.ask("implement it").reply(&fix());
+    assert!(t.accept());
+    assert!(t.state.as_ref().unwrap().changes_checked(&t.project), "with no server, there's nothing to wait for");
+    server_says(&mut t, &[(1, "cannot find value `c` in this scope\nhelp: a local variable with a similar name exists: `a`")]);
+    assert_eq!(t.settle(), Show::Revise, "the next item is asked for");
+    let told = t.state.as_ref().unwrap().story.as_ref().unwrap().followups()[0].diagnostics.clone();
+    assert_eq!(
+        told.as_deref(),
+        Some("doc.txt:2: error: cannot find value `c` in this scope\n    help: a local variable with a similar name exists: `a`\n"),
+        "the error, its line, and all it says"
+    );
+
+    t.reply(&hints());
+    assert!(t.accept());
+    server_says(&mut t, &[]);
+    t.settle();
+    let told = t.state.as_ref().unwrap().story.as_ref().unwrap().followups()[1].diagnostics.clone();
+    assert_eq!(told.as_deref(), Some("none\n"), "once it's fixed, that there's nothing");
+}
+
+#[test]
+fn a_new_error_drops_what_was_asked_ahead_until_the_model_is_told() {
+    let mut t = open(ADD);
+    t.ask("implement it").reply(&fix());
+    assert!(t.accept());
+    t.settle();
+    t.reply(&hints());
+    let Setup { project, state, .. } = &mut t;
+    assert!(state.as_mut().unwrap().ask_ahead(project, 3).ask.is_some(), "the next is asked ahead, assuming this one's accepted");
+    assert!(server_says(&mut t, &[(0, "expected `:`")]), "an error the model hasn't seen: what was asked ahead goes");
+    let Setup { project, state, .. } = &mut t;
+    let ahead = state.as_mut().unwrap().ask_ahead(project, 3);
+    assert!(ahead.stop && ahead.ask.is_none(), "it's stopped, and nothing more is asked ahead");
+    assert!(!server_says(&mut t, &[(0, "expected `:`")]), "the same error again is nothing new");
+
+    assert!(t.accept());
+    assert_eq!(t.settle(), Show::Revise, "the next is asked for, not taken from ahead");
+    let told = t.state.as_ref().unwrap().story.as_ref().unwrap().followups().last().unwrap().diagnostics.clone();
+    assert_eq!(told.as_deref(), Some("doc.txt:1: error: expected `:`\n"), "and it's told of the error");
+    assert_eq!(t.reply(&edit("    return a + b", "    return b + a")), Show::Tab(0));
+    assert!(!server_says(&mut t, &[(0, "expected `:`")]), "once told, it's known");
+    let Setup { project, state, .. } = &mut t;
+    assert!(state.as_mut().unwrap().ask_ahead(project, 3).ask.is_some(), "and asking ahead goes on");
+}
+
+#[test]
+fn errors_from_before_the_story_are_not_new() {
+    let mut t = open(ADD);
+    let path = t.dir.join("doc.txt");
+    let raw = vec![ghostwrite_lsp::RawDiagnostic { message: "unused variable".into(), ..Default::default() }];
+    assert!(t.project.apply_diagnostics(&path, None, raw));
+    t.ask("implement it").reply(&fix());
+    assert!(t.accept());
+    assert!(!server_says(&mut t, &[(0, "unused variable")]), "it was there before the story started");
+}
+
+#[test]
+fn a_done_asked_ahead_waits_for_what_the_language_server_says() {
+    let mut t = open(ADD);
+    t.ask("implement it").reply(&fix());
+    let Setup { project, state, .. } = &mut t;
+    let (id, _) = state.as_mut().unwrap().ask_ahead(project, 3).ask.expect("the next is asked ahead");
+    state.as_mut().unwrap().receive_ahead(project, id, Event::Text("<done>".into()));
+    state.as_mut().unwrap().receive_ahead(project, id, Event::Done);
+    assert!(t.accept());
+    server_says(&mut t, &[]);
+    assert_eq!(t.settle(), Show::Revise, "it's asked again, told what the server says, rather than done");
+    let told = t.state.as_ref().unwrap().story.as_ref().unwrap().followups().last().unwrap().diagnostics.clone();
+    assert_eq!(told.as_deref(), Some("none\n"));
+}
+
+#[test]
+fn with_no_language_server_a_done_asked_ahead_is_taken() {
+    let mut t = open(ADD);
+    t.ask("implement it").reply(&fix());
+    let Setup { project, state, .. } = &mut t;
+    let (id, _) = state.as_mut().unwrap().ask_ahead(project, 3).ask.expect("the next is asked ahead");
+    state.as_mut().unwrap().receive_ahead(project, id, Event::Text("<done>".into()));
+    state.as_mut().unwrap().receive_ahead(project, id, Event::Done);
+    assert!(t.accept());
+    assert_ne!(t.settle(), Show::Revise, "nothing to check: it's done");
+}

@@ -121,6 +121,9 @@ pub enum Role {
 /// How the terminal is introduced: the model can read it, not type in it.
 const TERMINAL: &str = "The user's terminal in the editor (you can read it; nothing you say is typed into it), as it is";
 
+/// How what the language server says is introduced: it has checked the files as they are now.
+const DIAGNOSTICS: &str = "The language server's errors and warnings in the files you've changed, as it has checked them now";
+
 /// A reminder with each turn (the system prompt has the rules).
 const FOLLOW_UP_GUIDE: &str = "What the user accepted is in the files as shown here, which are the editor's copies: the \
 files on disk may not have it yet, so go by what's shown, and quote lines with the numbers shown here. Reply with the \
@@ -194,6 +197,9 @@ impl Request {
         }
         if let Some(terminal) = &followup.terminal {
             out.push_str(&format!("{TERMINAL} now (it has changed since your reply):\n<terminal>\n{}\n</terminal>\n\n", self.terminal(terminal).trim_end()));
+        }
+        if let Some(diagnostics) = &followup.diagnostics {
+            out.push_str(&format!("{DIAGNOSTICS}:\n<diagnostics>\n{}\n</diagnostics>\n\n", diagnostics.trim_end()));
         }
         if followup.correction {
             out.push_str(&format!("Ghostwrite couldn't use your reply: {}", followup.said.trim()));
@@ -413,6 +419,7 @@ mod tests {
             said: "keep the old name".into(),
             correction: false,
             terminal: None,
+            diagnostics: None,
         };
         let req = Request { followups: vec![followup.clone(), FollowUp { decided: vec![], said: String::new(), ..followup.clone() }], ..request(None) };
         let turns = req.messages();
@@ -431,16 +438,24 @@ mod tests {
         assert_eq!(req.latest(), turns[4].1, "resuming a session sends only that");
         let flat = req.prompt();
         assert!(flat.contains("Your reply:\n<earlier>\n<file>…</new>\n</earlier>") && flat.ends_with(&turns[4].1));
-        let fix = FollowUp { said: "its <at> lines aren't in lib.rs".into(), correction: true, terminal: Some("$ ls\nsrc".into()), ..followup };
+        let fix = FollowUp { said: "its <at> lines aren't in lib.rs".into(), correction: true, terminal: Some("$ ls\nsrc".into()), ..followup.clone() };
         let turns = Request { followups: vec![fix], ..request(None) }.messages();
         assert!(turns[2].1.contains("Ghostwrite couldn't use your reply: its <at> lines aren't in lib.rs"), "{}", turns[2].1);
         assert!(turns[2].1.contains("as it is now (it has changed since your reply):\n<terminal>\n$ ls\nsrc\n</terminal>"), "{}", turns[2].1);
+        let checked =
+            FollowUp { diagnostics: Some("lib.rs:3: error: expected `;`\n".into()), ..FollowUp { decided: vec![], said: String::new(), ..followup.clone() } };
+        let turns = Request { followups: vec![checked], ..request(None) }.messages();
+        assert!(
+            turns[2].1.starts_with("The language server's errors and warnings in the files you've changed, as it has checked them now:\n<diagnostics>\nlib.rs:3: error: expected `;`\n</diagnostics>\n\nNext item, please."),
+            "{}",
+            turns[2].1
+        );
     }
 
     #[test]
     fn the_newest_turn_shows_the_other_files_in_the_story() {
         let other = Shown { path: "util.rs".into(), text: "pub fn one() {}\npub fn two() {}\n".into(), focus: 1..2 };
-        let followup = FollowUp { reply: "<file>…</new>".into(), decided: vec![], said: String::new(), correction: false, terminal: None };
+        let followup = FollowUp { reply: "<file>…</new>".into(), decided: vec![], said: String::new(), correction: false, terminal: None, diagnostics: None };
         let req = Request { followups: vec![followup.clone(), followup], others: vec![other], ..request(None) };
         let turns = req.messages();
         assert!(turns[4].1.contains("<contents path=\"util.rs\">\n1│pub fn one() {}\n2│pub fn two() {}\n</contents>"), "{}", turns[4].1);

@@ -56,6 +56,36 @@ fn a_lean_file_shows_the_goals_at_the_cursor(cx: &mut TestAppContext) {
     wait_for(&mut t, &|e| e.tab().is_some_and(|t| t.doc.diagnostics.iter().any(|d| d.message == "42")));
 }
 
+/// Live: needs `lake` (elan) installed.
+#[gpui::test]
+#[ignore]
+fn after_an_edit_the_model_is_told_what_lean_says_about_it(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let replies = [edit("Main.lean", "  rfl", "  exact no_such_lemma"), DONE.to_string()];
+    let mut t = open_with("", &replies.iter().map(String::as_str).collect::<Vec<_>>(), true, cx);
+    let path = t.dir.join("Main.lean");
+    std::fs::write(&path, "theorem t (n : Nat) : n + 0 = n := by\n  rfl\n").unwrap();
+    t.editor.update(t.cx, |e, cx| {
+        e.project.aside_shown = true;
+        e.open_paths(vec![path], cx);
+    });
+    t.ask("prove it another way");
+    t.keys("tab");
+    // `<done>` was asked ahead before Lean had checked the edit: it's asked again, with what Lean says.
+    for _ in 0..600 {
+        t.cx.run_until_parked();
+        if t.read(|e| e.story.is_none()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let sent = ghostwrite_project::store::read("last-reply.txt").unwrap_or_default();
+    assert!(
+        sent.contains("--- follow-up 1: \ndiagnostics:\nMain.lean:2: error: Unknown identifier `no_such_lemma`"),
+        "the error the edit made, on its line: {sent}"
+    );
+}
+
 /// Live: needs `rust-analyzer` installed.
 #[gpui::test]
 #[ignore]

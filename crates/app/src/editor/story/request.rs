@@ -17,6 +17,10 @@ use gpui::{AppContext as _, Context, Task};
 use super::Live;
 use crate::editor::Editor;
 
+/// How long a request waits for the language server to check the files the story
+/// changed, so what the model's told of them is about them as they are.
+const CHECK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The requests on their way, and how to stop them.
 #[derive(Default)]
 pub(super) struct Requests {
@@ -26,6 +30,9 @@ pub(super) struct Requests {
     /// The request sent ahead of time that's on its way, and how to stop it.
     prefetching: Option<(u64, Arc<AtomicBool>)>,
     _prefetch_task: Option<Task<()>>,
+    /// The request waits for the language server to check the files the story changed,
+    /// till it has, or [`CHECK_WAIT`] has gone by.
+    checking: Option<Task<()>>,
     /// What the user has let the model read outside the project, during this story.
     readable: Readable,
     /// Where the answer goes, while the model asks to read outside the project.
@@ -177,6 +184,30 @@ impl Editor {
             running.ask = true;
             return cx.notify();
         }
+        let Some(live) = self.story.as_mut() else { return };
+        // It's waiting for the language server already: it goes once that's done.
+        if live.requests.checking.is_some() {
+            return;
+        }
+        if !live.state.changes_checked(&self.project) {
+            live.requests.checking = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(CHECK_WAIT).await;
+                this.update(cx, |this, cx| this.changes_checked(cx)).ok();
+            }));
+            return cx.notify();
+        }
+        self.send_request_now(cx);
+    }
+
+    /// The language server has checked the files the story changed, or it's been long
+    /// enough: the request waiting for that goes.
+    pub(in crate::editor) fn changes_checked(&mut self, cx: &mut Context<Self>) {
+        if self.story.as_mut().and_then(|live| live.requests.checking.take()).is_some() {
+            self.send_request_now(cx);
+        }
+    }
+
+    fn send_request_now(&mut self, cx: &mut Context<Self>) {
         // The model reads the project from disk: let it see what's on screen.
         self.project.write_all();
         let Some(backend) = self.backend.clone() else { return };

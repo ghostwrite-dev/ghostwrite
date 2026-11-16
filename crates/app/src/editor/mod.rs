@@ -261,6 +261,7 @@ impl Editor {
                 let applied = this.update_in(cx, |this, window, cx| match event {
                     ghostwrite_lsp::Event::Diagnostics { path, version, diagnostics } => {
                         if this.project.apply_diagnostics(&path, version, diagnostics) {
+                            this.diagnostics_came(&path, cx);
                             cx.notify();
                         }
                     }
@@ -276,7 +277,13 @@ impl Editor {
                         }
                         cx.notify();
                     }
-                    ghostwrite_lsp::Event::Notification { method, params, .. } => this.server_notification(&method, &params, cx),
+                    ghostwrite_lsp::Event::Notification { method, params, .. } => {
+                        this.server_notification(&method, &params, cx);
+                        // Its plugin may now say the server's done with the file: a request waiting on that goes.
+                        if let Some(path) = params["textDocument"]["uri"].as_str().and_then(ghostwrite_lsp::convert::path_of) {
+                            this.diagnostics_came(&path, cx);
+                        }
+                    }
                 });
                 if applied.is_err() {
                     break;

@@ -328,6 +328,8 @@ impl StoryState {
             story.reply_repeated();
             return Show::Revise;
         }
+        // What it changed has a language server: the model's told what it says before it's done.
+        story.check_before_done = self.applied.borrow().iter().filter_map(|id| project.tabs.by_id(*id)).any(|tab| tab.doc.checked_by_a_server());
         let id = match story.settle() {
             // Nothing in the reply to review: the model writes it again.
             Settled::Finished if story.is_unusable() && story.can_revise() => {

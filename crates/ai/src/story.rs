@@ -114,6 +114,8 @@ pub struct FollowUp {
     pub correction: bool,
     /// The user's terminal, if it's changed since that reply.
     pub terminal: Option<String>,
+    /// What the language server says now about the files the story changed, if any has one.
+    pub diagnostics: Option<String>,
 }
 
 /// A reply asked for ahead of time, assuming everything before it is accepted.
@@ -177,6 +179,9 @@ pub struct Story {
     anchor: Option<Range<usize>>,
     /// Items the editor gave that are still to come (the stops of a search, say).
     queued: std::collections::VecDeque<Item>,
+    /// A language server checks what it changed: a `<done>` asked ahead, before the model
+    /// was told what that says, isn't taken; it's asked again, with that.
+    pub check_before_done: bool,
 }
 
 impl Story {
@@ -200,6 +205,7 @@ impl Story {
             just_adopted: None,
             anchor: None,
             queued: std::collections::VecDeque::new(),
+            check_before_done: false,
         }
     }
 
@@ -385,7 +391,7 @@ impl Story {
         self.anchor = None;
         self.queued.clear();
         let reply = self.replies.last().map(|t| t.text.clone()).unwrap_or_default();
-        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), said, correction, terminal: None });
+        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), said, correction, terminal: None, diagnostics: None });
         self.replies.push(Turn { text: String::new(), about, given: None });
         self.error = None;
         self.current = None;
@@ -398,6 +404,19 @@ impl Story {
         if let Some(followup) = self.history.last_mut() {
             followup.terminal = Some(terminal);
         }
+    }
+
+    /// What the language server says about the files the story changed, as the newest turn goes out.
+    pub fn saw_diagnostics(&mut self, diagnostics: String) {
+        if let Some(followup) = self.history.last_mut() {
+            followup.diagnostics = Some(diagnostics);
+        }
+    }
+
+    /// What was asked ahead assumed the edits before it went in cleanly; the language
+    /// server says they didn't: it's dropped, and the next is asked for knowing that.
+    pub fn drop_ahead(&mut self) {
+        self.ahead.clear();
     }
 
     /// More of the reply being written.
@@ -486,7 +505,9 @@ impl Story {
                 self.reveal();
                 self.settle()
             }
-            Reply::Step(_) | Reply::Note(_) | Reply::Run(_) if self.open && self.verdict(id) == Verdict::Accepted && !self.ahead.is_empty() => {
+            Reply::Step(_) | Reply::Note(_) | Reply::Run(_)
+                if self.open && self.verdict(id) == Verdict::Accepted && !self.ahead.is_empty() && !self.unchecked_done() =>
+            {
                 self.adopt();
                 self.settle()
             }
@@ -498,11 +519,24 @@ impl Story {
         }
     }
 
+    /// The next reply asked ahead is `<done>`, and it isn't to be taken without the model
+    /// being told what the language server says.
+    fn unchecked_done(&self) -> bool {
+        self.check_before_done && self.ahead.first().is_some_and(|a| a.done && matches!(protocol::parse(&a.text, true), Reply::Done { .. }))
+    }
+
     /// The next item the editor gave becomes the next reply, as if the model had written it.
     fn reveal(&mut self) {
         let Some(item) = self.queued.pop_front() else { return };
         let reply = self.replies.last().map(|t| t.text.clone()).unwrap_or_default();
-        self.history.push(FollowUp { reply, decided: std::mem::take(&mut self.decided), said: String::new(), correction: false, terminal: None });
+        self.history.push(FollowUp {
+            reply,
+            decided: std::mem::take(&mut self.decided),
+            said: String::new(),
+            correction: false,
+            terminal: None,
+            diagnostics: None,
+        });
         self.replies.push(Turn { text: render(&item), about: None, given: Some(item) });
     }
 
@@ -563,6 +597,7 @@ impl Story {
                     said: String::new(),
                     correction: false,
                     terminal: None,
+                    diagnostics: None,
                 });
                 accepted.push(item);
             }
@@ -653,6 +688,9 @@ impl Story {
         for (said, n) in self.history.iter().zip(1..) {
             let who = if said.correction { "correction" } else { "follow-up" };
             out.push_str(&format!("\n--- {who} {n}: {}\n", said.said));
+            if let Some(diagnostics) = &said.diagnostics {
+                out.push_str(&format!("diagnostics:\n{diagnostics}"));
+            }
         }
         out
     }

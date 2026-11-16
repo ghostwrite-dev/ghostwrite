@@ -220,7 +220,8 @@ mod tests {
     fn claude_code_follows_what_the_user_says() {
         let text = "def add(a, b):\n    pass\n";
         let first = ask(text, 0..24, "implement it with type hints", vec![]);
-        let followup = crate::FollowUp { reply: first, decided: vec![], said: "why int and not float?".into(), correction: false, terminal: None };
+        let followup =
+            crate::FollowUp { reply: first, decided: vec![], said: "why int and not float?".into(), correction: false, terminal: None, diagnostics: None };
         let second = ask(text, 0..24, "implement it with type hints", vec![followup]);
         assert!(matches!(item(&second), protocol::Reply::Note(_)), "a question is answered with a note: {second}");
     }
@@ -260,7 +261,7 @@ mod tests {
                 protocol::Reply::Done { .. } => break,
                 other => panic!("a tour is notes: {other:?}"),
             }
-            followups.push(crate::FollowUp { reply: out, decided: vec![], said: String::new(), correction: false, terminal: None });
+            followups.push(crate::FollowUp { reply: out, decided: vec![], said: String::new(), correction: false, terminal: None, diagnostics: None });
         }
         assert!(files.iter().any(|f| f == "util.py"), "a note in util.py: {files:?}");
     }
@@ -301,7 +302,14 @@ mod tests {
                 protocol::Reply::Step(step) => step,
                 protocol::Reply::Done { .. } => break,
                 protocol::Reply::Note(_) | protocol::Reply::Run(_) => {
-                    followups.push(crate::FollowUp { reply: out.0, decided: vec![], said: String::new(), correction: false, terminal: None });
+                    followups.push(crate::FollowUp {
+                        reply: out.0,
+                        decided: vec![],
+                        said: String::new(),
+                        correction: false,
+                        terminal: None,
+                        diagnostics: None,
+                    });
                     continue;
                 }
                 protocol::Reply::Partial => panic!("{}", out.0),
@@ -315,7 +323,7 @@ mod tests {
             std::fs::write(root.join(&file), text).unwrap();
             edited.push(file);
             let decided = vec![format!("accepted: {}", crate::Item::Step(step).describe())];
-            followups.push(crate::FollowUp { reply: out.0, decided, said: String::new(), correction: false, terminal: None });
+            followups.push(crate::FollowUp { reply: out.0, decided, said: String::new(), correction: false, terminal: None, diagnostics: None });
         }
         assert!(edited.iter().any(|f| f == "util.py") && edited.iter().any(|f| f == "main.py"), "edits in both files: {edited:?}");
     }
@@ -334,7 +342,7 @@ mod tests {
             text,
             0..text.len(),
             "implement it",
-            vec![crate::FollowUp { reply: first, decided: vec![], said, correction: false, terminal: None }],
+            vec![crate::FollowUp { reply: first, decided: vec![], said, correction: false, terminal: None, diagnostics: None }],
         );
         let protocol::Reply::Step(step) = item(&second) else { panic!("an edit: {second}") };
         assert!(step.new.join("\n").contains("for ") || step.say.contains("loop"), "{second}");
@@ -370,6 +378,7 @@ mod tests {
             said: String::new(),
             correction: false,
             terminal: None,
+            diagnostics: None,
         });
         let protocol::Reply::Step(step) = protocol::parse(&first.0, true) else { panic!("an edit first: {}", first.0) };
         let edit = crate::placement::edit(text, &step, 0..2).expect("it places");
@@ -420,6 +429,7 @@ mod tests {
             said: "you may say it now: what was the codeword in my first message?".into(),
             correction: false,
             terminal: None,
+            diagnostics: None,
         });
         req.session = Some(session);
         assert!(!req.latest().contains("PELICAN"), "only the newest turn is sent");

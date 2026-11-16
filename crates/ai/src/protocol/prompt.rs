@@ -107,6 +107,11 @@ src/helpers.rs
 why
 </say>
 
+When the files you change have a language server, each turn after an edit says what it reports in them now, \
+in <diagnostics>: errors and warnings with their lines, or that there are none. That's how you know an edit \
+compiles (or type-checks, or a proof goes through): don't run a build just to check it. Fix what an edit of yours \
+broke before going on, unless the next item is what makes it right (a definition the edit uses, the rest of a proof).
+
 To run a command in the user's terminal (build, test, format, install, a git command that changes something: \
 anything that does more than read), write <run> with the command, on one line, in place of <file> and <at>, and \
 <say> why, with no <new>. The user accepts it with Tab and it starts in their terminal, in the project's folder, \

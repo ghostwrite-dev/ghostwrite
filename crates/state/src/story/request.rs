@@ -1,7 +1,9 @@
 //! What the model is asked, and what it says back. A request is the story so
 //! far, the file asked about and the others it's in, and what's around it in
 //! the editor; the terminal is told as it was when the story started, and in a
-//! follow-up, from the last command run in it on, when that's changed. While an item is reviewed, the
+//! follow-up, from the last command run in it on, when that's changed. A follow-up also says
+//! what the language server says about the files the story changed (it waits a moment for the
+//! server to check them), and a new error there drops what was asked ahead. While an item is reviewed, the
 //! next one is asked for ahead, assuming this one's accepted, in a fork of
 //! the Claude Code session.
 //!
@@ -16,6 +18,8 @@ use ghostwrite_ai::context::Shown;
 use ghostwrite_ai::placement::{Asked, Assumed, Files as _, Overlay, Place};
 use ghostwrite_ai::timing::{Timer, Wait};
 use ghostwrite_ai::{Item, Request, Story, Surroundings, lines};
+
+use ghostwrite_lsp::Severity;
 
 use super::StoryState;
 use crate::Project;
@@ -155,6 +159,19 @@ impl StoryState {
         if let (Some(terminal), Some(story)) = (seen, self.story.as_mut()) {
             story.saw_terminal(terminal);
         }
+        if self.story.as_ref().is_some_and(|story| !story.followups().is_empty()) {
+            // A follow-up: what the language server says about the files changed so far.
+            if let (Some(report), Some(story)) = (self.diagnostics_report(project), self.story.as_mut()) {
+                story.saw_diagnostics(report);
+            }
+            let docs = self.changed_docs();
+            self.know_errors(project, &docs);
+        } else {
+            // The first request: the errors already in the open files aren't the story's.
+            let docs: Vec<_> = project.tabs.iter().map(|tab| tab.doc.id).collect();
+            self.know_errors(project, &docs);
+        }
+        self.errors_unseen = false;
         let req = self.request(project)?;
         // A rewrite of a step that wouldn't place is part of the same wait.
         if self.timer.is_none() {
@@ -176,6 +193,10 @@ impl StoryState {
             }
             ahead.stop = true;
             self.conversation.prefetching = None;
+        }
+        // An edit broke something the model doesn't know of yet: it's told before more is asked.
+        if self.errors_unseen {
+            return ahead;
         }
         let Some(next) = story.prefetch(most) else { return ahead };
         let Some(mut req) = self.request_ahead(project, &next.accepted) else { return ahead };
@@ -222,6 +243,93 @@ impl StoryState {
             }
         }
         shown
+    }
+
+    /// The documents its accepted steps changed, each once.
+    fn changed_docs(&self) -> Vec<crate::DocId> {
+        let mut docs = self.applied.borrow().clone();
+        docs.dedup();
+        let mut seen = std::collections::HashSet::new();
+        docs.retain(|id| seen.insert(*id));
+        docs
+    }
+
+    /// Whether the language server has checked the files the story changed as they
+    /// are now (or they have none): what the next request says of them is current.
+    pub fn changes_checked(&self, project: &Project) -> bool {
+        self.changed_docs().iter().filter_map(|id| project.tabs.by_id(*id)).all(|tab| tab.doc.diagnostics_current())
+    }
+
+    /// The language server sent diagnostics for `path`. If it's a file the story changed,
+    /// and there's an error in it the model hasn't been told of, what was asked ahead
+    /// (assuming the edits went in cleanly) is dropped. Whether it was.
+    pub fn diagnostics_came(&mut self, project: &Project, path: &std::path::Path) -> bool {
+        let Some(tab) = project.tabs.iter().find(|tab| tab.doc.path.as_deref() == Some(path)) else { return false };
+        if !self.changed_docs().contains(&tab.doc.id) {
+            return false;
+        }
+        let new = error_keys(project, &tab.doc).iter().any(|(key, n)| self.known_errors.get(key).is_none_or(|known| known < n));
+        if !new || self.errors_unseen {
+            return false;
+        }
+        self.errors_unseen = true;
+        if let Some(story) = self.story.as_mut() {
+            story.drop_ahead();
+        }
+        true
+    }
+
+    /// The errors in `docs` are ones the model knows of.
+    fn know_errors(&mut self, project: &Project, docs: &[crate::DocId]) {
+        for doc in docs.iter().filter_map(|id| project.tabs.by_id(*id)).map(|tab| &tab.doc) {
+            for (key, n) in error_keys(project, doc) {
+                let known = self.known_errors.entry(key).or_default();
+                *known = (*known).max(n);
+            }
+        }
+    }
+
+    /// What the language server says about the files the story changed, as the model's
+    /// told it: their errors and warnings, or that there are none. `None` if none of them
+    /// has a language server.
+    fn diagnostics_report(&self, project: &Project) -> Option<String> {
+        /// Bytes of it at most, and lines of one message.
+        const MAX: usize = 6_000;
+        const MAX_LINES: usize = 12;
+        let docs: Vec<&crate::Document> =
+            self.changed_docs().iter().filter_map(|id| project.tabs.by_id(*id)).map(|tab| &tab.doc).filter(|doc| doc.checked_by_a_server()).collect();
+        if docs.is_empty() {
+            return None;
+        }
+        let mut problems = vec![];
+        let mut unchecked = vec![];
+        for doc in &docs {
+            let name = doc.path.as_deref().map_or_else(|| "untitled".into(), |path| project.display(path));
+            if !doc.diagnostics_current() {
+                unchecked.push(name.clone());
+            }
+            for d in doc.diagnostics.iter().filter(|d| matches!(d.severity, Severity::Error | Severity::Warning)) {
+                let line = doc.buffer.line_of(d.range.start) + 1;
+                let message: Vec<&str> = d.message.trim_end().lines().take(MAX_LINES).collect();
+                problems.push(format!("{name}:{line}: {}: {}", d.severity.label(), message.join("\n    ")));
+            }
+        }
+        let mut report = String::new();
+        for (i, problem) in problems.iter().enumerate() {
+            if report.len() + problem.len() > MAX {
+                report.push_str(&format!("…and {} more\n", problems.len() - i));
+                break;
+            }
+            report.push_str(problem);
+            report.push('\n');
+        }
+        if problems.is_empty() {
+            report.push_str("none\n");
+        }
+        if !unchecked.is_empty() {
+            report.push_str(&format!("(still being checked, so this may be out of date: {})\n", unchecked.join(", ")));
+        }
+        Some(report)
     }
 
     /// What's around the request in the editor: the open files, and
@@ -369,6 +477,18 @@ impl Used {
         let count = |n: u64| if n < 1000 { n.to_string() } else { format!("{:.1}k", n as f64 / 1000.) };
         format!(" · {} tokens in, {} out", count(self.input), count(self.output))
     }
+}
+
+/// A document's errors, each as what it says and where (its file, its first line of
+/// message), and how many there are of each: an error that moves along with the
+/// lines around it is the same one.
+fn error_keys(project: &Project, doc: &crate::Document) -> HashMap<String, usize> {
+    let name = doc.path.as_deref().map_or_else(|| "untitled".into(), |path| project.display(path));
+    let mut keys: HashMap<String, usize> = HashMap::new();
+    for d in doc.diagnostics.iter().filter(|d| d.severity == Severity::Error) {
+        *keys.entry(format!("{name}: {}", d.message.lines().next().unwrap_or_default())).or_default() += 1;
+    }
+    keys
 }
 
 #[cfg(test)]

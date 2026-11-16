@@ -233,6 +233,19 @@ impl Editor {
         self.settle_story(cx);
     }
 
+    /// The language server sent diagnostics for `path`. A request waiting for it goes once
+    /// the files the story changed are checked; an error in one the model hasn't been told
+    /// of drops what was asked ahead, assuming the edits went in cleanly.
+    pub(in crate::editor) fn diagnostics_came(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let Some(live) = self.story.as_mut() else { return };
+        if live.state.diagnostics_came(&self.project, path) {
+            self.prefetch(cx);
+        }
+        if self.story.as_ref().is_some_and(|live| live.state.changes_checked(&self.project)) {
+            self.changes_checked(cx);
+        }
+    }
+
     fn accept(&mut self, cx: &mut Context<Self>) {
         if self.story.as_ref().is_some_and(|live| live.lost_its_tab(&self.project)) {
             return self.finish_story(cx);
