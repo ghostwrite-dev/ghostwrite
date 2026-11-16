@@ -155,6 +155,9 @@ pub struct Editor {
     cheatsheet: bool,
     /// Where the cheatsheet is scrolled to.
     cheatsheet_scroll: gpui::ScrollHandle,
+    /// The tab bar's scrolling, and the tab it last scrolled into view.
+    tabs_scroll: gpui::ScrollHandle,
+    tab_in_view: std::cell::Cell<Option<usize>>,
 
     // The panes around the code.
     tree_pane: tree::TreePane,
@@ -332,6 +335,8 @@ impl Editor {
             picker: None,
             cheatsheet: false,
             cheatsheet_scroll: gpui::ScrollHandle::new(),
+            tabs_scroll: gpui::ScrollHandle::new(),
+            tab_in_view: std::cell::Cell::new(None),
             tree_pane: tree::TreePane::new(),
             terminal: terminal::TerminalPane::default(),
             aside_width: aside::width(),

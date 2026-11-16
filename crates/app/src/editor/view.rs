@@ -349,8 +349,13 @@ impl Editor {
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx).clone();
+        let active = self.project.tabs.active_index();
+        if self.tab_in_view.replace(Some(active)) != Some(active) {
+            self.tabs_scroll.scroll_to_item(active);
+        }
         div()
             .id("tabs")
+            .track_scroll(&self.tabs_scroll)
             .flex_none()
             .flex()
             .h(pt(30.))
