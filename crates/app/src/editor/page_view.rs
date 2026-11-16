@@ -180,7 +180,8 @@ impl Element for PageView {
         self.editor.update(cx, |editor, _| {
             let own = editor.tab().is_some_and(|active| active.doc.id == id);
             if let Some(tab) = editor.project.tabs.by_id_mut(id) {
-                (tab.view.pages.top, tab.view.pages.left, tab.view.pages.reveal, tab.view.pages.jump) = (scroll_top.into(), stack.scroll_left.into(), None, None);
+                (tab.view.pages.top, tab.view.pages.left, tab.view.pages.reveal, tab.view.pages.jump) =
+                    (scroll_top.into(), stack.scroll_left.into(), None, None);
                 if own {
                     tab.view.autoscroll = None;
                 }
@@ -215,7 +216,9 @@ impl Element for PageView {
         let (stack, pages, viewport) = (state.stack.clone(), state.pages.clone(), state.shown.viewport);
         window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, _| {
             let now = bounds.contains(&event.position)
-                && stack.at(viewport.unplace(event.position)).is_some_and(|(page, x, y)| following(&*pages, event.modifiers.platform) && pages.link_at(page, x, y).is_some());
+                && stack
+                    .at(viewport.unplace(event.position))
+                    .is_some_and(|(page, x, y)| following(&*pages, event.modifiers.platform) && pages.link_at(page, x, y).is_some());
             if phase == DispatchPhase::Bubble && now != on_link {
                 window.refresh();
             }

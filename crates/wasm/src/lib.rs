@@ -168,12 +168,15 @@ impl wit_host::Host for State {
     }
 }
 
+/// The plugin's `links` call: a page's links.
+type LinksFn = wasmtime::component::TypedFunc<(u64, u64), (Vec<wit::Link>,)>;
+
 /// A plugin running.
 struct Live {
     store: Store<State>,
     plugin: bindings::Plugin,
     /// `links`, if it was built against a world that has it (`with-links`).
-    links: Option<wasmtime::component::TypedFunc<(u64, u64), (Vec<wit::Link>,)>>,
+    links: Option<LinksFn>,
     /// How long it's given for each call.
     ticks: u64,
 }
