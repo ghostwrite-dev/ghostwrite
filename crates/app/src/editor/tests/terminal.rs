@@ -436,7 +436,7 @@ fn wheel(t: &mut Setup, at: gpui::Point<gpui::Pixels>, lines: f32) {
 #[gpui::test]
 fn the_wheel_scrolls_while_a_step_waits_even_over_what_folds_out(cx: &mut TestAppContext) {
     let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
-    let new: String = (0..8).map(|i| format!("new {i}")).collect::<Vec<_>>().join("\n");
+    let new: String = (0..=ghostwrite_ai::protocol::MAX_ADDED).map(|i| format!("new {i}")).collect::<Vec<_>>().join("\n");
     let mut t = open(&text, &[&edit("doc.txt", "line 150", &new), DONE], cx);
     t.cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(700.)));
     t.ask("change it");

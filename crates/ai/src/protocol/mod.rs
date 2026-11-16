@@ -14,7 +14,7 @@ mod wrap;
 use crate::lines;
 
 pub(crate) use parse::STARTS;
-pub use parse::{MAX_CREATED, check, parse};
+pub use parse::{MAX_ADDED, MAX_CREATED, check, parse};
 pub use prompt::{NOTHING_TO_REVIEW, SAID_ALREADY, SYSTEM, about_only_pages, grammar, is_question, misplaced, missing_file, system};
 pub use wrap::{wrap, wrap_code};
 

@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use super::MAX_CREATED;
+use super::{MAX_ADDED, MAX_CREATED};
 use crate::lines;
 
 pub const SYSTEM: &str = "You are an assistant inside a text editor. The user points at some lines of a file and asks \
@@ -65,7 +65,8 @@ replaces the <at> lines:
 </new>
 
 That is an edit, and its <say> says why. Make each edit small, about one line: the next thing the user would \
-type, or one line changed. The user accepts it with Tab and it's applied at once, so your next item sees the \
+type, or one line changed. A couple of lines is fine; never more than three beyond the <at> lines. A longer change \
+(a whole function, a block) is several edits, one after another. The user accepts it with Tab and it's applied at once, so your next item sees the \
 file with it. Order edits the way the user would make them, usually a definition before its uses.
 
 A change often spans files: a function and its callers, a type and where it's built, code and its tests. Make it \
@@ -173,7 +174,7 @@ pub fn is_question(said: &str) -> bool {
 
 /// How big a step a grammar allows: the lines it replaces, and what replaces them.
 const MAX_AT: usize = 3;
-const MAX_NEW: usize = 12;
+const MAX_NEW: usize = MAX_AT + MAX_ADDED;
 /// The most files named in a grammar: a bigger project's paths aren't checked.
 const MAX_GRAMMAR_FILES: usize = 500;
 

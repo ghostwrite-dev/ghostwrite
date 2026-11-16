@@ -111,6 +111,8 @@ pub fn check(reply: &str, finished: bool) -> Result<(), String> {
     // A removal, rename or command: no `<new>` after its `<say>`.
     let mut no_new = false;
     let mut creating = false;
+    // The `<at>` lines an edit replaces: its `<new>` may be a few more than them.
+    let mut replaced = 0;
     // `<new>` came before `<say>`.
     let mut new_first = false;
     for line in complete.lines() {
@@ -155,7 +157,10 @@ pub fn check(reply: &str, finished: bool) -> Result<(), String> {
                     return Err(format!("{close} came with nothing before it"));
                 }
                 match close {
-                    "</at>" => Expect::SayOrNew,
+                    "</at>" => {
+                        replaced = seen;
+                        Expect::SayOrNew
+                    }
                     "</new>" if new_first => Expect::Say,
                     "</say>" if no_new || new_first => Expect::End,
                     "</say>" => Expect::New,
@@ -168,6 +173,11 @@ pub fn check(reply: &str, finished: bool) -> Result<(), String> {
             (Expect::Lines { close: "</new>", .. }, _) if creating && seen == MAX_CREATED => {
                 return Err(format!(
                     "a new file starts with at most {MAX_CREATED} lines in <new>; later items add the rest to it with <file>, one small edit at a time"
+                ));
+            }
+            (Expect::Lines { close: "</new>", .. }, _) if !creating && seen == replaced + MAX_ADDED => {
+                return Err(format!(
+                    "an edit's <new> is at most {MAX_ADDED} lines more than its <at>; a bigger change is several edits, a couple of lines each"
                 ));
             }
             (Expect::Lines { .. }, _) => {
@@ -195,6 +205,10 @@ fn first_tag(reply: &str) -> Option<&'static str> {
 
 /// The most lines a new file starts with: the rest comes in edits after.
 pub const MAX_CREATED: usize = 8;
+
+/// The most lines an edit adds beyond those it replaces: a step is a couple of
+/// lines, and a bigger change is several of them.
+pub const MAX_ADDED: usize = 3;
 
 /// Lines up to `close` begin, `need` of them at least.
 fn lines(seen: &mut usize, close: &'static str, need: usize) -> Expect {
@@ -408,6 +422,9 @@ mod tests {
         let create = |n: usize| format!("<create>\nb.rs\n</create>\n<say>\nx\n</say>\n<new>\n{}", "line\n".repeat(n));
         assert_eq!(check(&format!("{}</new>\n", create(MAX_CREATED)), true), Ok(()), "a new file starts small");
         assert!(check(&create(MAX_CREATED + 1), false).unwrap_err().contains("one small edit at a time"), "not all at once, caught as it streams");
+        let edit = |n: usize| format!("<file>\na.rs\n</file>\n<at>\n1│x\n2│y\n</at>\n<say>\nx\n</say>\n<new>\n{}", "line\n".repeat(n));
+        assert_eq!(check(&format!("{}</new>\n", edit(2 + MAX_ADDED)), true), Ok(()), "a couple of lines more than it replaces");
+        assert!(check(&edit(2 + MAX_ADDED + 1), false).unwrap_err().contains("several edits"), "a long edit is caught as it streams");
     }
 
     #[test]
