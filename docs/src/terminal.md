@@ -21,6 +21,8 @@ The status line shows `INS · terminal`.
 
 Dragging the mouse selects (a double click a word, a triple click a line) and ⌘C copies.
 
+Drop files on it from the Finder and their paths go on the shell's line, quoted for it, as in other terminals. That's how you attach an image or a PDF to a program running there, like Claude Code.
+
 ## Reading it during a story
 
 While a story's command waits on the terminal for review, the keys read what's on it in AI mode, like a file that can't be edited:

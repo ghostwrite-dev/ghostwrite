@@ -102,6 +102,7 @@ const BY_HAND: &[(&str, &[(&str, &str)])] = &[
             ("any key", "goes to its shell, Esc too: no modes here; the model runs only what you accept"),
             ("⌘-click", "open a web address or file it shows"),
             ("drag  ⌘C", "select, copy"),
+            ("drop files", "their paths, quoted, on its line: attachments for what runs there"),
             ("⌘J", "hide it"),
             ("⌘T  ⌘W", "another shell in a tab, close it"),
             ("⌘⇧[  ⌘⇧]", "previous, next tab"),

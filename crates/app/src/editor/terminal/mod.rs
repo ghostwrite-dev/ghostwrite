@@ -34,8 +34,8 @@ use ghostwrite_core::{Mode, ViewKind};
 use ghostwrite_state::story::TerminalNow;
 use ghostwrite_terminal::{Button, LinkTo, Palette, Press, Terminal, Waited, link_in};
 use gpui::{
-    AnyElement, Context, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, Task, Window, div,
-    prelude::*,
+    AnyElement, Context, ExternalPaths, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, Task,
+    Window, div, prelude::*,
 };
 
 use super::Editor;
@@ -660,8 +660,28 @@ impl Editor {
 
     /// `cmd-v` typing in the terminal.
     pub(super) fn terminal_paste(&mut self, cx: &mut Context<Self>) {
-        let Some(terminal) = self.terminal.current() else { return };
         let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else { return };
+        self.paste_in_terminal(&text);
+    }
+
+    /// Files dropped on the terminal: their paths go on the shell's line, quoted for it and
+    /// pasted, as other terminals do, so a program there (Claude Code, say) can take them as
+    /// attachments. The keys go there, to go on typing.
+    pub(super) fn drop_on_terminal(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        if paths.is_empty() || self.terminal.current().is_none() {
+            return;
+        }
+        let text: Vec<String> = paths.iter().map(|path| shell_quoted(&path.to_string_lossy())).collect();
+        self.paste_in_terminal(&format!("{} ", text.join(" ")));
+        if !self.in_terminal() {
+            self.type_in_terminal(cx);
+        }
+        cx.notify();
+    }
+
+    /// `text` pasted in the terminal in front: bracketed, if the program there asks for that.
+    fn paste_in_terminal(&mut self, text: &str) {
+        let Some(terminal) = self.terminal.current() else { return };
         let text = if terminal.modes().bracketed_paste {
             format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
         } else {
@@ -812,6 +832,11 @@ impl Editor {
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.terminal_mouse_move(event, cx)))
                 .when(self.terminal.link.is_some(), |terminal| terminal.cursor_pointer())
                 .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| this.terminal_scroll(event, window, cx)))
+                .drag_over::<ExternalPaths>({
+                    let accent = theme.accent;
+                    move |style, _, _, _| style.border_color(accent)
+                })
+                .on_drop(cx.listener(|this, dropped: &ExternalPaths, _, cx| this.drop_on_terminal(dropped.paths(), cx)))
                 .children(self.render_shell_tabs(cx))
                 .child(div().flex_1().min_h_0().debug_selector(|| "terminal-screen".into()).child(TerminalView::new(cx.entity(), active)))
                 .child(self.terminal.height.handle("terminal-edge").on_mouse_down(
@@ -834,4 +859,32 @@ fn palette(theme: &Theme) -> Palette {
         [color.r, color.g, color.b].map(|c| (c * 255.).round() as u8)
     };
     Palette { foreground: rgb(theme.foreground), background: rgb(theme.background), cursor: rgb(theme.cursor_normal), ansi: theme.ansi.map(rgb) }
+}
+
+/// A path as a shell takes it as one word: each character it would read otherwise escaped with
+/// a backslash, as macOS's terminals drop files (on Windows, in double quotes if it needs them).
+fn shell_quoted(path: &str) -> String {
+    if cfg!(windows) {
+        return if path.contains([' ', '&', '(', ')', '\'', ';', ',']) { format!("\"{path}\"") } else { path.to_string() };
+    }
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if !(c.is_alphanumeric() || "/._-+,:@%=".contains(c)) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod quoting {
+    #[test]
+    #[cfg(not(windows))]
+    fn a_dropped_path_is_one_word_to_the_shell() {
+        assert_eq!(super::shell_quoted("/Users/me/shot.png"), "/Users/me/shot.png");
+        assert_eq!(super::shell_quoted("/Users/me/Screen Shot (2).png"), "/Users/me/Screen\\ Shot\\ \\(2\\).png");
+        assert_eq!(super::shell_quoted("/tmp/it's $HOME&;"), "/tmp/it\\'s\\ \\$HOME\\&\\;");
+        assert_eq!(super::shell_quoted("/tmp/café.pdf"), "/tmp/café.pdf", "letters of any language stay");
+    }
 }

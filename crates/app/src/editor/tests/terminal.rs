@@ -703,3 +703,20 @@ fn command_click_on_a_file_in_the_terminal_opens_it(cx: &mut TestAppContext) {
     assert_eq!(t.cursor(), 4, "at its line");
     assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "the keys on the code");
 }
+
+#[gpui::test]
+fn files_dropped_on_the_terminal_are_their_paths_on_the_shells_line(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut t = open("x\n", &[], cx);
+    let shot = t.dir.join("Screen Shot (2).png");
+    std::fs::write(&shot, "a picture\n").unwrap();
+    t.app_keys("cmd-j");
+    t.keys("c a t space");
+    wait_for(&mut t, |e| e.terminal_context().is_some_and(|text| text.contains("cat")));
+    t.editor.update(t.cx, |e, cx| e.focus_on(ViewKind::Code, cx));
+    assert_eq!(t.at(), (ViewKind::Code, Mode::Normal), "the keys are on the code, the terminal still up");
+    t.editor.update(t.cx, |e, cx| e.drop_on_terminal(std::slice::from_ref(&shot), cx));
+    assert_eq!(t.at(), (ViewKind::Terminal, Mode::Insert), "dropping goes there, to go on typing");
+    t.keys("enter");
+    wait_for(&mut t, printed("a picture"));
+}
